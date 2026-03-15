@@ -3,10 +3,10 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ltsearch::error::PublishError;
-use ltsearch::indexing::{IndexPublisher, PublishRequest, PublishStorage};
+use ltsearch::indexing::{IndexPublisher, PublishRequest, PublishStorage, RollbackRequest};
 use ltsearch::models::{IndexManifest, ShardManifest};
 use ltsearch::storage::{version_manifest_key, INDEX_HEAD_KEY};
 
@@ -186,6 +186,10 @@ fn head_json(version_id: u64, updated_at: i64) -> Vec<u8> {
     .into_bytes()
 }
 
+fn manifest_json(manifest: &IndexManifest) -> Vec<u8> {
+    serde_json::to_vec_pretty(manifest).unwrap()
+}
+
 fn s3_key(value: &str) -> String {
     value
         .split_once("//")
@@ -320,6 +324,207 @@ fn publisher_preserves_previous_version_artifacts_on_success() {
     assert_eq!(
         storage.objects.lock().unwrap().get("index/v8/shard_0"),
         Some(&StoredObject::Directory)
+    );
+}
+
+#[test]
+fn rollback_restores_previous_active_version() {
+    let build_root = temp_fixture_dir("publisher-rollback-restores-previous-active-version");
+    let current_manifest = sample_manifest(9);
+    create_source_build(&build_root, &current_manifest);
+
+    let previous_manifest = sample_manifest(8);
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(9, 1_700_000_000_500));
+    storage.seed_file(
+        &version_manifest_key(previous_manifest.version_id),
+        manifest_json(&previous_manifest),
+    );
+    storage.seed_file(
+        &version_manifest_key(current_manifest.version_id),
+        manifest_json(&current_manifest),
+    );
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let rolled_back = publisher
+        .rollback(&RollbackRequest {
+            target_version_id: previous_manifest.version_id,
+            expected_current_version: Some(current_manifest.version_id),
+            updated_at: 1_700_000_000_900,
+        })
+        .unwrap();
+
+    assert_eq!(rolled_back.previous_version_id, Some(9));
+    assert_eq!(rolled_back.activated_version_id, 8);
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(8, 1_700_000_000_900)
+    );
+    assert_eq!(
+        storage.calls(),
+        vec![
+            format!("read:{INDEX_HEAD_KEY}"),
+            format!("read:{}", version_manifest_key(8)),
+            format!("compare_and_swap:{INDEX_HEAD_KEY}"),
+        ]
+    );
+}
+
+#[test]
+fn rollback_rejects_stale_expected_current_version_before_target_lookup() {
+    let build_root = temp_fixture_dir("publisher-rollback-stale-expected-current-version");
+    let current_manifest = sample_manifest(9);
+    create_source_build(&build_root, &current_manifest);
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(9, 1_700_000_000_500));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let error = publisher
+        .rollback(&RollbackRequest {
+            target_version_id: 8,
+            expected_current_version: Some(7),
+            updated_at: 1_700_000_000_900,
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("conflict"));
+    assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(9, 1_700_000_000_500)
+    );
+}
+
+#[test]
+fn rollback_rejects_compare_and_swap_conflict_without_corrupting_active_version() {
+    let build_root = temp_fixture_dir("publisher-rollback-compare-and-swap-conflict");
+    let current_manifest = sample_manifest(9);
+    create_source_build(&build_root, &current_manifest);
+
+    let previous_manifest = sample_manifest(8);
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(9, 1_700_000_000_500));
+    storage.seed_file(
+        &version_manifest_key(previous_manifest.version_id),
+        manifest_json(&previous_manifest),
+    );
+    storage.conflict_on_compare_and_swap(head_json(10, 1_700_000_001_000));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let error = publisher
+        .rollback(&RollbackRequest {
+            target_version_id: previous_manifest.version_id,
+            expected_current_version: Some(current_manifest.version_id),
+            updated_at: 1_700_000_000_900,
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("conflict"));
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(10, 1_700_000_001_000)
+    );
+}
+
+#[test]
+fn rollback_rejects_missing_target_manifest_before_head_update() {
+    let build_root = temp_fixture_dir("publisher-rollback-missing-target-manifest");
+    let current_manifest = sample_manifest(9);
+    create_source_build(&build_root, &current_manifest);
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(9, 1_700_000_000_500));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let error = publisher
+        .rollback(&RollbackRequest {
+            target_version_id: 8,
+            expected_current_version: Some(current_manifest.version_id),
+            updated_at: 1_700_000_000_900,
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("missing"));
+    assert_eq!(
+        storage.calls(),
+        vec![
+            format!("read:{INDEX_HEAD_KEY}"),
+            format!("read:{}", version_manifest_key(8)),
+        ]
+    );
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(9, 1_700_000_000_500)
+    );
+}
+
+#[test]
+fn rollback_rejects_invalid_target_manifest_before_head_update() {
+    let build_root = temp_fixture_dir("publisher-rollback-invalid-target-manifest");
+    let current_manifest = sample_manifest(9);
+    create_source_build(&build_root, &current_manifest);
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(9, 1_700_000_000_500));
+    storage.seed_file(&version_manifest_key(8), br#"{ not valid json }"#.to_vec());
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let error = publisher
+        .rollback(&RollbackRequest {
+            target_version_id: 8,
+            expected_current_version: Some(current_manifest.version_id),
+            updated_at: 1_700_000_000_900,
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("manifest"));
+    assert_eq!(
+        storage.calls(),
+        vec![
+            format!("read:{INDEX_HEAD_KEY}"),
+            format!("read:{}", version_manifest_key(8)),
+        ]
+    );
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(9, 1_700_000_000_500)
+    );
+}
+
+#[test]
+fn rollback_rejects_target_manifest_with_mismatched_version_id_before_head_update() {
+    let build_root = temp_fixture_dir("publisher-rollback-mismatched-target-version-id");
+    let current_manifest = sample_manifest(9);
+    create_source_build(&build_root, &current_manifest);
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(9, 1_700_000_000_500));
+    storage.seed_file(&version_manifest_key(8), manifest_json(&sample_manifest(7)));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let error = publisher
+        .rollback(&RollbackRequest {
+            target_version_id: 8,
+            expected_current_version: Some(current_manifest.version_id),
+            updated_at: 1_700_000_000_900,
+        })
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("rollback target version")
+            || error.to_string().contains("does not match")
+    );
+    assert_eq!(
+        storage.calls(),
+        vec![
+            format!("read:{INDEX_HEAD_KEY}"),
+            format!("read:{}", version_manifest_key(8)),
+        ]
+    );
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(9, 1_700_000_000_500)
     );
 }
 
@@ -579,6 +784,46 @@ fn publisher_rejects_nested_symlink_escape_inside_shard_directory() {
 }
 
 #[test]
+fn publisher_handles_symlink_cycle_inside_shard_directory_without_hanging() {
+    let build_root = temp_fixture_dir("publisher-symlink-cycle-inside-shard");
+    let manifest = sample_manifest(9);
+    create_source_build(&build_root, &manifest);
+
+    let shard_key = s3_key(&manifest.shards[0].lance_path);
+    unix_fs::symlink(
+        build_root.join(&shard_key),
+        build_root.join(&shard_key).join("cycle"),
+    )
+    .unwrap();
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(8, 1_700_000_000_100));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = publisher
+            .publish(&PublishRequest {
+                manifest,
+                expected_current_version: Some(8),
+                updated_at: 1_700_000_000_500,
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        let _ = tx.send(result);
+    });
+
+    let outcome = rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("publisher publish hung on symlink cycle");
+
+    match outcome {
+        Ok(()) => {}
+        Err(error) => panic!("publisher should not fail on in-root symlink cycle: {error}"),
+    }
+}
+
+#[test]
 fn publisher_validates_all_shards_before_starting_any_upload() {
     let build_root = temp_fixture_dir("publisher-validate-all-shards-first");
     let mut manifest = sample_manifest(9);
@@ -613,5 +858,31 @@ fn publisher_validates_all_shards_before_starting_any_upload() {
         .unwrap_err();
 
     assert!(error.to_string().contains("artifact") || error.to_string().contains("escape"));
+    assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
+}
+
+#[test]
+fn publisher_rejects_file_backed_shard_source_before_starting_any_upload() {
+    let build_root = temp_fixture_dir("publisher-file-backed-shard-source");
+    let manifest = sample_manifest(9);
+    create_source_build(&build_root, &manifest);
+
+    let shard_key = s3_key(&manifest.shards[0].lance_path);
+    fs::remove_dir_all(build_root.join(&shard_key)).unwrap();
+    write_fixture(&build_root, &shard_key, b"not a directory");
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(8, 1_700_000_000_100));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let error = publisher
+        .publish(&PublishRequest {
+            manifest,
+            expected_current_version: Some(8),
+            updated_at: 1_700_000_000_500,
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("directory"));
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }

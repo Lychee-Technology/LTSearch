@@ -21,6 +21,13 @@ pub struct PublishRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackRequest {
+    pub target_version_id: u64,
+    pub expected_current_version: Option<u64>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishResult {
     pub activated_version_id: u64,
     pub previous_version_id: Option<u64>,
@@ -138,6 +145,73 @@ where
 
         Ok(PublishResult {
             activated_version_id: request.manifest.version_id,
+            previous_version_id: current_head.map(|head| head.version_id),
+        })
+    }
+
+    pub fn rollback(&self, request: &RollbackRequest) -> Result<PublishResult, PublishError> {
+        validate_publish_version(request.target_version_id)?;
+        validate_updated_at(request.updated_at)?;
+
+        let current_head_bytes = self.storage.read(INDEX_HEAD_KEY)?;
+        let current_head = current_head_bytes.as_deref().map(parse_head).transpose()?;
+
+        if current_head.as_ref().map(|head| head.version_id) != request.expected_current_version {
+            return Err(PublishError::Operation {
+                message: format!(
+                    "rollback conflict: expected current version {:?}, found {:?}",
+                    request.expected_current_version,
+                    current_head.as_ref().map(|head| head.version_id)
+                ),
+            });
+        }
+
+        let target_manifest_key = version_manifest_key(request.target_version_id);
+        let target_manifest_bytes =
+            self.storage
+                .read(&target_manifest_key)?
+                .ok_or_else(|| PublishError::Operation {
+                    message: format!("rollback target manifest missing: {target_manifest_key}"),
+                })?;
+        validate_stored_manifest(
+            &target_manifest_key,
+            &target_manifest_bytes,
+            request.target_version_id,
+        )?;
+
+        let new_head = HeadDocument {
+            version_id: request.target_version_id,
+            manifest_path: target_manifest_key,
+            updated_at: request.updated_at,
+        };
+        let new_head_bytes =
+            serde_json::to_vec_pretty(&new_head).map_err(|source| PublishError::Operation {
+                message: format!("failed to serialize manifest head: {source}"),
+            })?;
+
+        let swapped = self.storage.compare_and_swap(
+            INDEX_HEAD_KEY,
+            current_head_bytes.as_deref(),
+            &new_head_bytes,
+        )?;
+        if !swapped {
+            let observed = self
+                .storage
+                .read(INDEX_HEAD_KEY)?
+                .as_deref()
+                .map(parse_head)
+                .transpose()?
+                .map(|head| head.version_id);
+            return Err(PublishError::Operation {
+                message: format!(
+                    "rollback conflict: active version changed during _head update (expected {:?}, observed {:?})",
+                    request.expected_current_version, observed
+                ),
+            });
+        }
+
+        Ok(PublishResult {
+            activated_version_id: request.target_version_id,
             previous_version_id: current_head.map(|head| head.version_id),
         })
     }
@@ -304,10 +378,44 @@ fn validate_manifest_file_matches_request(
     Ok(())
 }
 
+fn validate_stored_manifest(
+    key: &str,
+    bytes: &[u8],
+    expected_version_id: u64,
+) -> Result<(), PublishError> {
+    let manifest = serde_json::from_slice::<IndexManifest>(bytes).map_err(|source| {
+        PublishError::Operation {
+            message: format!("failed to parse stored manifest {key}: {source}"),
+        }
+    })?;
+    manifest.validate()?;
+    if manifest.version_id != expected_version_id {
+        return Err(PublishError::Operation {
+            message: format!(
+                "stored manifest {key} does not match rollback target version {expected_version_id}"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 fn validate_directory_tree_within_root(
     artifact_root: &Path,
     directory: &Path,
 ) -> Result<(), PublishError> {
+    let directory_metadata = fs::metadata(directory).map_err(|source| PublishError::Operation {
+        message: format!(
+            "failed to inspect artifact source {}: {source}",
+            directory.display()
+        ),
+    })?;
+    if !directory_metadata.is_dir() {
+        return Err(PublishError::Operation {
+            message: format!("publish source is not a directory: {}", directory.display()),
+        });
+    }
+
     let root = artifact_root
         .canonicalize()
         .map_err(|source| PublishError::Operation {
@@ -344,6 +452,8 @@ fn validate_directory_tree_within_root(
                     ),
                 });
             }
+
+            continue;
         }
 
         if current.is_dir() {
