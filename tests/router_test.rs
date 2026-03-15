@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use arrow_array::types::Float32Type;
+use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
 use ltsearch::error::{SearchError, ValidationError};
 use ltsearch::models::{
@@ -22,6 +25,7 @@ use tantivy::collector::TopDocs;
 use tantivy::doc;
 use tantivy::schema::{Schema, STORED, TEXT};
 use tantivy::{Index, IndexWriter};
+use tokio::runtime::Runtime;
 
 type EmbeddingOutcome = Result<Vec<f32>, EmbeddingError>;
 type EmbeddingOutcomes = Arc<Mutex<Vec<EmbeddingOutcome>>>;
@@ -118,10 +122,74 @@ fn write_index_with_metadata(
         .unwrap();
 }
 
-fn write_rows_json(root: &Path, relative_path: &str, rows_json: &str) {
-    let path = root.join(relative_path).join("rows.json");
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, rows_json).unwrap();
+fn write_lance_fixture(root: &Path, relative_path: &str, rows: &[serde_json::Value]) {
+    let shard_dir = root.join(relative_path);
+    fs::create_dir_all(&shard_dir).unwrap();
+
+    let shard_dir_string = shard_dir.to_str().unwrap().to_string();
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("doc_id", DataType::Utf8, false),
+        Field::new("text", DataType::Utf8, false),
+        Field::new("metadata", DataType::Utf8, false),
+        Field::new("timestamp", DataType::Int64, false),
+        Field::new(
+            "embedding",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                3,
+            ),
+            true,
+        ),
+    ]));
+
+    let doc_ids = StringArray::from(
+        rows.iter()
+            .map(|row| row["doc_id"].as_str())
+            .collect::<Vec<_>>(),
+    );
+    let texts = StringArray::from(
+        rows.iter()
+            .map(|row| row["text"].as_str())
+            .collect::<Vec<_>>(),
+    );
+    let metadata = StringArray::from(
+        rows.iter()
+            .map(|row| serde_json::to_string(row.get("metadata").unwrap_or(&json!({}))).unwrap())
+            .collect::<Vec<_>>(),
+    );
+    let timestamps = Int64Array::from(vec![0_i64; rows.len()]);
+    let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        rows.iter().map(|row| {
+            row["embedding"].as_array().map(|embedding| {
+                embedding
+                    .iter()
+                    .map(|value| Some(value.as_f64().unwrap() as f32))
+                    .collect::<Vec<_>>()
+            })
+        }),
+        3,
+    );
+
+    Runtime::new().unwrap().block_on(async move {
+        let conn = lancedb::connect(&shard_dir_string).execute().await.unwrap();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(doc_ids),
+                Arc::new(texts),
+                Arc::new(metadata),
+                Arc::new(timestamps),
+                Arc::new(embeddings),
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+
+        conn.create_table("documents", batches)
+            .execute()
+            .await
+            .unwrap();
+    });
 }
 
 fn sample_head_json(version_id: u64) -> String {
@@ -517,11 +585,7 @@ fn router_fuses_hybrid_results_and_runs_retrievers_in_parallel() {
 
     let keyword_started = keyword.recorder.starts()[0];
     let vector_started = vector.recorder.starts()[0];
-    let started_gap = if keyword_started >= vector_started {
-        keyword_started - vector_started
-    } else {
-        vector_started - keyword_started
-    };
+    let started_gap = keyword_started.abs_diff(vector_started);
     assert!(
         started_gap < Duration::from_millis(80),
         "expected keyword/vector retrieval to start in parallel, gap was {started_gap:?}"
@@ -682,13 +746,13 @@ fn router_uses_concrete_retrievers_without_forwarding_router_only_request_fields
         "index/v7/shard_0",
         &[("doc-1", "rust hybrid search"), ("doc-2", "rust keyword")],
     );
-    write_rows_json(
+    write_lance_fixture(
         &root,
         "lance/v7/shard_0",
-        r#"[
-  {"doc_id":"doc-1","text":"rust hybrid search","embedding":[0.9,0.0,0.0]},
-  {"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0]}
-]"#,
+        &[
+            json!({"doc_id":"doc-1","text":"rust hybrid search","embedding":[0.9,0.0,0.0]}),
+            json!({"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0]}),
+        ],
     );
 
     let router = QueryRouter::new(
@@ -721,13 +785,13 @@ fn router_applies_non_empty_filters_with_concrete_retrievers_using_local_metadat
         "index/v7/shard_0",
         &[("doc-1", "rust hybrid search"), ("doc-2", "rust keyword")],
     );
-    write_rows_json(
+    write_lance_fixture(
         &root,
         "lance/v7/shard_0",
-        r#"[
-  {"doc_id":"doc-1","text":"rust hybrid search","embedding":[0.9,0.0,0.0],"metadata":{"lang":"rust","published":true}},
-  {"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0],"metadata":{"lang":"go","published":true}}
-]"#,
+        &[
+            json!({"doc_id":"doc-1","text":"rust hybrid search","embedding":[0.9,0.0,0.0],"metadata":{"lang":"rust","published":true}}),
+            json!({"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0],"metadata":{"lang":"go","published":true}}),
+        ],
     );
 
     let router = QueryRouter::new(
@@ -1020,13 +1084,13 @@ fn router_applies_non_empty_filters_with_keyword_only_fallback_using_concrete_me
             ),
         ],
     );
-    write_rows_json(
+    write_lance_fixture(
         &root,
         "lance/v7/shard_0",
-        r#"[
-  {"doc_id":"doc-1","text":"rust hybrid search","embedding":[0.9,0.0,0.0]},
-  {"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0]}
-]"#,
+        &[
+            json!({"doc_id":"doc-1","text":"rust hybrid search","embedding":[0.9,0.0,0.0]}),
+            json!({"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0]}),
+        ],
     );
 
     let router = QueryRouter::new(
