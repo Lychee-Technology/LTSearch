@@ -481,6 +481,8 @@ pub async fn publish_index(
 - Previous version remains available for rollback
 - Operation is atomic (either fully succeeds or fully fails)
 
+`_head.manifest_path` stores the canonical bucket-relative manifest object key, not a full S3 URI. Its value must match `index/versions/<version_id>/manifest.json` for the active version.
+
 **Loop Invariants:** N/A (atomic operation)
 
 ## Algorithmic Pseudocode

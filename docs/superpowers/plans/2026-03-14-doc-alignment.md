@@ -102,7 +102,7 @@ Document the fields stored in `_head`, for example:
 ```json
 {
   "version_id": 42,
-  "manifest_path": "s3://bucket/index/versions/42/manifest.json",
+  "manifest_path": "index/versions/42/manifest.json",
   "updated_at": 1710000000000
 }
 ```
