@@ -28,6 +28,10 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, Linux, ARM64]", lint)
         self.assertIn("timeout-minutes: 20", lint)
         self.assertIn("uses: actions/checkout@v4", lint)
+        self.assertIn(
+            "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+            lint,
+        )
         self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", lint)
         self.assertIn("cache: true", lint)
         self.assertIn("run: python3 -B -m unittest tests/test_ci_workflow.py", lint)
@@ -39,6 +43,7 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("runs-on: [self-hosted, Linux, ARM64]", test)
         self.assertIn("timeout-minutes: 30", test)
         self.assertIn("uses: actions/checkout@v4", test)
+        self.assertNotIn("github.event.pull_request.head.sha", test)
         self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", test)
         self.assertIn("cache: true", test)
         self.assertIn("run: cargo test", test)
