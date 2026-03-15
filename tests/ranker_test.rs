@@ -1,5 +1,6 @@
 use ltsearch::models::{SearchResult, SearchSource};
 use ltsearch::query::HybridRanker;
+use serde_json::json;
 
 fn sample_result(doc_id: &str, score: f32, source: SearchSource) -> SearchResult {
     SearchResult {
@@ -105,4 +106,60 @@ fn fuse_accumulates_rrf_scores_from_mixed_ranks() {
     assert_close(fused[0].score, (1.0 / 13.0) + (1.0 / 11.0));
     assert_close(fused[1].score, (1.0 / 12.0) + (1.0 / 12.0));
     assert_close(fused[2].score, 1.0 / 11.0);
+}
+
+#[test]
+fn fuse_preserves_metadata_from_duplicate_result_when_available() {
+    let ranker = HybridRanker::new(60.0);
+    let vector_results = vec![sample_result("doc-1", 0.91, SearchSource::Vector)];
+    let keyword_results = vec![SearchResult {
+        doc_id: "doc-1".into(),
+        score: 12.0,
+        text: "text for doc-1".into(),
+        metadata: Some(std::collections::HashMap::from([(
+            "lang".into(),
+            json!("rust"),
+        )])),
+        source: SearchSource::Keyword,
+    }];
+
+    let fused = ranker.fuse(vector_results, keyword_results);
+
+    assert_eq!(fused.len(), 1);
+    assert_eq!(fused[0].doc_id, "doc-1");
+    assert_eq!(fused[0].source, SearchSource::Hybrid);
+    assert_eq!(fused[0].metadata.as_ref().unwrap()["lang"], json!("rust"));
+}
+
+#[test]
+fn fuse_merges_metadata_maps_from_duplicate_results() {
+    let ranker = HybridRanker::new(60.0);
+    let vector_results = vec![SearchResult {
+        doc_id: "doc-1".into(),
+        score: 0.91,
+        text: "text for doc-1".into(),
+        metadata: Some(std::collections::HashMap::from([
+            ("lang".into(), json!("rust")),
+            ("source".into(), json!("vector")),
+        ])),
+        source: SearchSource::Vector,
+    }];
+    let keyword_results = vec![SearchResult {
+        doc_id: "doc-1".into(),
+        score: 12.0,
+        text: "text for doc-1".into(),
+        metadata: Some(std::collections::HashMap::from([
+            ("category".into(), json!("guide")),
+            ("source".into(), json!("keyword")),
+        ])),
+        source: SearchSource::Keyword,
+    }];
+
+    let fused = ranker.fuse(vector_results, keyword_results);
+
+    assert_eq!(fused.len(), 1);
+    let metadata = fused[0].metadata.as_ref().unwrap();
+    assert_eq!(metadata["lang"], json!("rust"));
+    assert_eq!(metadata["category"], json!("guide"));
+    assert_eq!(metadata["source"], json!("vector"));
 }

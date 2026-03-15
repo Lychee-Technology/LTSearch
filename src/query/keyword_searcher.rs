@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
+use serde_json::Value;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::{DocAddress, Document, Index, ReloadPolicy};
 
 use crate::error::{SearchError, ValidationError};
 use crate::models::{SearchRequest, SearchResult, SearchSource, ShardManifest};
-use crate::storage::ManifestStore;
+use crate::storage::{ActiveManifest, ManifestStore};
 
 const DOC_ID_FIELD: &str = "doc_id";
 const TEXT_FIELD: &str = "text";
+const METADATA_FIELD: &str = "metadata";
 const QUERY_MAX_CHARS: usize = 1_000;
 const TOP_K_MAX: usize = 100;
 
@@ -41,6 +43,18 @@ where
             .map_err(|source| SearchError::Execution {
                 message: source.to_string(),
             })?;
+
+        self.search_active_manifest(&active_manifest, query, top_k)
+    }
+
+    pub fn search_active_manifest(
+        &self,
+        active_manifest: &ActiveManifest,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        validate_query(query)?;
+        validate_top_k(top_k)?;
 
         if active_manifest.manifest.shards.len() != 1 {
             return Err(SearchError::Execution {
@@ -99,6 +113,7 @@ where
             .map_err(|source| SearchError::Execution {
                 message: format!("missing {TEXT_FIELD} field: {source}"),
             })?;
+        let metadata_field = schema.get_field(METADATA_FIELD).ok();
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
@@ -122,7 +137,14 @@ where
                     message: format!("failed to execute Tantivy query: {source}"),
                 })?;
 
-            let results = dedupe_top_docs(&searcher, top_docs, doc_id_field, text_field, top_k)?;
+            let results = dedupe_top_docs(
+                &searcher,
+                top_docs,
+                doc_id_field,
+                text_field,
+                metadata_field,
+                top_k,
+            )?;
 
             if results.len() >= top_k || limit >= max_docs {
                 return Ok(results);
@@ -161,12 +183,20 @@ fn dedupe_top_docs(
     top_docs: Vec<(f32, DocAddress)>,
     doc_id_field: tantivy::schema::Field,
     text_field: tantivy::schema::Field,
+    metadata_field: Option<tantivy::schema::Field>,
     top_k: usize,
 ) -> Result<Vec<SearchResult>, SearchError> {
     let mut deduped: HashMap<String, SearchResult> = HashMap::new();
 
     for (score, address) in top_docs {
-        let result = build_search_result(searcher, address, doc_id_field, text_field, score)?;
+        let result = build_search_result(
+            searcher,
+            address,
+            doc_id_field,
+            text_field,
+            metadata_field,
+            score,
+        )?;
 
         match deduped.get(&result.doc_id) {
             Some(existing) if existing.score >= result.score => {}
@@ -224,6 +254,7 @@ fn build_search_result(
     address: DocAddress,
     doc_id_field: tantivy::schema::Field,
     text_field: tantivy::schema::Field,
+    metadata_field: Option<tantivy::schema::Field>,
     score: f32,
 ) -> Result<SearchResult, SearchError> {
     let document: Document = searcher
@@ -243,12 +274,34 @@ fn build_search_result(
         .ok_or_else(|| SearchError::Execution {
             message: format!("matched document is missing {TEXT_FIELD}"),
         })?;
+    let metadata = load_metadata(&document, metadata_field)?;
 
     Ok(SearchResult {
         doc_id: doc_id.to_string(),
         score,
         text: text.to_string(),
-        metadata: None,
+        metadata,
         source: SearchSource::Keyword,
     })
+}
+
+fn load_metadata(
+    document: &Document,
+    metadata_field: Option<tantivy::schema::Field>,
+) -> Result<Option<HashMap<String, Value>>, SearchError> {
+    let Some(metadata_field) = metadata_field else {
+        return Ok(None);
+    };
+    let Some(metadata_json) = document
+        .get_first(metadata_field)
+        .and_then(|value| value.as_text())
+    else {
+        return Ok(None);
+    };
+
+    serde_json::from_str(metadata_json)
+        .map(Some)
+        .map_err(|source| SearchError::Execution {
+            message: format!("matched document has invalid {METADATA_FIELD}: {source}"),
+        })
 }
