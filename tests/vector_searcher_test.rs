@@ -710,8 +710,8 @@ fn vector_searcher_resets_cache_stats_when_active_manifest_version_changes() {
         ],
     );
 
-    let v8_total_bytes = shard_dir_size(&root, "lance/v8/shard_0")
-        + shard_dir_size(&root, "lance/v8/shard_1");
+    let v8_total_bytes =
+        shard_dir_size(&root, "lance/v8/shard_0") + shard_dir_size(&root, "lance/v8/shard_1");
 
     searcher.search(&[1.0, 0.0, 0.0], 2).unwrap();
 
@@ -802,6 +802,8 @@ fn vector_searcher_maps_lancedb_distance_to_similarity_scores() {
     assert!((results[2].score - 0.5).abs() < f32::EPSILON);
     assert!(results[0].score >= results[1].score);
     assert!(results[1].score >= results[2].score);
-    assert!(results.iter().all(|result| (0.0..=1.0).contains(&result.score)));
+    assert!(results
+        .iter()
+        .all(|result| (0.0..=1.0).contains(&result.score)));
     assert!(results.iter().all(|result| result.score.is_finite()));
 }

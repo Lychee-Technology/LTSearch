@@ -362,7 +362,9 @@ fn local_index_builder_reports_cleanup_failure_after_publish_error() {
     restore.set_mode(0o755);
     fs::set_permissions(&root, restore).unwrap();
 
-    assert!(error.to_string().contains("failed to publish staged artifact"));
+    assert!(error
+        .to_string()
+        .contains("failed to publish staged artifact"));
     assert!(error.to_string().contains("cleanup failed"));
 }
 
@@ -476,7 +478,10 @@ fn local_index_builder_generates_missing_embeddings_and_writes_searcher_compatib
     assert_eq!(vector_results.len(), 2);
     assert_eq!(vector_results[0].doc_id, "doc-kept");
     assert_eq!(vector_results[0].text, "stable body");
-    assert_eq!(vector_results[0].metadata.as_ref().unwrap()["lang"], json!("rust"));
+    assert_eq!(
+        vector_results[0].metadata.as_ref().unwrap()["lang"],
+        json!("rust")
+    );
     assert_eq!(vector_results[0].score, 1.0);
     assert_eq!(vector_results[1].doc_id, "doc-generated");
     assert_eq!(vector_results[1].text, "generated body");

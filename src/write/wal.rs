@@ -28,7 +28,11 @@ where
         })?;
         line.push(b'\n');
 
-        self.storage.append(key, &line)
+        self.append_bytes(key, &line)
+    }
+
+    pub fn append_bytes(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
+        self.storage.append(key, bytes)
     }
 
     pub fn read(&self, key: &str) -> Result<Vec<WalRecord>, IngestError> {

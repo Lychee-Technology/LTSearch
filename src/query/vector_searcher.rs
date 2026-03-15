@@ -9,8 +9,8 @@ use std::thread;
 use arrow_array::{Array, Float32Array, Float64Array, RecordBatch, StringArray};
 use arrow_schema::DataType;
 use futures::TryStreamExt;
-use lancedb::DistanceType;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::DistanceType;
 use serde_json::Value;
 
 use crate::error::{SearchError, ValidationError};
@@ -217,15 +217,16 @@ where
                 }
             }
 
-            let row_count = table
-                .count_rows(None)
-                .await
-                .map_err(|source| SearchError::Execution {
-                    message: format!(
-                        "failed to count rows in local LanceDB documents table at {}: {source}",
-                        shard_path_for_error.display()
-                    ),
-                })? as usize;
+            let row_count =
+                table
+                    .count_rows(None)
+                    .await
+                    .map_err(|source| SearchError::Execution {
+                        message: format!(
+                            "failed to count rows in local LanceDB documents table at {}: {source}",
+                            shard_path_for_error.display()
+                        ),
+                    })? as usize;
 
             if row_count == 0 {
                 return Ok(Vec::new());
@@ -282,12 +283,7 @@ where
         inspect_path_tree_within_artifact_root(&self.artifact_root, shard_path)
     }
 
-    fn record_shard_access(
-        &self,
-        shard_path: &Path,
-        version_id: u64,
-        shard_size: u64,
-    ) {
+    fn record_shard_access(&self, shard_path: &Path, version_id: u64, shard_size: u64) {
         let mut cache = self
             .cache
             .lock()
@@ -301,7 +297,9 @@ where
             None => {
                 cache.miss_count += 1;
                 cache.bytes_used += shard_size;
-                cache.seen_shards.insert(shard_path.to_path_buf(), shard_size);
+                cache
+                    .seen_shards
+                    .insert(shard_path.to_path_buf(), shard_size);
             }
         }
     }
@@ -450,12 +448,14 @@ fn inspect_path_tree_within_artifact_root(
     let mut total_bytes = 0;
 
     while let Some(path) = pending.pop() {
-        let canonical_path = path.canonicalize().map_err(|source| SearchError::Execution {
-            message: format!(
-                "failed to canonicalize local LanceDB documents path {}: {source}",
-                path.display()
-            ),
-        })?;
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|source| SearchError::Execution {
+                message: format!(
+                    "failed to canonicalize local LanceDB documents path {}: {source}",
+                    path.display()
+                ),
+            })?;
 
         if !canonical_path.starts_with(&canonical_artifact_root) {
             return Err(SearchError::Execution {
@@ -494,13 +494,16 @@ fn inspect_path_tree_within_artifact_root(
                     canonical_path.display()
                 ),
             })? {
-                pending.push(entry.map_err(|source| SearchError::Execution {
-                    message: format!(
+                pending.push(
+                    entry
+                        .map_err(|source| SearchError::Execution {
+                            message: format!(
                         "failed to read local LanceDB artifact directory entry in {}: {source}",
                         canonical_path.display()
                     ),
-                })?
-                .path());
+                        })?
+                        .path(),
+                );
             }
         }
     }
@@ -518,18 +521,20 @@ fn decode_lancedb_batches(
         let doc_ids = downcast_string_column(batch, DOC_ID_COLUMN_NAME, shard_path)?;
         let texts = downcast_string_column(batch, TEXT_COLUMN_NAME, shard_path)?;
         let metadata = downcast_string_column(batch, METADATA_COLUMN_NAME, shard_path)?;
-        let distances = batch
-            .column_by_name(DISTANCE_COLUMN_NAME)
-            .ok_or_else(|| SearchError::Execution {
-                message: format!(
-                    "local LanceDB query did not return {} column at {}",
-                    DISTANCE_COLUMN_NAME,
-                    shard_path.display()
-                ),
-            })?;
+        let distances =
+            batch
+                .column_by_name(DISTANCE_COLUMN_NAME)
+                .ok_or_else(|| SearchError::Execution {
+                    message: format!(
+                        "local LanceDB query did not return {} column at {}",
+                        DISTANCE_COLUMN_NAME,
+                        shard_path.display()
+                    ),
+                })?;
 
         for index in 0..batch.num_rows() {
-            let score = lancedb_distance_to_score(distance_value(distances.as_ref(), index, shard_path)?)?;
+            let score =
+                lancedb_distance_to_score(distance_value(distances.as_ref(), index, shard_path)?)?;
             let metadata = parse_metadata_json(metadata.value(index), shard_path)?;
             let result = SearchResult {
                 doc_id: doc_ids.value(index).to_string(),
@@ -572,7 +577,11 @@ fn downcast_string_column<'a>(
         })
 }
 
-fn distance_value(distance_column: &dyn Array, index: usize, shard_path: &Path) -> Result<f32, SearchError> {
+fn distance_value(
+    distance_column: &dyn Array,
+    index: usize,
+    shard_path: &Path,
+) -> Result<f32, SearchError> {
     if let Some(values) = distance_column.as_any().downcast_ref::<Float32Array>() {
         return Ok(values.value(index));
     }
@@ -606,14 +615,15 @@ fn parse_metadata_json(
     metadata_json: &str,
     shard_path: &Path,
 ) -> Result<Option<HashMap<String, Value>>, SearchError> {
-    let metadata = serde_json::from_str::<HashMap<String, Value>>(metadata_json).map_err(|source| {
-        SearchError::Execution {
-            message: format!(
-                "failed to parse metadata from local LanceDB documents table at {}: {source}",
-                shard_path.display()
-            ),
-        }
-    })?;
+    let metadata =
+        serde_json::from_str::<HashMap<String, Value>>(metadata_json).map_err(|source| {
+            SearchError::Execution {
+                message: format!(
+                    "failed to parse metadata from local LanceDB documents table at {}: {source}",
+                    shard_path.display()
+                ),
+            }
+        })?;
 
     if metadata.is_empty() {
         Ok(None)
