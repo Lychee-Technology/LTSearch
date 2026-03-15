@@ -138,6 +138,31 @@ fn vector_searcher_loads_active_manifest_and_returns_top_k_results() {
 }
 
 #[test]
+fn vector_searcher_includes_metadata_when_local_rows_have_it() {
+    let root = temp_fixture_dir("vector-searcher-metadata");
+    write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(7));
+    write_fixture(&root, &version_manifest_key(7), &sample_manifest_json(7));
+    write_lance_fixture(
+        &root,
+        "lance/v7/shard_0",
+        &[
+            json!({"doc_id": "doc-1", "text": "alpha", "embedding": [1.0, 0.0, 0.0], "metadata": {"lang": "rust", "published": true}}),
+            json!({"doc_id": "doc-2", "text": "beta", "embedding": [0.8, 0.6, 0.0], "metadata": {"lang": "go", "published": true}}),
+            json!({"doc_id": "doc-3", "text": "gamma", "embedding": [0.0, 1.0, 0.0]}),
+        ],
+    );
+    write_lance_fixture(&root, "lance/v7/shard_1", &[]);
+
+    let searcher = VectorSearcher::new(LocalManifestStore::new(&root), &root);
+
+    let results = searcher.search(&[1.0, 0.0, 0.0], 3).unwrap();
+
+    assert_eq!(results[0].metadata.as_ref().unwrap()["lang"], json!("rust"));
+    assert_eq!(results[1].metadata.as_ref().unwrap()["lang"], json!("go"));
+    assert!(results[2].metadata.is_none());
+}
+
+#[test]
 fn vector_searcher_rejects_query_embeddings_with_wrong_dimension() {
     let root = temp_fixture_dir("vector-searcher-dim-mismatch");
     write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(7));

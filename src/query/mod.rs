@@ -1,9 +1,12 @@
+pub mod filter;
 pub mod keyword_searcher;
 pub mod ranker;
+pub mod router;
 pub mod vector_searcher;
 
 pub struct ModuleBoundary;
 
 pub use keyword_searcher::KeywordSearcher;
 pub use ranker::HybridRanker;
+pub use router::{KeywordRetriever, QueryRouter, VectorRetriever};
 pub use vector_searcher::VectorSearcher;

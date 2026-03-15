@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ltsearch::models::{FilterValue, SearchRequest};
 use ltsearch::query::KeywordSearcher;
 use ltsearch::storage::{version_manifest_key, LocalManifestStore, INDEX_HEAD_KEY};
+use serde_json::json;
 use tantivy::collector::TopDocs;
 use tantivy::doc;
 use tantivy::schema::{Schema, STORED, TEXT};
@@ -47,6 +48,46 @@ fn write_index(root: &Path, relative_path: &str, documents: &[(&str, &str)]) {
     for (document_id, body) in documents {
         writer
             .add_document(doc!(doc_id => (*document_id).to_string(), text => (*body).to_string()))
+            .unwrap();
+    }
+
+    writer.commit().unwrap();
+    index
+        .reader_builder()
+        .try_into()
+        .unwrap()
+        .searcher()
+        .search(
+            &tantivy::query::AllQuery,
+            &TopDocs::with_limit(documents.len().max(1)),
+        )
+        .unwrap();
+}
+
+fn write_index_with_metadata(
+    root: &Path,
+    relative_path: &str,
+    documents: &[(&str, &str, serde_json::Value)],
+) {
+    let index_path = root.join(relative_path);
+    fs::create_dir_all(&index_path).unwrap();
+
+    let mut schema_builder = Schema::builder();
+    let doc_id = schema_builder.add_text_field("doc_id", TEXT | STORED);
+    let text = schema_builder.add_text_field("text", TEXT | STORED);
+    let metadata = schema_builder.add_text_field("metadata", STORED);
+    let schema = schema_builder.build();
+
+    let index = Index::create_in_dir(&index_path, schema).unwrap();
+    let mut writer: IndexWriter = index.writer(15_000_000).unwrap();
+
+    for (document_id, body, metadata_value) in documents {
+        writer
+            .add_document(doc!(
+                doc_id => (*document_id).to_string(),
+                text => (*body).to_string(),
+                metadata => metadata_value.to_string(),
+            ))
             .unwrap();
     }
 
@@ -128,6 +169,37 @@ fn keyword_searcher_returns_top_k_results_from_single_shard_manifest() {
     assert_eq!(results[0].doc_id, "doc-2");
     assert_eq!(results[1].doc_id, "doc-1");
     assert!(results.iter().all(|result| result.metadata.is_none()));
+}
+
+#[test]
+fn keyword_searcher_includes_metadata_when_local_index_stores_it() {
+    let root = temp_fixture_dir("keyword-searcher-metadata");
+    write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(7));
+    write_fixture(&root, &version_manifest_key(7), &sample_manifest_json(7, 1));
+    write_index_with_metadata(
+        &root,
+        "index/v7/shard_0",
+        &[
+            (
+                "doc-1",
+                "rust keyword search",
+                json!({"lang":"rust","published":true}),
+            ),
+            ("doc-2", "rust", json!({"lang":"go","published":true})),
+        ],
+    );
+
+    let searcher = KeywordSearcher::new(LocalManifestStore::new(&root), &root);
+
+    let results = searcher.search("rust", 2).unwrap();
+
+    let metadata_by_doc_id = results
+        .into_iter()
+        .map(|result| (result.doc_id, result.metadata.unwrap()))
+        .collect::<HashMap<_, _>>();
+
+    assert_eq!(metadata_by_doc_id["doc-1"]["lang"], json!("rust"));
+    assert_eq!(metadata_by_doc_id["doc-2"]["lang"], json!("go"));
 }
 
 #[test]

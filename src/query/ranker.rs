@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 use crate::models::{SearchResult, SearchSource};
@@ -35,7 +36,14 @@ impl HybridRanker {
         for (index, result) in keyword_results.into_iter().enumerate() {
             let rank = index + 1;
             *rrf_scores.entry(result.doc_id.clone()).or_insert(0.0) += self.compute_rrf_score(rank);
-            doc_map.entry(result.doc_id.clone()).or_insert(result);
+            match doc_map.entry(result.doc_id.clone()) {
+                Entry::Occupied(mut entry) => {
+                    merge_result_payload(entry.get_mut(), result);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(result);
+                }
+            }
         }
 
         let mut fused: Vec<SearchResult> = rrf_scores
@@ -57,5 +65,26 @@ impl HybridRanker {
         });
 
         fused
+    }
+}
+
+fn merge_result_payload(existing: &mut SearchResult, incoming: SearchResult) {
+    merge_metadata(&mut existing.metadata, incoming.metadata);
+}
+
+fn merge_metadata(
+    existing: &mut Option<HashMap<String, serde_json::Value>>,
+    incoming: Option<HashMap<String, serde_json::Value>>,
+) {
+    match (existing, incoming) {
+        (Some(existing_map), Some(incoming_map)) => {
+            for (key, value) in incoming_map {
+                existing_map.entry(key).or_insert(value);
+            }
+        }
+        (slot @ None, Some(incoming_map)) => {
+            *slot = Some(incoming_map);
+        }
+        _ => {}
     }
 }

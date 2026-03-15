@@ -4,10 +4,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::error::{SearchError, ValidationError};
 use crate::models::{CacheStats, SearchRequest, SearchResult, SearchSource, ShardManifest};
-use crate::storage::ManifestStore;
+use crate::storage::{ActiveManifest, ManifestStore};
 
 // Local-only MVP stand-in for Lance/LanceDB integration.
 // Each resolved lance_path directory must contain a rows.json file with an
@@ -62,6 +63,18 @@ where
                 message: source.to_string(),
             })?;
 
+        self.search_active_manifest(&active_manifest, query_embedding, top_k)
+    }
+
+    pub fn search_active_manifest(
+        &self,
+        active_manifest: &ActiveManifest,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        validate_query_embedding(query_embedding)?;
+        validate_top_k(top_k)?;
+
         if query_embedding.len() != active_manifest.manifest.embedding_dim {
             return Err(SearchError::Validation(ValidationError::InvalidValue {
                 field: "query_embedding",
@@ -102,7 +115,7 @@ where
                     doc_id: row.doc_id,
                     score,
                     text: row.text,
-                    metadata: None,
+                    metadata: row.metadata,
                     source: SearchSource::Vector,
                 };
 
@@ -220,6 +233,7 @@ struct VectorRow {
     doc_id: String,
     text: String,
     embedding: Vec<f32>,
+    metadata: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Default)]
