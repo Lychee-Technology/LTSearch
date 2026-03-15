@@ -11,7 +11,7 @@ use ltsearch::models::{
     FilterValue, IndexManifest, SearchRequest, SearchResult, SearchSource, ShardManifest,
 };
 use ltsearch::query::{
-    KeywordRetriever, KeywordSearcher, QueryRouter, VectorRetriever, VectorSearcher,
+    KeywordRetriever, KeywordSearcher, QueryRouter, VectorRetriever, VectorSearcher, WarningSink,
 };
 use ltsearch::storage::{
     version_manifest_key, ActiveManifest, LocalManifestStore, ManifestHead, ManifestStore,
@@ -234,6 +234,23 @@ struct StubEmbeddingGenerator {
     expected_query: String,
 }
 
+#[derive(Clone, Default)]
+struct WarningRecorder {
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl WarningRecorder {
+    fn messages(&self) -> Vec<String> {
+        self.messages.lock().unwrap().clone()
+    }
+}
+
+impl WarningSink for WarningRecorder {
+    fn warn(&self, message: String) {
+        self.messages.lock().unwrap().push(message);
+    }
+}
+
 impl StubEmbeddingGenerator {
     fn success(embedding: Vec<f32>) -> Self {
         Self::success_for_query("rust search", embedding)
@@ -303,11 +320,12 @@ impl SearchRecorder {
 
 #[derive(Clone)]
 struct StubKeywordRetriever {
-    results: Vec<SearchResult>,
+    results_by_top_k: Arc<HashMap<usize, Vec<SearchResult>>>,
     delay: Duration,
     recorder: SearchRecorder,
     start: Arc<Instant>,
     expected_version: u64,
+    expected_top_ks: Arc<Mutex<Vec<usize>>>,
 }
 
 impl StubKeywordRetriever {
@@ -316,13 +334,31 @@ impl StubKeywordRetriever {
         delay: Duration,
         start: Arc<Instant>,
         expected_version: u64,
+        expected_top_k: usize,
+    ) -> Self {
+        Self::with_results_by_top_k(
+            HashMap::from([(expected_top_k, results)]),
+            delay,
+            start,
+            expected_version,
+            vec![expected_top_k],
+        )
+    }
+
+    fn with_results_by_top_k(
+        results_by_top_k: HashMap<usize, Vec<SearchResult>>,
+        delay: Duration,
+        start: Arc<Instant>,
+        expected_version: u64,
+        expected_top_ks: Vec<usize>,
     ) -> Self {
         Self {
-            results,
+            results_by_top_k: Arc::new(results_by_top_k),
             delay,
             recorder: SearchRecorder::default(),
             start,
             expected_version,
+            expected_top_ks: Arc::new(Mutex::new(expected_top_ks)),
         }
     }
 }
@@ -336,20 +372,26 @@ impl KeywordRetriever for StubKeywordRetriever {
     ) -> Result<Vec<SearchResult>, SearchError> {
         assert_eq!(active_manifest.head.version_id, self.expected_version);
         assert_eq!(query, "rust search");
-        assert_eq!(top_k, 3);
+        let expected_top_k = self.expected_top_ks.lock().unwrap().remove(0);
+        assert_eq!(top_k, expected_top_k);
         self.recorder.record_start(self.start.elapsed());
         std::thread::sleep(self.delay);
-        Ok(self.results.clone())
+        Ok(self
+            .results_by_top_k
+            .get(&top_k)
+            .cloned()
+            .unwrap_or_default())
     }
 }
 
 #[derive(Clone)]
 struct StubVectorRetriever {
-    results: Vec<SearchResult>,
+    results_by_top_k: Arc<HashMap<usize, Vec<SearchResult>>>,
     delay: Duration,
     recorder: SearchRecorder,
     start: Arc<Instant>,
     expected_version: u64,
+    expected_top_ks: Arc<Mutex<Vec<usize>>>,
 }
 
 impl StubVectorRetriever {
@@ -358,13 +400,31 @@ impl StubVectorRetriever {
         delay: Duration,
         start: Arc<Instant>,
         expected_version: u64,
+        expected_top_k: usize,
+    ) -> Self {
+        Self::with_results_by_top_k(
+            HashMap::from([(expected_top_k, results)]),
+            delay,
+            start,
+            expected_version,
+            vec![expected_top_k],
+        )
+    }
+
+    fn with_results_by_top_k(
+        results_by_top_k: HashMap<usize, Vec<SearchResult>>,
+        delay: Duration,
+        start: Arc<Instant>,
+        expected_version: u64,
+        expected_top_ks: Vec<usize>,
     ) -> Self {
         Self {
-            results,
+            results_by_top_k: Arc::new(results_by_top_k),
             delay,
             recorder: SearchRecorder::default(),
             start,
             expected_version,
+            expected_top_ks: Arc::new(Mutex::new(expected_top_ks)),
         }
     }
 }
@@ -379,10 +439,15 @@ impl VectorRetriever for StubVectorRetriever {
         assert_eq!(active_manifest.head.version_id, self.expected_version);
         assert_eq!(active_manifest.manifest.embedding_dim, 3);
         assert_eq!(query_embedding, [0.1, 0.2, 0.3]);
-        assert_eq!(top_k, 3);
+        let expected_top_k = self.expected_top_ks.lock().unwrap().remove(0);
+        assert_eq!(top_k, expected_top_k);
         self.recorder.record_start(self.start.elapsed());
         std::thread::sleep(self.delay);
-        Ok(self.results.clone())
+        Ok(self
+            .results_by_top_k
+            .get(&top_k)
+            .cloned()
+            .unwrap_or_default())
     }
 }
 
@@ -415,6 +480,7 @@ fn router_fuses_hybrid_results_and_runs_retrievers_in_parallel() {
         Duration::from_millis(200),
         start.clone(),
         42,
+        3,
     );
     let vector = StubVectorRetriever::new(
         vec![
@@ -424,6 +490,7 @@ fn router_fuses_hybrid_results_and_runs_retrievers_in_parallel() {
         Duration::from_millis(200),
         start.clone(),
         42,
+        3,
     );
     let router = QueryRouter::new(manifest_store, generator, keyword.clone(), vector.clone());
 
@@ -473,12 +540,14 @@ fn router_falls_back_to_keyword_only_when_embedding_generation_fails() {
         Duration::from_millis(0),
         start.clone(),
         7,
+        3,
     );
     let vector = StubVectorRetriever::new(
         vec![sample_result("doc-10", 0.9, SearchSource::Vector)],
         Duration::from_millis(0),
         start,
         7,
+        3,
     );
     let router = QueryRouter::new(manifest_store, generator, keyword.clone(), vector.clone());
 
@@ -492,6 +561,45 @@ fn router_falls_back_to_keyword_only_when_embedding_generation_fails() {
     assert_eq!(vector.recorder.calls(), 0);
     assert_eq!(load_active_manifest_calls.load(Ordering::SeqCst), 1);
     assert_eq!(load_head_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn router_warns_with_request_details_after_final_embedding_retry_failure() {
+    let start = Arc::new(Instant::now());
+    let warning_sink = WarningRecorder::default();
+    let router = QueryRouter::new(
+        StubManifestStore::new(17),
+        StubEmbeddingGenerator::sequence(
+            "rust search",
+            vec![
+                Err(EmbeddingError::Generation {
+                    message: "transient timeout".into(),
+                }),
+                Err(EmbeddingError::Generation {
+                    message: "backend unavailable".into(),
+                }),
+            ],
+        ),
+        StubKeywordRetriever::new(
+            vec![sample_result("doc-9", 5.0, SearchSource::Keyword)],
+            Duration::from_millis(0),
+            start.clone(),
+            17,
+            3,
+        ),
+        StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 17, 3),
+    )
+    .with_warning_sink(warning_sink.clone());
+
+    let response = router.search(&sample_request()).unwrap();
+
+    assert_eq!(response.results[0].doc_id, "doc-9");
+    let messages = warning_sink.messages();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("embedding generation failed after 2 attempts"));
+    assert!(messages[0].contains("query=rust search"));
+    assert!(messages[0].contains("top_k=3"));
+    assert!(messages[0].contains("backend unavailable"));
 }
 
 #[test]
@@ -513,12 +621,14 @@ fn router_retries_embedding_generation_before_keyword_only_fallback() {
         Duration::from_millis(0),
         start.clone(),
         8,
+        3,
     );
     let vector = StubVectorRetriever::new(
         vec![sample_result("doc-2", 0.9, SearchSource::Vector)],
         Duration::from_millis(0),
         start,
         8,
+        3,
     );
     let router = QueryRouter::new(manifest_store, generator, keyword.clone(), vector.clone());
 
@@ -540,8 +650,8 @@ fn router_rejects_invalid_requests_before_touching_dependencies() {
     let load_head_calls = manifest_store.load_head_calls.clone();
     let generator = StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]);
     let generator_calls = generator.calls.clone();
-    let keyword = StubKeywordRetriever::new(vec![], Duration::from_millis(0), start.clone(), 9);
-    let vector = StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 9);
+    let keyword = StubKeywordRetriever::new(vec![], Duration::from_millis(0), start.clone(), 9, 3);
+    let vector = StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 9, 3);
     let router = QueryRouter::new(manifest_store, generator, keyword.clone(), vector.clone());
     let request = SearchRequest {
         query: String::new(),
@@ -649,6 +759,247 @@ fn router_applies_non_empty_filters_with_concrete_retrievers_using_local_metadat
 }
 
 #[test]
+fn router_overfetches_for_filtered_queries_before_applying_filters() {
+    let start = Arc::new(Instant::now());
+    let router = QueryRouter::new(
+        StubManifestStore::new(18),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        StubKeywordRetriever::new(
+            vec![
+                SearchResult {
+                    doc_id: "doc-1".into(),
+                    score: 10.0,
+                    text: "go result".into(),
+                    metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
+                    source: SearchSource::Keyword,
+                },
+                SearchResult {
+                    doc_id: "doc-2".into(),
+                    score: 9.0,
+                    text: "rust result".into(),
+                    metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
+                    source: SearchSource::Keyword,
+                },
+            ],
+            Duration::from_millis(0),
+            start.clone(),
+            18,
+            2,
+        ),
+        StubVectorRetriever::new(
+            vec![
+                SearchResult {
+                    doc_id: "doc-3".into(),
+                    score: 0.95,
+                    text: "go vector".into(),
+                    metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
+                    source: SearchSource::Vector,
+                },
+                SearchResult {
+                    doc_id: "doc-4".into(),
+                    score: 0.90,
+                    text: "rust vector".into(),
+                    metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
+                    source: SearchSource::Vector,
+                },
+            ],
+            Duration::from_millis(0),
+            start,
+            18,
+            2,
+        ),
+    );
+    let request = SearchRequest {
+        query: "rust search".into(),
+        top_k: 2,
+        filters: Some(HashMap::from([(
+            "lang".into(),
+            FilterValue::StringEquals("rust".into()),
+        )])),
+        include_metadata: true,
+    };
+
+    let response = router.search(&request).unwrap();
+
+    assert_eq!(response.results.len(), 2);
+    assert_eq!(
+        response
+            .results
+            .iter()
+            .map(|result| result.doc_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["doc-2", "doc-4"]
+    );
+}
+
+#[test]
+fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_satisfied() {
+    let start = Arc::new(Instant::now());
+    let keyword = StubKeywordRetriever::with_results_by_top_k(
+        HashMap::from([
+            (
+                2,
+                vec![SearchResult {
+                    doc_id: "doc-1".into(),
+                    score: 10.0,
+                    text: "go keyword".into(),
+                    metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
+                    source: SearchSource::Keyword,
+                }],
+            ),
+            (
+                4,
+                vec![
+                    SearchResult {
+                        doc_id: "doc-1".into(),
+                        score: 10.0,
+                        text: "go keyword".into(),
+                        metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
+                        source: SearchSource::Keyword,
+                    },
+                    SearchResult {
+                        doc_id: "doc-2".into(),
+                        score: 9.0,
+                        text: "rust keyword".into(),
+                        metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
+                        source: SearchSource::Keyword,
+                    },
+                ],
+            ),
+        ]),
+        Duration::from_millis(0),
+        start.clone(),
+        19,
+        vec![2, 4],
+    );
+    let vector = StubVectorRetriever::with_results_by_top_k(
+        HashMap::from([
+            (
+                2,
+                vec![SearchResult {
+                    doc_id: "doc-3".into(),
+                    score: 0.95,
+                    text: "go vector".into(),
+                    metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
+                    source: SearchSource::Vector,
+                }],
+            ),
+            (
+                4,
+                vec![
+                    SearchResult {
+                        doc_id: "doc-3".into(),
+                        score: 0.95,
+                        text: "go vector".into(),
+                        metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
+                        source: SearchSource::Vector,
+                    },
+                    SearchResult {
+                        doc_id: "doc-4".into(),
+                        score: 0.90,
+                        text: "rust vector".into(),
+                        metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
+                        source: SearchSource::Vector,
+                    },
+                ],
+            ),
+        ]),
+        Duration::from_millis(0),
+        start,
+        19,
+        vec![2, 4],
+    );
+    let router = QueryRouter::new(
+        StubManifestStore::new(19),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        keyword.clone(),
+        vector.clone(),
+    );
+    let request = SearchRequest {
+        query: "rust search".into(),
+        top_k: 2,
+        filters: Some(HashMap::from([(
+            "lang".into(),
+            FilterValue::StringEquals("rust".into()),
+        )])),
+        include_metadata: true,
+    };
+
+    let response = router.search(&request).unwrap();
+
+    assert_eq!(response.results.len(), 2);
+    assert_eq!(keyword.recorder.calls(), 2);
+    assert_eq!(vector.recorder.calls(), 2);
+}
+
+#[test]
+fn router_can_return_match_found_beyond_initial_top_k_window() {
+    let start = Arc::new(Instant::now());
+    let router = QueryRouter::new(
+        StubManifestStore::new(20),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        StubKeywordRetriever::with_results_by_top_k(
+            HashMap::from([
+                (
+                    1,
+                    vec![SearchResult {
+                        doc_id: "doc-1".into(),
+                        score: 10.0,
+                        text: "go keyword".into(),
+                        metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
+                        source: SearchSource::Keyword,
+                    }],
+                ),
+                (
+                    2,
+                    vec![
+                        SearchResult {
+                            doc_id: "doc-1".into(),
+                            score: 10.0,
+                            text: "go keyword".into(),
+                            metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
+                            source: SearchSource::Keyword,
+                        },
+                        SearchResult {
+                            doc_id: "doc-2".into(),
+                            score: 9.0,
+                            text: "rust keyword".into(),
+                            metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
+                            source: SearchSource::Keyword,
+                        },
+                    ],
+                ),
+            ]),
+            Duration::from_millis(0),
+            start.clone(),
+            20,
+            vec![1, 2],
+        ),
+        StubVectorRetriever::with_results_by_top_k(
+            HashMap::from([(1, vec![]), (2, vec![])]),
+            Duration::from_millis(0),
+            start,
+            20,
+            vec![1, 2],
+        ),
+    );
+    let request = SearchRequest {
+        query: "rust search".into(),
+        top_k: 1,
+        filters: Some(HashMap::from([(
+            "lang".into(),
+            FilterValue::StringEquals("rust".into()),
+        )])),
+        include_metadata: true,
+    };
+
+    let response = router.search(&request).unwrap();
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].doc_id, "doc-2");
+}
+
+#[test]
 fn router_applies_non_empty_filters_with_keyword_only_fallback_using_concrete_metadata() {
     let root = temp_fixture_dir("router-keyword-fallback-non-empty-filters");
     write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(7));
@@ -734,6 +1085,7 @@ fn router_applies_exact_match_filters_before_returning_results() {
         Duration::from_millis(0),
         start.clone(),
         11,
+        1,
     );
     let vector = StubVectorRetriever::new(
         vec![
@@ -761,9 +1113,11 @@ fn router_applies_exact_match_filters_before_returning_results() {
         Duration::from_millis(0),
         start,
         11,
+        1,
     );
     let router = QueryRouter::new(manifest_store, generator, keyword, vector);
     let request = SearchRequest {
+        top_k: 1,
         filters: Some(HashMap::from([
             ("lang".into(), FilterValue::StringEquals("rust".into())),
             ("published".into(), FilterValue::BoolEquals(true)),
@@ -790,7 +1144,7 @@ fn router_returns_search_error_when_parallel_retriever_panics() {
         StubManifestStore::new(21),
         StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
         PanickingKeywordRetriever,
-        StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 21),
+        StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 21, 3),
     );
 
     let error = router.search(&sample_request()).unwrap_err();
@@ -816,12 +1170,14 @@ fn router_rejects_invalid_retriever_results_before_ranking() {
             Duration::from_millis(0),
             start.clone(),
             22,
+            3,
         ),
         StubVectorRetriever::new(
             vec![sample_result("doc-2", 0.8, SearchSource::Vector)],
             Duration::from_millis(0),
             start,
             22,
+            3,
         ),
     );
 

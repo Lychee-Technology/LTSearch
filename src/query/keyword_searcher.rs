@@ -175,7 +175,36 @@ fn resolve_artifact_path(artifact_root: &Path, tantivy_path: &str) -> Result<Pat
         });
     }
 
-    Ok(artifact_root.join(key))
+    let canonical_artifact_root =
+        artifact_root
+            .canonicalize()
+            .map_err(|source| SearchError::Execution {
+                message: format!(
+                    "failed to canonicalize artifact root {}: {source}",
+                    artifact_root.display()
+                ),
+            })?;
+    let resolved_path = artifact_root.join(key);
+    let canonical_resolved_path =
+        resolved_path
+            .canonicalize()
+            .map_err(|source| SearchError::Execution {
+                message: format!(
+                    "failed to canonicalize Tantivy artifact path {}: {source}",
+                    resolved_path.display()
+                ),
+            })?;
+
+    if !canonical_resolved_path.starts_with(canonical_artifact_root) {
+        return Err(SearchError::Execution {
+            message: format!(
+                "resolved Tantivy artifact path escapes artifact root: {}",
+                canonical_resolved_path.display()
+            ),
+        });
+    }
+
+    Ok(canonical_resolved_path)
 }
 
 fn dedupe_top_docs(

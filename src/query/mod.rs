@@ -8,5 +8,5 @@ pub struct ModuleBoundary;
 
 pub use keyword_searcher::KeywordSearcher;
 pub use ranker::HybridRanker;
-pub use router::{KeywordRetriever, QueryRouter, VectorRetriever};
+pub use router::{KeywordRetriever, NoopWarningSink, QueryRouter, VectorRetriever, WarningSink};
 pub use vector_searcher::VectorSearcher;
