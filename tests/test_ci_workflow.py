@@ -36,7 +36,7 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("uses: actions/setup-python@v6", lint)
         self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", lint)
         self.assertIn("cache: true", lint)
-        self.assertIn("run: python3 -B -m unittest tests/test_ci_workflow.py", lint)
+        self.assertIn("run: python3 -B tests/test_ci_workflow.py", lint)
         self.assertIn("run: cargo fmt --check", lint)
         self.assertIn("run: cargo clippy --all-targets --all-features -- -D warnings", lint)
         self.assertNotIn("run: cargo test", lint)

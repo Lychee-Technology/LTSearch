@@ -112,12 +112,10 @@ where
 
         match self.write_staged_build(&staged_build, documents, manifest) {
             Ok(()) => Ok(staged_build),
-            Err(error) => {
-                Err(append_cleanup_failure(
-                    error,
-                    remove_dir_all_if_exists(&staged_build.root),
-                ))
-            }
+            Err(error) => Err(append_cleanup_failure(
+                error,
+                remove_dir_all_if_exists(&staged_build.root),
+            )),
         }
     }
 
@@ -131,7 +129,11 @@ where
         ensure_target_is_publishable(&staged_build.final_index_dir)?;
         ensure_target_is_publishable(&staged_build.final_manifest_path)?;
 
-        self.write_lance_artifact(&staged_build.staged_lance_dir, documents, manifest.embedding_dim)?;
+        self.write_lance_artifact(
+            &staged_build.staged_lance_dir,
+            documents,
+            manifest.embedding_dim,
+        )?;
         self.write_keyword_index(&staged_build.staged_index_dir, documents)?;
         write_json_file(&staged_build.staged_manifest_path, manifest)
     }
@@ -271,11 +273,12 @@ where
                     .collect::<Vec<_>>(),
             );
             let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                documents
-                    .iter()
-                    .map(|document| document.embedding.as_ref().map(|embedding| {
-                        embedding.iter().copied().map(Some).collect::<Vec<_>>()
-                    })),
+                documents.iter().map(|document| {
+                    document
+                        .embedding
+                        .as_ref()
+                        .map(|embedding| embedding.iter().copied().map(Some).collect::<Vec<_>>())
+                }),
                 embedding_dim as i32,
             );
 
@@ -554,7 +557,9 @@ fn remove_dir_all_if_exists(path: &Path) -> Result<(), IndexError> {
     })
 }
 
-fn combine_cleanup_results<const N: usize>(results: [Result<(), IndexError>; N]) -> Result<(), IndexError> {
+fn combine_cleanup_results<const N: usize>(
+    results: [Result<(), IndexError>; N],
+) -> Result<(), IndexError> {
     let errors = results
         .into_iter()
         .filter_map(Result::err)

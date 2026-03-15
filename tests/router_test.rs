@@ -134,10 +134,7 @@ fn write_lance_fixture(root: &Path, relative_path: &str, rows: &[serde_json::Val
         Field::new("timestamp", DataType::Int64, false),
         Field::new(
             "embedding",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                3,
-            ),
+            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 3),
             true,
         ),
     ]));
