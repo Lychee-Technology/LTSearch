@@ -14,6 +14,7 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertEqual(lines[0], "name: CI")
 
         content = "\n".join(lines)
+        self.assertIn("FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true", content)
         self.assertIn("pull_request:", content)
         self.assertIn("workflow_dispatch:", content)
         self.assertIn("push:\n    branches:\n      - main", content)
@@ -27,11 +28,12 @@ class CiWorkflowTest(unittest.TestCase):
         lint = jobs["lint"]
         self.assertIn("runs-on: [self-hosted, Linux, ARM64]", lint)
         self.assertIn("timeout-minutes: 20", lint)
-        self.assertIn("uses: actions/checkout@v4", lint)
+        self.assertIn("uses: actions/checkout@v6", lint)
         self.assertIn(
             "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
             lint,
         )
+        self.assertIn("uses: actions/setup-python@v6", lint)
         self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", lint)
         self.assertIn("cache: true", lint)
         self.assertIn("run: python3 -B -m unittest tests/test_ci_workflow.py", lint)
@@ -42,7 +44,7 @@ class CiWorkflowTest(unittest.TestCase):
         test = jobs["test"]
         self.assertIn("runs-on: [self-hosted, Linux, ARM64]", test)
         self.assertIn("timeout-minutes: 30", test)
-        self.assertIn("uses: actions/checkout@v4", test)
+        self.assertIn("uses: actions/checkout@v6", test)
         self.assertNotIn("github.event.pull_request.head.sha", test)
         self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", test)
         self.assertIn("cache: true", test)
