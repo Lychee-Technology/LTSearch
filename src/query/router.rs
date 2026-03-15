@@ -10,6 +10,18 @@ use super::filter::{apply_filters, strip_metadata};
 use super::{HybridRanker, KeywordSearcher, VectorSearcher};
 
 const EMBEDDING_GENERATION_MAX_ATTEMPTS: usize = 2;
+const SEARCH_WINDOW_MAX: usize = 100;
+
+pub trait WarningSink: Send + Sync {
+    fn warn(&self, message: String);
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoopWarningSink;
+
+impl WarningSink for NoopWarningSink {
+    fn warn(&self, _message: String) {}
+}
 
 pub trait KeywordRetriever: Send + Sync {
     fn search(
@@ -30,15 +42,16 @@ pub trait VectorRetriever: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct QueryRouter<M, E, K, V> {
+pub struct QueryRouter<M, E, K, V, W = NoopWarningSink> {
     manifest_store: M,
     embedding_generator: E,
     keyword_retriever: K,
     vector_retriever: V,
+    warning_sink: W,
     ranker: HybridRanker,
 }
 
-impl<M, E, K, V> QueryRouter<M, E, K, V>
+impl<M, E, K, V> QueryRouter<M, E, K, V, NoopWarningSink>
 where
     M: ManifestStore + Send + Sync,
     E: EmbeddingGenerator + Send + Sync,
@@ -56,7 +69,31 @@ where
             embedding_generator,
             keyword_retriever,
             vector_retriever,
+            warning_sink: NoopWarningSink,
             ranker: HybridRanker::new(60.0),
+        }
+    }
+}
+
+impl<M, E, K, V, W> QueryRouter<M, E, K, V, W>
+where
+    M: ManifestStore + Send + Sync,
+    E: EmbeddingGenerator + Send + Sync,
+    K: KeywordRetriever,
+    V: VectorRetriever,
+    W: WarningSink,
+{
+    pub fn with_warning_sink<W2>(self, warning_sink: W2) -> QueryRouter<M, E, K, V, W2>
+    where
+        W2: WarningSink,
+    {
+        QueryRouter {
+            manifest_store: self.manifest_store,
+            embedding_generator: self.embedding_generator,
+            keyword_retriever: self.keyword_retriever,
+            vector_retriever: self.vector_retriever,
+            warning_sink,
+            ranker: self.ranker,
         }
     }
 
@@ -71,55 +108,13 @@ where
                 message: source.to_string(),
             })?;
         let index_version = active_manifest.head.version_id;
+        let query_embedding =
+            generate_embedding_with_retry(&self.embedding_generator, &request.query);
 
-        let results = match generate_embedding_with_retry(&self.embedding_generator, &request.query)
-        {
-            Ok(query_embedding) => {
-                let (keyword_results, vector_results) = thread::scope(|scope| {
-                    let keyword_handle = scope.spawn(|| {
-                        self.keyword_retriever.search(
-                            &active_manifest,
-                            &request.query,
-                            request.top_k,
-                        )
-                    });
-                    let vector_handle = scope.spawn(|| {
-                        self.vector_retriever.search(
-                            &active_manifest,
-                            query_embedding.as_slice(),
-                            request.top_k,
-                        )
-                    });
-
-                    let keyword_results =
-                        keyword_handle
-                            .join()
-                            .map_err(|payload| SearchError::Execution {
-                                message: panic_payload_message("keyword retrieval", payload),
-                            })?;
-                    let vector_results =
-                        vector_handle
-                            .join()
-                            .map_err(|payload| SearchError::Execution {
-                                message: panic_payload_message("vector retrieval", payload),
-                            })?;
-
-                    Ok::<_, SearchError>((keyword_results?, vector_results?))
-                })?;
-                validate_results(&keyword_results)?;
-                validate_results(&vector_results)?;
-
-                self.ranker.fuse(vector_results, keyword_results)
-            }
-            Err(_) => {
-                let keyword_results = self.keyword_retriever.search(
-                    &active_manifest,
-                    &request.query,
-                    request.top_k,
-                )?;
-                validate_results(&keyword_results)?;
-                keyword_results
-            }
+        let results = if query_requires_iterative_filtering(request) {
+            self.search_with_iterative_filtering(request, &active_manifest, &query_embedding)?
+        } else {
+            self.search_single_pass(request, &active_manifest, &query_embedding)?
         };
 
         let mut results = apply_filters(results, request.filters.as_ref());
@@ -138,6 +133,120 @@ where
         response.validate(request.top_k)?;
 
         Ok(response)
+    }
+
+    fn search_single_pass(
+        &self,
+        request: &SearchRequest,
+        active_manifest: &ActiveManifest,
+        query_embedding: &Result<Vec<f32>, crate::embedding::EmbeddingError>,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        match query_embedding {
+            Ok(query_embedding) => self.search_hybrid(
+                active_manifest,
+                &request.query,
+                query_embedding.as_slice(),
+                request.top_k,
+            ),
+            Err(error) => {
+                self.warning_sink.warn(format!(
+                    "embedding generation failed after {EMBEDDING_GENERATION_MAX_ATTEMPTS} attempts; falling back to keyword-only retrieval: query={}, top_k={}, error={}",
+                    request.query, request.top_k, error
+                ));
+                self.search_keyword_only(active_manifest, &request.query, request.top_k)
+            }
+        }
+    }
+
+    fn search_with_iterative_filtering(
+        &self,
+        request: &SearchRequest,
+        active_manifest: &ActiveManifest,
+        query_embedding: &Result<Vec<f32>, crate::embedding::EmbeddingError>,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let mut retrieval_top_k = request.top_k.max(1);
+        let mut warned_on_fallback = false;
+
+        loop {
+            let results = match query_embedding {
+                Ok(query_embedding) => self.search_hybrid(
+                    active_manifest,
+                    &request.query,
+                    query_embedding.as_slice(),
+                    retrieval_top_k,
+                )?,
+                Err(error) => {
+                    if !warned_on_fallback {
+                        self.warning_sink.warn(format!(
+                            "embedding generation failed after {EMBEDDING_GENERATION_MAX_ATTEMPTS} attempts; falling back to keyword-only retrieval: query={}, top_k={}, error={}",
+                            request.query, request.top_k, error
+                        ));
+                        warned_on_fallback = true;
+                    }
+                    self.search_keyword_only(active_manifest, &request.query, retrieval_top_k)?
+                }
+            };
+
+            let filtered_count = apply_filters(results.clone(), request.filters.as_ref()).len();
+            if filtered_count >= request.top_k || retrieval_top_k >= SEARCH_WINDOW_MAX {
+                return Ok(results);
+            }
+
+            let next_top_k = (retrieval_top_k.saturating_mul(2)).min(SEARCH_WINDOW_MAX);
+            if next_top_k == retrieval_top_k {
+                return Ok(results);
+            }
+            retrieval_top_k = next_top_k;
+        }
+    }
+
+    fn search_hybrid(
+        &self,
+        active_manifest: &ActiveManifest,
+        query: &str,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let (keyword_results, vector_results) = thread::scope(|scope| {
+            let keyword_handle =
+                scope.spawn(|| self.keyword_retriever.search(active_manifest, query, top_k));
+            let vector_handle = scope.spawn(|| {
+                self.vector_retriever
+                    .search(active_manifest, query_embedding, top_k)
+            });
+
+            let keyword_results =
+                keyword_handle
+                    .join()
+                    .map_err(|payload| SearchError::Execution {
+                        message: panic_payload_message("keyword retrieval", payload),
+                    })?;
+            let vector_results =
+                vector_handle
+                    .join()
+                    .map_err(|payload| SearchError::Execution {
+                        message: panic_payload_message("vector retrieval", payload),
+                    })?;
+
+            Ok::<_, SearchError>((keyword_results?, vector_results?))
+        })?;
+        validate_results(&keyword_results)?;
+        validate_results(&vector_results)?;
+
+        Ok(self.ranker.fuse(vector_results, keyword_results))
+    }
+
+    fn search_keyword_only(
+        &self,
+        active_manifest: &ActiveManifest,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        let keyword_results = self
+            .keyword_retriever
+            .search(active_manifest, query, top_k)?;
+        validate_results(&keyword_results)?;
+        Ok(keyword_results)
     }
 }
 
@@ -172,6 +281,13 @@ where
     }
 
     Err(last_error.expect("embedding retry attempts must be positive"))
+}
+
+fn query_requires_iterative_filtering(request: &SearchRequest) -> bool {
+    request
+        .filters
+        .as_ref()
+        .is_some_and(|filters| !filters.is_empty())
 }
 
 fn validate_results(results: &[SearchResult]) -> Result<(), SearchError> {

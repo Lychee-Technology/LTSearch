@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -305,6 +306,26 @@ fn keyword_searcher_rejects_tantivy_paths_that_escape_artifact_root() {
 
     assert!(error.to_string().contains("artifact path"));
     assert!(error.to_string().contains(".."));
+}
+
+#[test]
+fn keyword_searcher_rejects_tantivy_symlink_escapes_from_artifact_root() {
+    let root = temp_fixture_dir("keyword-searcher-symlink-escape");
+    let outside = temp_fixture_dir("keyword-searcher-symlink-escape-outside");
+    write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(7));
+    write_fixture(&root, &version_manifest_key(7), &sample_manifest_json(7, 1));
+    write_index(
+        &outside,
+        "escape-index",
+        &[("doc-1", "rust keyword search")],
+    );
+    fs::create_dir_all(root.join("index/v7")).unwrap();
+    symlink(outside.join("escape-index"), root.join("index/v7/shard_0")).unwrap();
+
+    let searcher = KeywordSearcher::new(LocalManifestStore::new(&root), &root);
+    let error = searcher.search("rust", 2).unwrap_err();
+
+    assert!(error.to_string().contains("escapes artifact root"));
 }
 
 #[test]

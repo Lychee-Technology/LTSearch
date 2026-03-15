@@ -140,7 +140,8 @@ fn fuse_merges_metadata_maps_from_duplicate_results() {
         text: "text for doc-1".into(),
         metadata: Some(std::collections::HashMap::from([
             ("lang".into(), json!("rust")),
-            ("source".into(), json!("vector")),
+            ("vector_only".into(), json!(true)),
+            ("shared".into(), json!("vector")),
         ])),
         source: SearchSource::Vector,
     }];
@@ -149,8 +150,8 @@ fn fuse_merges_metadata_maps_from_duplicate_results() {
         score: 12.0,
         text: "text for doc-1".into(),
         metadata: Some(std::collections::HashMap::from([
-            ("category".into(), json!("guide")),
-            ("source".into(), json!("keyword")),
+            ("keyword_only".into(), json!(true)),
+            ("shared".into(), json!("keyword")),
         ])),
         source: SearchSource::Keyword,
     }];
@@ -158,8 +159,11 @@ fn fuse_merges_metadata_maps_from_duplicate_results() {
     let fused = ranker.fuse(vector_results, keyword_results);
 
     assert_eq!(fused.len(), 1);
+    assert_eq!(fused[0].doc_id, "doc-1");
+    assert_eq!(fused[0].source, SearchSource::Hybrid);
     let metadata = fused[0].metadata.as_ref().unwrap();
     assert_eq!(metadata["lang"], json!("rust"));
-    assert_eq!(metadata["category"], json!("guide"));
-    assert_eq!(metadata["source"], json!("vector"));
+    assert_eq!(metadata["vector_only"], json!(true));
+    assert_eq!(metadata["keyword_only"], json!(true));
+    assert_eq!(metadata["shared"], json!("vector"));
 }
