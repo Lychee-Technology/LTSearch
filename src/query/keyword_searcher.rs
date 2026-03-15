@@ -4,7 +4,8 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::Value;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::{DocAddress, Document, Index, ReloadPolicy};
+use tantivy::schema::{TantivyDocument, Value as _};
+use tantivy::{DocAddress, Index, ReloadPolicy};
 
 use crate::error::{SearchError, ValidationError};
 use crate::models::{SearchRequest, SearchResult, SearchSource, ShardManifest};
@@ -286,20 +287,21 @@ fn build_search_result(
     metadata_field: Option<tantivy::schema::Field>,
     score: f32,
 ) -> Result<SearchResult, SearchError> {
-    let document: Document = searcher
-        .doc(address)
-        .map_err(|source| SearchError::Execution {
-            message: format!("failed to load matched document: {source}"),
-        })?;
+    let document: TantivyDocument =
+        searcher
+            .doc(address)
+            .map_err(|source| SearchError::Execution {
+                message: format!("failed to load matched document: {source}"),
+            })?;
     let doc_id = document
         .get_first(doc_id_field)
-        .and_then(|value| value.as_text())
+        .and_then(|value| value.as_str())
         .ok_or_else(|| SearchError::Execution {
             message: format!("matched document is missing {DOC_ID_FIELD}"),
         })?;
     let text = document
         .get_first(text_field)
-        .and_then(|value| value.as_text())
+        .and_then(|value| value.as_str())
         .ok_or_else(|| SearchError::Execution {
             message: format!("matched document is missing {TEXT_FIELD}"),
         })?;
@@ -315,7 +317,7 @@ fn build_search_result(
 }
 
 fn load_metadata(
-    document: &Document,
+    document: &TantivyDocument,
     metadata_field: Option<tantivy::schema::Field>,
 ) -> Result<Option<HashMap<String, Value>>, SearchError> {
     let Some(metadata_field) = metadata_field else {
@@ -323,7 +325,7 @@ fn load_metadata(
     };
     let Some(metadata_json) = document
         .get_first(metadata_field)
-        .and_then(|value| value.as_text())
+        .and_then(|value| value.as_str())
     else {
         return Ok(None);
     };
