@@ -1,0 +1,7 @@
+services:
+  moto:
+    image: motoserver/moto:latest
+    ports:
+      - "5000:5000"
+    environment:
+      MOTO_PORT: "5000"

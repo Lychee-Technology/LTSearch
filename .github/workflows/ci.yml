@@ -36,7 +36,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-      - run: docker compose -f docker-compose.localstack.yml up -d
+      - run: docker compose -f docker-compose.moto.yml up -d
       - run: cargo test
       - if: always()
-        run: docker compose -f docker-compose.localstack.yml down -v
+        run: docker compose -f docker-compose.moto.yml down -v

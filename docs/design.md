@@ -1157,7 +1157,7 @@ proptest! {
 
 ### Integration Testing Approach
 
-Integration tests verify end-to-end workflows with real AWS services (using LocalStack for local testing).
+Integration tests verify end-to-end workflows with real AWS services (using Moto for local testing).
 
 **Key Integration Tests**:
 - Complete query pipeline (embedding → vector search → keyword search → fusion)
@@ -1167,7 +1167,7 @@ Integration tests verify end-to-end workflows with real AWS services (using Loca
 - SQS batch processing
 
 **Test Environment**:
-- LocalStack for S3 and SQS simulation
+- Moto for S3 and SQS simulation
 - In-memory LanceDB and Tantivy indexes
 - Mock embedding service
 
@@ -1374,7 +1374,7 @@ Target latency budget (300ms SLA):
 **Testing**:
 - `proptest` (1.4+): Property-based testing
 - `mockall` (0.12+): Mocking framework
-- LocalStack (3.0+): Local AWS service emulation
+- Moto (3.0+): Local AWS service emulation
 
 **CI/CD**:
 - GitHub Actions or AWS CodePipeline

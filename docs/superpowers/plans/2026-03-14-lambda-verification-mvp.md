@@ -6,7 +6,7 @@
 
 **Architecture:** Keep each binary as a thin adapter over library code so testing stays centered in reusable modules. Add integration coverage only after the underlying library behaviors are already passing, then finish by documenting exact developer commands.
 
-**Tech Stack:** Rust, `lambda_runtime`, `tokio`, LocalStack, Markdown docs
+**Tech Stack:** Rust, `lambda_runtime`, `tokio`, Moto, Markdown docs
 
 ---
 
@@ -118,8 +118,8 @@ git commit -m "feat: add index-builder lambda binary"
 - [ ] **Step 1: Write the failing integration test for manifest load, hybrid retrieval, and keyword-only fallback**
 - [ ] **Step 2: Run the integration test to verify failure**
 
-Run: `docker compose -f docker-compose.localstack.yml up -d`
-Expected: LocalStack starts.
+Run: `docker compose -f docker-compose.moto.yml up -d`
+Expected: Moto starts.
 
 Run: `cargo test --test query_flow_test -- --nocapture`
 Expected: FAIL because end-to-end query wiring is incomplete.
@@ -148,7 +148,7 @@ Document the minimum commands that must be present:
 - `cargo test`
 - `cargo fmt --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
-- `docker compose -f docker-compose.localstack.yml up -d`
+- `docker compose -f docker-compose.moto.yml up -d`
 
 - [ ] **Step 2: Update `README.md` with exact setup and verification commands**
 - [ ] **Step 3: Re-run every documented command verbatim and confirm the expected result**

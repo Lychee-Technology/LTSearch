@@ -1,6 +1,6 @@
 ## Title
 
-LocalStack-only integration coverage for the write-build-publish flow
+Moto-backed integration coverage for the write-build-publish flow
 
 ## Context
 
@@ -14,7 +14,7 @@ What the codebase does not yet have is a real AWS-backed adapter layer. Current 
 
 ## Goal
 
-Add LocalStack-based integration coverage that verifies the real infrastructure flow for:
+Add Moto-backed integration coverage that verifies the real infrastructure flow for:
 
 1. WAL append to S3
 2. batch enqueue to SQS
@@ -28,8 +28,8 @@ This issue does not implement Lambda execution. It validates the infrastructure 
 
 In scope:
 
-- add `docker-compose.localstack.yml` for local S3/SQS infrastructure
-- add a LocalStack-backed integration test in `tests/write_build_publish_test.rs`
+- add `docker-compose.moto.yml` for local S3/SQS infrastructure
+- add a Moto-backed integration test in `tests/write_build_publish_test.rs`
 - add the minimum S3/SQS adapter code needed to exercise the existing write/build/publish components against real infrastructure
 - refactor the affected storage and queue traits plus direct callers from sync to async so AWS SDK usage does not rely on runtime-bridging shims
 - add a minimal single-message consumer harness used by the integration test
@@ -44,9 +44,9 @@ Out of scope:
 
 ## Approaches Considered
 
-### 1. LocalStack-only integration with test-owned consumer harness (recommended)
+### 1. Moto-backed integration with test-owned consumer harness (recommended)
 
-Use LocalStack for S3 and SQS, add minimal production adapters for S3/SQS traits, and keep the queue consumer orchestration inside the integration test harness.
+Use Moto for S3 and SQS, add minimal production adapters for S3/SQS traits, and keep the queue consumer orchestration inside the integration test harness.
 
 Pros:
 
@@ -60,7 +60,7 @@ Cons:
 - the consumer harness lives in test code rather than production code
 - some orchestration is verified indirectly through the test instead of through a reusable runtime entry point
 
-### 2. LocalStack with a production `process_batch(...)` orchestration function
+### 2. Moto with a production `process_batch(...)` orchestration function
 
 Add a reusable production coordinator that takes batch metadata and performs WAL read, build, and publish. The test would read from SQS and call this function.
 
@@ -92,7 +92,7 @@ Cons:
 
 Adopt approach 1.
 
-Add a real-infrastructure integration test that uses LocalStack for S3 and SQS, while keeping the message-consume/build/publish orchestration as a test-local harness. Introduce only the smallest production adapters needed to let existing trait-based components talk to LocalStack.
+Add a real-infrastructure integration test that uses Moto for S3 and SQS, while keeping the message-consume/build/publish orchestration as a test-local harness. Introduce only the smallest production adapters needed to let existing trait-based components talk to Moto.
 
 This preserves clear boundaries:
 
@@ -125,14 +125,14 @@ That refactor is intentionally scoped to the write/build/publish path used by th
 - `WriteApi`
 - `IndexPublisher`
 
-The goal is to make LocalStack-backed adapters natural and correct, while keeping the rest of the codebase unchanged unless compilation requires a small mechanical update.
+The goal is to make Moto-backed adapters natural and correct, while keeping the rest of the codebase unchanged unless compilation requires a small mechanical update.
 
 ### Test harness
 
 `tests/write_build_publish_test.rs` owns a minimal one-shot consumer harness:
 
-1. provision unique bucket/queue names against LocalStack
-2. build real S3 and SQS clients against `http://localhost:4566`
+1. provision unique bucket/queue names against Moto
+2. build real S3 and SQS clients against `http://localhost:5000`
 3. run async `WriteApi::ingest(...)`
 4. assert WAL bytes are present in S3
 5. receive exactly one queue message from SQS
@@ -176,8 +176,8 @@ The integration test should surface stage-specific assertions rather than a sing
 Add one main end-to-end test that proves:
 
 - documents are accepted through `WriteApi`
-- WAL lands in LocalStack S3 before queue-driven processing continues
-- batch metadata reaches LocalStack SQS
+- WAL lands in Moto S3 before queue-driven processing continues
+- batch metadata reaches Moto SQS
 - a single queue message can drive build and publish successfully
 - published version artifacts exist in S3
 - `_head` points at the newly published manifest
@@ -194,9 +194,9 @@ This satisfies the issue requirement that failures clearly identify WAL, queue, 
 
 ## Tooling and Environment
 
-### LocalStack compose file
+### Moto compose file
 
-Add `docker-compose.localstack.yml` configured only for the services needed here:
+Add `docker-compose.moto.yml` configured only for the services needed here:
 
 - `s3`
 - `sqs`
@@ -207,9 +207,9 @@ Bootstrap bucket and queue inside Rust test setup via AWS SDK clients. Do not re
 
 ### Credentials and endpointing
 
-Use the standard LocalStack defaults in test configuration:
+Use the standard Moto defaults in test configuration:
 
-- endpoint: `http://localhost:4566`
+- endpoint: `http://localhost:5000`
 - region: fixed test region
 - static test credentials
 - path-style S3 access if required by SDK configuration
@@ -219,7 +219,7 @@ Use the standard LocalStack defaults in test configuration:
 Expected new files:
 
 - `tests/write_build_publish_test.rs`
-- `docker-compose.localstack.yml`
+- `docker-compose.moto.yml`
 
 Expected updated areas:
 
@@ -231,7 +231,7 @@ Expected updated areas:
 
 Primary verification for this issue:
 
-1. `docker compose -f docker-compose.localstack.yml up -d`
+1. `docker compose -f docker-compose.moto.yml up -d`
 2. `cargo test --test write_build_publish_test -- --nocapture`
 
 Regression verification after implementation:

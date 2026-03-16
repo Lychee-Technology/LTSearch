@@ -6,7 +6,7 @@
 
 **Architecture:** Keep writes append-only and durable by treating WAL records in S3 as the source of truth before asynchronous build work begins. Separate snapshot materialization from publish activation so build correctness and atomic version switching are tested independently.
 
-**Tech Stack:** Rust, `tokio`, `serde_json`, `aws-sdk-s3`, `aws-sdk-sqs`, LocalStack, `mockall`, `lancedb`, `tantivy`
+**Tech Stack:** Rust, `tokio`, `serde_json`, `aws-sdk-s3`, `aws-sdk-sqs`, Moto, `mockall`, `lancedb`, `tantivy`
 
 ---
 
@@ -19,7 +19,7 @@ Prerequisite: complete `docs/superpowers/plans/2026-03-14-query-core-mvp.md` fir
 - `#18` Implement WriteAPI ingest and delete flow
 - `#19` Implement publish flow for IndexManifest and _head activation
 - `#20` Implement rollback and version conflict handling
-- `#21` Add LocalStack integration tests for write-build-publish flow
+- `#21` Add Moto integration tests for write-build-publish flow
 
 ## File Structure
 
@@ -34,7 +34,7 @@ Prerequisite: complete `docs/superpowers/plans/2026-03-14-query-core-mvp.md` fir
 - Create: `tests/index_builder_test.rs`
 - Create: `tests/publisher_test.rs`
 - Create: `tests/write_build_publish_test.rs`
-- Create: `docker-compose.localstack.yml`
+- Create: `docker-compose.moto.yml`
 
 ## Chunk 1: Durable write path
 
@@ -170,22 +170,22 @@ git commit -m "feat: add rollback for published index versions"
 
 ## Chunk 3: Integration coverage
 
-### Task 6: Add LocalStack coverage (`#21`)
+### Task 6: Add Moto coverage (`#21`)
 
 **Files:**
 - Create: `tests/write_build_publish_test.rs`
-- Create: `docker-compose.localstack.yml`
+- Create: `docker-compose.moto.yml`
 
 - [ ] **Step 1: Write failing integration tests for WAL append, SQS enqueue, build, and publish activation**
-- [ ] **Step 2: Start LocalStack and run the integration test to verify failure**
+- [ ] **Step 2: Start Moto and run the integration test to verify failure**
 
-Run: `docker compose -f docker-compose.localstack.yml up -d`
-Expected: LocalStack starts.
+Run: `docker compose -f docker-compose.moto.yml up -d`
+Expected: Moto starts.
 
-Run: `aws --endpoint-url http://localhost:4566 s3 mb s3://ltsearch-test`
+Run: `aws --endpoint-url http://localhost:5000 s3 mb s3://ltsearch-test`
 Expected: test bucket created.
 
-Run: `aws --endpoint-url http://localhost:4566 sqs create-queue --queue-name ltsearch-builds`
+Run: `aws --endpoint-url http://localhost:5000 sqs create-queue --queue-name ltsearch-builds`
 Expected: test queue created.
 
 Run: `cargo test --test write_build_publish_test -- --nocapture`
@@ -200,7 +200,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/write_build_publish_test.rs docker-compose.localstack.yml
+git add tests/write_build_publish_test.rs docker-compose.moto.yml
 git commit -m "test: add write-build-publish integration coverage"
 ```
 
