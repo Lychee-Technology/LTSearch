@@ -6,6 +6,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use ltsearch::error::{IngestError, ValidationError};
 use ltsearch::models::{Document, WalOperation, WalRecord};
 use ltsearch::write::{BuildQueue, QueueBatch, WalStorage, WriteAheadLog, WriteApi};
@@ -33,8 +34,9 @@ impl FileWalStorage {
     }
 }
 
+#[async_trait]
 impl WalStorage for FileWalStorage {
-    fn append(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
+    async fn append(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
         let path = self.path_for(key);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| IngestError::Operation {
@@ -55,7 +57,7 @@ impl WalStorage for FileWalStorage {
             })
     }
 
-    fn read(&self, key: &str) -> Result<Vec<u8>, IngestError> {
+    async fn read(&self, key: &str) -> Result<Vec<u8>, IngestError> {
         fs::read(self.path_for(key)).map_err(|error| IngestError::Operation {
             message: error.to_string(),
         })
@@ -80,8 +82,9 @@ impl MemoryWalStorage {
     }
 }
 
+#[async_trait]
 impl WalStorage for MemoryWalStorage {
-    fn append(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
+    async fn append(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
         *self.append_calls.lock().unwrap() += 1;
         self.objects
             .lock()
@@ -92,7 +95,7 @@ impl WalStorage for MemoryWalStorage {
         Ok(())
     }
 
-    fn read(&self, key: &str) -> Result<Vec<u8>, IngestError> {
+    async fn read(&self, key: &str) -> Result<Vec<u8>, IngestError> {
         self.objects
             .lock()
             .unwrap()
@@ -115,8 +118,9 @@ impl RecordingQueue {
     }
 }
 
+#[async_trait]
 impl BuildQueue for RecordingQueue {
-    fn enqueue(&self, batch: QueueBatch) -> Result<(), IngestError> {
+    async fn enqueue(&self, batch: QueueBatch) -> Result<(), IngestError> {
         self.batches.lock().unwrap().push(batch);
         Ok(())
     }
@@ -127,8 +131,9 @@ struct FailingQueue {
     message: &'static str,
 }
 
+#[async_trait]
 impl BuildQueue for FailingQueue {
-    fn enqueue(&self, _batch: QueueBatch) -> Result<(), IngestError> {
+    async fn enqueue(&self, _batch: QueueBatch) -> Result<(), IngestError> {
         Err(IngestError::Operation {
             message: self.message.into(),
         })
@@ -182,8 +187,8 @@ fn collect_relative_file_paths(root: &Path) -> Vec<String> {
     files
 }
 
-#[test]
-fn ingest_appends_upsert_records_and_enqueues_batch_metadata() {
+#[tokio::test]
+async fn ingest_appends_upsert_records_and_enqueues_batch_metadata() {
     let storage = MemoryWalStorage::default();
     let queue = RecordingQueue::default();
     let wal = WriteAheadLog::new(storage.clone());
@@ -191,9 +196,9 @@ fn ingest_appends_upsert_records_and_enqueues_batch_metadata() {
     let first = sample_document("doc-1");
     let second = sample_document("doc-2");
 
-    let response = api.ingest(vec![first.clone(), second.clone()]).unwrap();
+    let response = api.ingest(vec![first.clone(), second.clone()]).await.unwrap();
     let wal_key = format!("wal/2023/11/14/{}.jsonl", response.batch_id);
-    let records = wal.read(&wal_key).unwrap();
+    let records = wal.read(&wal_key).await.unwrap();
     let queued = queue.batches();
 
     assert_eq!(response.accepted_count, 2);
@@ -218,16 +223,16 @@ fn ingest_appends_upsert_records_and_enqueues_batch_metadata() {
     assert_eq!(queued[0].wal_event_ids, response.wal_event_ids);
 }
 
-#[test]
-fn delete_appends_delete_records_and_enqueues_batch_metadata() {
+#[tokio::test]
+async fn delete_appends_delete_records_and_enqueues_batch_metadata() {
     let storage = MemoryWalStorage::default();
     let queue = RecordingQueue::default();
     let wal = WriteAheadLog::new(storage.clone());
     let api = WriteApi::new(wal.clone(), queue.clone()).with_clock(|| 1_700_000_086_400);
 
-    let response = api.delete(vec!["doc-1".into(), "doc-2".into()]).unwrap();
+    let response = api.delete(vec!["doc-1".into(), "doc-2".into()]).await.unwrap();
     let wal_key = format!("wal/2023/11/14/{}.jsonl", response.batch_id);
-    let records = wal.read(&wal_key).unwrap();
+    let records = wal.read(&wal_key).await.unwrap();
     let queued = queue.batches();
 
     assert_eq!(response.accepted_count, 2);
@@ -253,22 +258,22 @@ fn delete_appends_delete_records_and_enqueues_batch_metadata() {
     assert_eq!(queued[0].accepted_count, 2);
 }
 
-#[test]
-fn wal_append_happens_before_enqueue() {
+#[tokio::test]
+async fn wal_append_happens_before_enqueue() {
     let storage = MemoryWalStorage::default();
     let queue = RecordingQueue::default();
     let api = WriteApi::new(WriteAheadLog::new(storage.clone()), queue.clone())
         .with_clock(|| 1_700_000_000_000);
 
-    let response = api.ingest(vec![sample_document("doc-1")]).unwrap();
+    let response = api.ingest(vec![sample_document("doc-1")]).await.unwrap();
     let wal_key = format!("wal/2023/11/14/{}.jsonl", response.batch_id);
 
     assert!(storage.has_contents(&wal_key));
     assert_eq!(queue.batches()[0].wal_key, wal_key);
 }
 
-#[test]
-fn ingest_rejects_invalid_documents_before_side_effects() {
+#[tokio::test]
+async fn ingest_rejects_invalid_documents_before_side_effects() {
     let storage = MemoryWalStorage::default();
     let queue = RecordingQueue::default();
     let wal = WriteAheadLog::new(storage.clone());
@@ -276,7 +281,7 @@ fn ingest_rejects_invalid_documents_before_side_effects() {
     let mut invalid = sample_document("doc-1");
     invalid.text = String::new();
 
-    let error = api.ingest(vec![invalid]).unwrap_err();
+    let error = api.ingest(vec![invalid]).await.unwrap_err();
 
     assert!(matches!(
         error,
@@ -286,14 +291,14 @@ fn ingest_rejects_invalid_documents_before_side_effects() {
     assert!(storage.objects.lock().unwrap().is_empty());
 }
 
-#[test]
-fn delete_rejects_invalid_doc_ids_before_side_effects() {
+#[tokio::test]
+async fn delete_rejects_invalid_doc_ids_before_side_effects() {
     let storage = MemoryWalStorage::default();
     let queue = RecordingQueue::default();
     let wal = WriteAheadLog::new(storage.clone());
     let api = WriteApi::new(wal, queue.clone()).with_clock(|| 1_700_000_000_000);
 
-    let error = api.delete(vec![String::new()]).unwrap_err();
+    let error = api.delete(vec![String::new()]).await.unwrap_err();
 
     assert!(matches!(
         error,
@@ -303,14 +308,14 @@ fn delete_rejects_invalid_doc_ids_before_side_effects() {
     assert!(storage.objects.lock().unwrap().is_empty());
 }
 
-#[test]
-fn delete_rejects_invalid_clock_before_side_effects() {
+#[tokio::test]
+async fn delete_rejects_invalid_clock_before_side_effects() {
     let storage = MemoryWalStorage::default();
     let queue = RecordingQueue::default();
     let wal = WriteAheadLog::new(storage.clone());
     let api = WriteApi::new(wal, queue.clone()).with_clock(|| 1_700_000_000);
 
-    let error = api.delete(vec!["doc-1".into()]).unwrap_err();
+    let error = api.delete(vec!["doc-1".into()]).await.unwrap_err();
 
     assert!(matches!(
         error,
@@ -320,14 +325,14 @@ fn delete_rejects_invalid_clock_before_side_effects() {
     assert!(storage.objects.lock().unwrap().is_empty());
 }
 
-#[test]
-fn ingest_emits_expected_upsert_wal_records() {
+#[tokio::test]
+async fn ingest_emits_expected_upsert_wal_records() {
     let storage = MemoryWalStorage::default();
     let wal = WriteAheadLog::new(storage.clone());
     let api =
         WriteApi::new(wal.clone(), RecordingQueue::default()).with_clock(|| 1_700_000_000_000);
 
-    api.ingest(vec![sample_document("doc-1")]).unwrap();
+    api.ingest(vec![sample_document("doc-1")]).await.unwrap();
 
     let batch_id = storage
         .keys()
@@ -340,6 +345,7 @@ fn ingest_emits_expected_upsert_wal_records() {
 
     assert_eq!(
         wal.read(&format!("wal/2023/11/14/{batch_id}.jsonl"))
+            .await
             .unwrap(),
         vec![WalRecord {
             event_id: format!("{batch_id}-000001"),
@@ -351,8 +357,8 @@ fn ingest_emits_expected_upsert_wal_records() {
     );
 }
 
-#[test]
-fn ingest_uses_distinct_batch_ids_across_write_api_instances() {
+#[tokio::test]
+async fn ingest_uses_distinct_batch_ids_across_write_api_instances() {
     let first_storage = MemoryWalStorage::default();
     let second_storage = MemoryWalStorage::default();
     let first_api = WriteApi::new(
@@ -366,8 +372,8 @@ fn ingest_uses_distinct_batch_ids_across_write_api_instances() {
     )
     .with_clock(|| 1_700_000_000_001);
 
-    let first_response = first_api.ingest(vec![sample_document("doc-1")]).unwrap();
-    let second_response = second_api.ingest(vec![sample_document("doc-2")]).unwrap();
+    let first_response = first_api.ingest(vec![sample_document("doc-1")]).await.unwrap();
+    let second_response = second_api.ingest(vec![sample_document("doc-2")]).await.unwrap();
 
     assert_ne!(first_response.batch_id, second_response.batch_id);
     assert_ne!(
@@ -376,20 +382,21 @@ fn ingest_uses_distinct_batch_ids_across_write_api_instances() {
     );
 }
 
-#[test]
-fn ingest_writes_one_wal_object_per_batch() {
+#[tokio::test]
+async fn ingest_writes_one_wal_object_per_batch() {
     let storage = MemoryWalStorage::default();
     let wal = WriteAheadLog::new(storage.clone());
     let api = WriteApi::new(wal, RecordingQueue::default()).with_clock(|| 1_700_000_000_000);
 
     api.ingest(vec![sample_document("doc-1"), sample_document("doc-2")])
+        .await
         .unwrap();
 
     assert_eq!(storage.append_count(), 1);
 }
 
-#[test]
-fn restart_safe_batch_ids_produce_distinct_same_day_wal_keys() {
+#[tokio::test]
+async fn restart_safe_batch_ids_produce_distinct_same_day_wal_keys() {
     const CHILD_DIR: &str = "LTSEARCH_RESTART_SAFE_CHILD_DIR";
     const CHILD_DOC_ID: &str = "LTSEARCH_RESTART_SAFE_CHILD_DOC_ID";
 
@@ -401,6 +408,7 @@ fn restart_safe_batch_ids_produce_distinct_same_day_wal_keys() {
         api.ingest(vec![sample_document(
             &std::env::var(CHILD_DOC_ID).unwrap_or_else(|_| "doc-child".into()),
         )])
+        .await
         .unwrap();
         return;
     }
@@ -432,8 +440,8 @@ fn restart_safe_batch_ids_produce_distinct_same_day_wal_keys() {
     }
 }
 
-#[test]
-fn ingest_reports_batch_context_when_enqueue_fails_after_wal_append() {
+#[tokio::test]
+async fn ingest_reports_batch_context_when_enqueue_fails_after_wal_append() {
     let storage = MemoryWalStorage::default();
     let wal = WriteAheadLog::new(storage.clone());
     let api = WriteApi::new(
@@ -444,7 +452,7 @@ fn ingest_reports_batch_context_when_enqueue_fails_after_wal_append() {
     )
     .with_clock(|| 1_700_000_000_000);
 
-    let error = api.ingest(vec![sample_document("doc-1")]).unwrap_err();
+    let error = api.ingest(vec![sample_document("doc-1")]).await.unwrap_err();
 
     let message = error.to_string();
     assert!(message.contains("queue unavailable"));
