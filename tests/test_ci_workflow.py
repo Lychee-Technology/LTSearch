@@ -19,7 +19,6 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("workflow_dispatch:", content)
         self.assertIn("push:\n    branches:\n      - main", content)
         self.assertNotIn("schedule:", content)
-        self.assertNotIn("localstack", content.lower())
         self.assertNotIn("deploy", content.lower())
 
         jobs = self._parse_jobs(lines)
@@ -48,7 +47,12 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertNotIn("github.event.pull_request.head.sha", test)
         self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", test)
         self.assertIn("cache: true", test)
+        self.assertIn("run: docker compose -f docker-compose.localstack.yml up -d", test)
         self.assertIn("run: cargo test", test)
+        self.assertIn(
+            "if: always()\n        run: docker compose -f docker-compose.localstack.yml down -v",
+            test,
+        )
         self.assertNotIn("run: cargo fmt --check", test)
         self.assertNotIn("run: cargo clippy --all-targets --all-features -- -D warnings", test)
 
