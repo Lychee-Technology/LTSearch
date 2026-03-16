@@ -1,10 +1,13 @@
+use async_trait::async_trait;
+
 use crate::error::IngestError;
 use crate::error::ValidationError;
 use crate::models::WalRecord;
 
+#[async_trait]
 pub trait WalStorage: Clone + Send + Sync + 'static {
-    fn append(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError>;
-    fn read(&self, key: &str) -> Result<Vec<u8>, IngestError>;
+    async fn append(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError>;
+    async fn read(&self, key: &str) -> Result<Vec<u8>, IngestError>;
 }
 
 #[derive(Debug, Clone)]
@@ -20,7 +23,7 @@ where
         Self { storage }
     }
 
-    pub fn append(&self, key: &str, record: &WalRecord) -> Result<(), IngestError> {
+    pub async fn append(&self, key: &str, record: &WalRecord) -> Result<(), IngestError> {
         record.validate()?;
 
         let mut line = serde_json::to_vec(record).map_err(|error| IngestError::Operation {
@@ -28,15 +31,15 @@ where
         })?;
         line.push(b'\n');
 
-        self.append_bytes(key, &line)
+        self.append_bytes(key, &line).await
     }
 
-    pub fn append_bytes(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
-        self.storage.append(key, bytes)
+    pub async fn append_bytes(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
+        self.storage.append(key, bytes).await
     }
 
-    pub fn read(&self, key: &str) -> Result<Vec<WalRecord>, IngestError> {
-        let bytes = self.storage.read(key)?;
+    pub async fn read(&self, key: &str) -> Result<Vec<WalRecord>, IngestError> {
+        let bytes = self.storage.read(key).await?;
         let contents = std::str::from_utf8(&bytes).map_err(|error| IngestError::Operation {
             message: error.to_string(),
         })?;

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{PublishError, ValidationError};
@@ -33,11 +34,12 @@ pub struct PublishResult {
     pub previous_version_id: Option<u64>,
 }
 
+#[async_trait]
 pub trait PublishStorage: Clone + Send + Sync + 'static {
-    fn upload_directory(&self, key: &str, source: &Path) -> Result<(), PublishError>;
-    fn upload_file(&self, key: &str, source: &Path) -> Result<(), PublishError>;
-    fn read(&self, key: &str) -> Result<Option<Vec<u8>>, PublishError>;
-    fn compare_and_swap(
+    async fn upload_directory(&self, key: &str, source: &Path) -> Result<(), PublishError>;
+    async fn upload_file(&self, key: &str, source: &Path) -> Result<(), PublishError>;
+    async fn read(&self, key: &str) -> Result<Option<Vec<u8>>, PublishError>;
+    async fn compare_and_swap(
         &self,
         key: &str,
         expected: Option<&[u8]>,
@@ -62,11 +64,11 @@ where
         }
     }
 
-    pub fn publish(&self, request: &PublishRequest) -> Result<PublishResult, PublishError> {
+    pub async fn publish(&self, request: &PublishRequest) -> Result<PublishResult, PublishError> {
         request.manifest.validate()?;
         validate_updated_at(request.updated_at)?;
 
-        let current_head_bytes = self.storage.read(INDEX_HEAD_KEY)?;
+        let current_head_bytes = self.storage.read(INDEX_HEAD_KEY).await?;
         let current_head = current_head_bytes.as_deref().map(parse_head).transpose()?;
 
         validate_publish_version(request.manifest.version_id)?;
@@ -107,10 +109,12 @@ where
         }
 
         for upload in &directory_uploads {
-            self.storage.upload_directory(&upload.key, &upload.source)?;
+            self.storage.upload_directory(&upload.key, &upload.source).await?;
         }
 
-        self.storage.upload_file(&manifest_key, &manifest_source)?;
+        self.storage
+            .upload_file(&manifest_key, &manifest_source)
+            .await?;
 
         let new_head = HeadDocument {
             version_id: request.manifest.version_id,
@@ -122,15 +126,19 @@ where
                 message: format!("failed to serialize manifest head: {source}"),
             })?;
 
-        let swapped = self.storage.compare_and_swap(
+        let swapped = self
+            .storage
+            .compare_and_swap(
             INDEX_HEAD_KEY,
             current_head_bytes.as_deref(),
             &new_head_bytes,
-        )?;
+        )
+            .await?;
         if !swapped {
             let observed = self
                 .storage
-                .read(INDEX_HEAD_KEY)?
+                .read(INDEX_HEAD_KEY)
+                .await?
                 .as_deref()
                 .map(parse_head)
                 .transpose()?
@@ -149,11 +157,11 @@ where
         })
     }
 
-    pub fn rollback(&self, request: &RollbackRequest) -> Result<PublishResult, PublishError> {
+    pub async fn rollback(&self, request: &RollbackRequest) -> Result<PublishResult, PublishError> {
         validate_publish_version(request.target_version_id)?;
         validate_updated_at(request.updated_at)?;
 
-        let current_head_bytes = self.storage.read(INDEX_HEAD_KEY)?;
+        let current_head_bytes = self.storage.read(INDEX_HEAD_KEY).await?;
         let current_head = current_head_bytes.as_deref().map(parse_head).transpose()?;
 
         if current_head.as_ref().map(|head| head.version_id) != request.expected_current_version {
@@ -169,7 +177,8 @@ where
         let target_manifest_key = version_manifest_key(request.target_version_id);
         let target_manifest_bytes =
             self.storage
-                .read(&target_manifest_key)?
+                .read(&target_manifest_key)
+                .await?
                 .ok_or_else(|| PublishError::Operation {
                     message: format!("rollback target manifest missing: {target_manifest_key}"),
                 })?;
@@ -189,15 +198,19 @@ where
                 message: format!("failed to serialize manifest head: {source}"),
             })?;
 
-        let swapped = self.storage.compare_and_swap(
+        let swapped = self
+            .storage
+            .compare_and_swap(
             INDEX_HEAD_KEY,
             current_head_bytes.as_deref(),
             &new_head_bytes,
-        )?;
+        )
+            .await?;
         if !swapped {
             let observed = self
                 .storage
-                .read(INDEX_HEAD_KEY)?
+                .read(INDEX_HEAD_KEY)
+                .await?
                 .as_deref()
                 .map(parse_head)
                 .transpose()?

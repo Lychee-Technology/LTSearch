@@ -1,4 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{IngestError, ValidationError};
@@ -6,7 +9,7 @@ use crate::models::{DeleteResponse, Document, IngestResponse, WalOperation, WalR
 
 use super::wal::{segment_key, WalStorage, WriteAheadLog};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueBatch {
     pub batch_id: String,
     pub wal_key: String,
@@ -14,8 +17,9 @@ pub struct QueueBatch {
     pub wal_event_ids: Vec<String>,
 }
 
+#[async_trait]
 pub trait BuildQueue: Clone + Send + Sync + 'static {
-    fn enqueue(&self, batch: QueueBatch) -> Result<(), IngestError>;
+    async fn enqueue(&self, batch: QueueBatch) -> Result<(), IngestError>;
 }
 
 #[derive(Clone)]
@@ -61,7 +65,7 @@ where
         }
     }
 
-    pub fn ingest(&self, documents: Vec<Document>) -> Result<IngestResponse, IngestError> {
+    pub async fn ingest(&self, documents: Vec<Document>) -> Result<IngestResponse, IngestError> {
         if documents.is_empty() {
             return Err(IngestError::Validation(ValidationError::Required {
                 field: "documents",
@@ -89,7 +93,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        self.append_and_enqueue(&batch_id, &wal_key, &records)?;
+        self.append_and_enqueue(&batch_id, &wal_key, &records).await?;
 
         Ok(IngestResponse {
             accepted_count: records.len(),
@@ -101,7 +105,7 @@ where
         })
     }
 
-    pub fn delete(&self, doc_ids: Vec<String>) -> Result<DeleteResponse, IngestError> {
+    pub async fn delete(&self, doc_ids: Vec<String>) -> Result<DeleteResponse, IngestError> {
         if doc_ids.is_empty() {
             return Err(IngestError::Validation(ValidationError::Required {
                 field: "doc_ids",
@@ -129,7 +133,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        self.append_and_enqueue(&batch_id, &wal_key, &records)?;
+        self.append_and_enqueue(&batch_id, &wal_key, &records).await?;
 
         Ok(DeleteResponse {
             accepted_count: records.len(),
@@ -141,13 +145,13 @@ where
         })
     }
 
-    fn append_and_enqueue(
+    async fn append_and_enqueue(
         &self,
         batch_id: &str,
         wal_key: &str,
         records: &[WalRecord],
     ) -> Result<(), IngestError> {
-        append_records(&self.wal, wal_key, records)?;
+        append_records(&self.wal, wal_key, records).await?;
 
         self.queue
             .enqueue(QueueBatch {
@@ -159,6 +163,7 @@ where
                     .map(|record| record.event_id.clone())
                     .collect(),
             })
+            .await
             .map_err(|error| IngestError::Operation {
                 message: format!(
                     "{} (batch_id={batch_id}, wal_key={wal_key}, wal_persisted=true)",
@@ -172,7 +177,7 @@ where
     }
 }
 
-fn append_records<S>(
+async fn append_records<S>(
     wal: &WriteAheadLog<S>,
     wal_key: &str,
     records: &[WalRecord],
@@ -190,7 +195,7 @@ where
         bytes.extend_from_slice(&line);
     }
 
-    wal.append_bytes(wal_key, &bytes)
+    wal.append_bytes(wal_key, &bytes).await
 }
 
 fn current_time_millis() -> i64 {

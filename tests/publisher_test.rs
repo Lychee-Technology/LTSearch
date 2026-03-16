@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use ltsearch::error::PublishError;
 use ltsearch::indexing::{IndexPublisher, PublishRequest, PublishStorage, RollbackRequest};
 use ltsearch::models::{IndexManifest, ShardManifest};
@@ -62,8 +63,9 @@ impl RecordingPublishStorage {
     }
 }
 
+#[async_trait]
 impl PublishStorage for RecordingPublishStorage {
-    fn upload_directory(&self, key: &str, source: &Path) -> Result<(), PublishError> {
+    async fn upload_directory(&self, key: &str, source: &Path) -> Result<(), PublishError> {
         self.calls
             .lock()
             .unwrap()
@@ -79,7 +81,7 @@ impl PublishStorage for RecordingPublishStorage {
         Ok(())
     }
 
-    fn upload_file(&self, key: &str, source: &Path) -> Result<(), PublishError> {
+    async fn upload_file(&self, key: &str, source: &Path) -> Result<(), PublishError> {
         self.calls
             .lock()
             .unwrap()
@@ -92,12 +94,12 @@ impl PublishStorage for RecordingPublishStorage {
         Ok(())
     }
 
-    fn read(&self, key: &str) -> Result<Option<Vec<u8>>, PublishError> {
+    async fn read(&self, key: &str) -> Result<Option<Vec<u8>>, PublishError> {
         self.calls.lock().unwrap().push(format!("read:{key}"));
         Ok(self.file_bytes(key))
     }
 
-    fn compare_and_swap(
+    async fn compare_and_swap(
         &self,
         key: &str,
         expected: Option<&[u8]>,
@@ -201,8 +203,8 @@ fn s3_key(value: &str) -> String {
         .to_string()
 }
 
-#[test]
-fn publisher_uploads_artifacts_and_manifest_before_updating_head() {
+#[tokio::test]
+async fn publisher_uploads_artifacts_and_manifest_before_updating_head() {
     let build_root = temp_fixture_dir("publisher-upload-order");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
@@ -217,6 +219,7 @@ fn publisher_uploads_artifacts_and_manifest_before_updating_head() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap();
 
     let calls = storage.calls();
@@ -238,8 +241,8 @@ fn publisher_uploads_artifacts_and_manifest_before_updating_head() {
     }
 }
 
-#[test]
-fn publisher_conditionally_updates_head_with_current_head_contents() {
+#[tokio::test]
+async fn publisher_conditionally_updates_head_with_current_head_contents() {
     let build_root = temp_fixture_dir("publisher-conditional-head");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
@@ -255,6 +258,7 @@ fn publisher_conditionally_updates_head_with_current_head_contents() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap();
 
     assert_eq!(storage.last_expected(), Some(Some(current_head)));
@@ -264,8 +268,8 @@ fn publisher_conditionally_updates_head_with_current_head_contents() {
     );
 }
 
-#[test]
-fn publisher_rejects_publish_race_without_corrupting_active_version() {
+#[tokio::test]
+async fn publisher_rejects_publish_race_without_corrupting_active_version() {
     let build_root = temp_fixture_dir("publisher-race-rejection");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
@@ -281,6 +285,7 @@ fn publisher_rejects_publish_race_without_corrupting_active_version() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("conflict"));
@@ -290,8 +295,8 @@ fn publisher_rejects_publish_race_without_corrupting_active_version() {
     );
 }
 
-#[test]
-fn publisher_preserves_previous_version_artifacts_on_success() {
+#[tokio::test]
+async fn publisher_preserves_previous_version_artifacts_on_success() {
     let build_root = temp_fixture_dir("publisher-preserves-previous-version");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
@@ -309,6 +314,7 @@ fn publisher_preserves_previous_version_artifacts_on_success() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap();
 
     assert_eq!(published.previous_version_id, Some(8));
@@ -327,8 +333,8 @@ fn publisher_preserves_previous_version_artifacts_on_success() {
     );
 }
 
-#[test]
-fn rollback_restores_previous_active_version() {
+#[tokio::test]
+async fn rollback_restores_previous_active_version() {
     let build_root = temp_fixture_dir("publisher-rollback-restores-previous-active-version");
     let current_manifest = sample_manifest(9);
     create_source_build(&build_root, &current_manifest);
@@ -352,6 +358,7 @@ fn rollback_restores_previous_active_version() {
             expected_current_version: Some(current_manifest.version_id),
             updated_at: 1_700_000_000_900,
         })
+        .await
         .unwrap();
 
     assert_eq!(rolled_back.previous_version_id, Some(9));
@@ -370,8 +377,8 @@ fn rollback_restores_previous_active_version() {
     );
 }
 
-#[test]
-fn rollback_rejects_stale_expected_current_version_before_target_lookup() {
+#[tokio::test]
+async fn rollback_rejects_stale_expected_current_version_before_target_lookup() {
     let build_root = temp_fixture_dir("publisher-rollback-stale-expected-current-version");
     let current_manifest = sample_manifest(9);
     create_source_build(&build_root, &current_manifest);
@@ -386,6 +393,7 @@ fn rollback_rejects_stale_expected_current_version_before_target_lookup() {
             expected_current_version: Some(7),
             updated_at: 1_700_000_000_900,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("conflict"));
@@ -396,8 +404,8 @@ fn rollback_rejects_stale_expected_current_version_before_target_lookup() {
     );
 }
 
-#[test]
-fn rollback_rejects_compare_and_swap_conflict_without_corrupting_active_version() {
+#[tokio::test]
+async fn rollback_rejects_compare_and_swap_conflict_without_corrupting_active_version() {
     let build_root = temp_fixture_dir("publisher-rollback-compare-and-swap-conflict");
     let current_manifest = sample_manifest(9);
     create_source_build(&build_root, &current_manifest);
@@ -418,6 +426,7 @@ fn rollback_rejects_compare_and_swap_conflict_without_corrupting_active_version(
             expected_current_version: Some(current_manifest.version_id),
             updated_at: 1_700_000_000_900,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("conflict"));
@@ -427,8 +436,8 @@ fn rollback_rejects_compare_and_swap_conflict_without_corrupting_active_version(
     );
 }
 
-#[test]
-fn rollback_rejects_missing_target_manifest_before_head_update() {
+#[tokio::test]
+async fn rollback_rejects_missing_target_manifest_before_head_update() {
     let build_root = temp_fixture_dir("publisher-rollback-missing-target-manifest");
     let current_manifest = sample_manifest(9);
     create_source_build(&build_root, &current_manifest);
@@ -443,6 +452,7 @@ fn rollback_rejects_missing_target_manifest_before_head_update() {
             expected_current_version: Some(current_manifest.version_id),
             updated_at: 1_700_000_000_900,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("missing"));
@@ -459,8 +469,8 @@ fn rollback_rejects_missing_target_manifest_before_head_update() {
     );
 }
 
-#[test]
-fn rollback_rejects_invalid_target_manifest_before_head_update() {
+#[tokio::test]
+async fn rollback_rejects_invalid_target_manifest_before_head_update() {
     let build_root = temp_fixture_dir("publisher-rollback-invalid-target-manifest");
     let current_manifest = sample_manifest(9);
     create_source_build(&build_root, &current_manifest);
@@ -476,6 +486,7 @@ fn rollback_rejects_invalid_target_manifest_before_head_update() {
             expected_current_version: Some(current_manifest.version_id),
             updated_at: 1_700_000_000_900,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("manifest"));
@@ -492,8 +503,8 @@ fn rollback_rejects_invalid_target_manifest_before_head_update() {
     );
 }
 
-#[test]
-fn rollback_rejects_target_manifest_with_mismatched_version_id_before_head_update() {
+#[tokio::test]
+async fn rollback_rejects_target_manifest_with_mismatched_version_id_before_head_update() {
     let build_root = temp_fixture_dir("publisher-rollback-mismatched-target-version-id");
     let current_manifest = sample_manifest(9);
     create_source_build(&build_root, &current_manifest);
@@ -509,6 +520,7 @@ fn rollback_rejects_target_manifest_with_mismatched_version_id_before_head_updat
             expected_current_version: Some(current_manifest.version_id),
             updated_at: 1_700_000_000_900,
         })
+        .await
         .unwrap_err();
 
     assert!(
@@ -528,8 +540,8 @@ fn rollback_rejects_target_manifest_with_mismatched_version_id_before_head_updat
     );
 }
 
-#[test]
-fn publisher_rejects_zero_version_before_upload_or_head_update() {
+#[tokio::test]
+async fn publisher_rejects_zero_version_before_upload_or_head_update() {
     let build_root = temp_fixture_dir("publisher-zero-version");
     let manifest = sample_manifest(0);
     create_source_build(&build_root, &manifest);
@@ -544,6 +556,7 @@ fn publisher_rejects_zero_version_before_upload_or_head_update() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("version_id"));
@@ -554,8 +567,8 @@ fn publisher_rejects_zero_version_before_upload_or_head_update() {
     );
 }
 
-#[test]
-fn publisher_rejects_path_escaping_artifact_keys_before_upload() {
+#[tokio::test]
+async fn publisher_rejects_path_escaping_artifact_keys_before_upload() {
     let build_root = temp_fixture_dir("publisher-path-escape");
     let mut manifest = sample_manifest(9);
     manifest.shards[0].lance_path = "s3://local-artifacts/../outside".into();
@@ -571,14 +584,15 @@ fn publisher_rejects_path_escaping_artifact_keys_before_upload() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("path") || error.to_string().contains("artifact"));
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }
 
-#[test]
-fn publisher_rejects_absolute_style_artifact_keys_before_upload() {
+#[tokio::test]
+async fn publisher_rejects_absolute_style_artifact_keys_before_upload() {
     let build_root = temp_fixture_dir("publisher-absolute-style-path");
     let mut manifest = sample_manifest(9);
     manifest.shards[0].tantivy_path = "s3://local-artifacts//absolute-style".into();
@@ -594,14 +608,15 @@ fn publisher_rejects_absolute_style_artifact_keys_before_upload() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("path") || error.to_string().contains("artifact"));
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }
 
-#[test]
-fn publisher_rejects_stale_manifest_file_before_upload() {
+#[tokio::test]
+async fn publisher_rejects_stale_manifest_file_before_upload() {
     let build_root = temp_fixture_dir("publisher-stale-manifest-file");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
@@ -623,14 +638,15 @@ fn publisher_rejects_stale_manifest_file_before_upload() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("manifest"));
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }
 
-#[test]
-fn publisher_rejects_invalid_current_head_before_upload() {
+#[tokio::test]
+async fn publisher_rejects_invalid_current_head_before_upload() {
     let build_root = temp_fixture_dir("publisher-invalid-current-head");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
@@ -653,6 +669,7 @@ fn publisher_rejects_invalid_current_head_before_upload() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(
@@ -661,8 +678,8 @@ fn publisher_rejects_invalid_current_head_before_upload() {
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }
 
-#[test]
-fn publisher_rejects_symlinked_shard_path_that_escapes_artifact_root() {
+#[tokio::test]
+async fn publisher_rejects_symlinked_shard_path_that_escapes_artifact_root() {
     let build_root = temp_fixture_dir("publisher-symlinked-shard-escape");
     let outside_root = temp_fixture_dir("publisher-symlinked-shard-outside");
     let manifest = sample_manifest(9);
@@ -683,14 +700,15 @@ fn publisher_rejects_symlinked_shard_path_that_escapes_artifact_root() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("artifact") || error.to_string().contains("escape"));
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }
 
-#[test]
-fn publisher_rejects_symlinked_manifest_path_that_escapes_artifact_root() {
+#[tokio::test]
+async fn publisher_rejects_symlinked_manifest_path_that_escapes_artifact_root() {
     let build_root = temp_fixture_dir("publisher-symlinked-manifest-escape");
     let outside_root = temp_fixture_dir("publisher-symlinked-manifest-outside");
     let manifest = sample_manifest(9);
@@ -716,14 +734,15 @@ fn publisher_rejects_symlinked_manifest_path_that_escapes_artifact_root() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("artifact") || error.to_string().contains("escape"));
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }
 
-#[test]
-fn publisher_rejects_mismatched_manifest_path_in_current_head_before_upload() {
+#[tokio::test]
+async fn publisher_rejects_mismatched_manifest_path_in_current_head_before_upload() {
     let build_root = temp_fixture_dir("publisher-invalid-current-head-manifest-path");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
@@ -746,14 +765,15 @@ fn publisher_rejects_mismatched_manifest_path_in_current_head_before_upload() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("manifest_path"));
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }
 
-#[test]
-fn publisher_rejects_nested_symlink_escape_inside_shard_directory() {
+#[tokio::test]
+async fn publisher_rejects_nested_symlink_escape_inside_shard_directory() {
     let build_root = temp_fixture_dir("publisher-nested-symlink-escape");
     let outside_root = temp_fixture_dir("publisher-nested-symlink-outside");
     let manifest = sample_manifest(9);
@@ -777,14 +797,15 @@ fn publisher_rejects_nested_symlink_escape_inside_shard_directory() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("artifact") || error.to_string().contains("escape"));
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }
 
-#[test]
-fn publisher_handles_symlink_cycle_inside_shard_directory_without_hanging() {
+#[tokio::test]
+async fn publisher_handles_symlink_cycle_inside_shard_directory_without_hanging() {
     let build_root = temp_fixture_dir("publisher-symlink-cycle-inside-shard");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
@@ -802,14 +823,22 @@ fn publisher_handles_symlink_cycle_inside_shard_directory_without_hanging() {
     let publisher = IndexPublisher::new(&build_root, storage.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let result = publisher
-            .publish(&PublishRequest {
-                manifest,
-                expected_current_version: Some(8),
-                updated_at: 1_700_000_000_500,
-            })
-            .map(|_| ())
-            .map_err(|error| error.to_string());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = runtime
+            .block_on(async move {
+                publisher
+                    .publish(&PublishRequest {
+                        manifest,
+                        expected_current_version: Some(8),
+                        updated_at: 1_700_000_000_500,
+                    })
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
         let _ = tx.send(result);
     });
 
@@ -823,8 +852,8 @@ fn publisher_handles_symlink_cycle_inside_shard_directory_without_hanging() {
     }
 }
 
-#[test]
-fn publisher_validates_all_shards_before_starting_any_upload() {
+#[tokio::test]
+async fn publisher_validates_all_shards_before_starting_any_upload() {
     let build_root = temp_fixture_dir("publisher-validate-all-shards-first");
     let mut manifest = sample_manifest(9);
     manifest.document_count = 4;
@@ -855,14 +884,15 @@ fn publisher_validates_all_shards_before_starting_any_upload() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("artifact") || error.to_string().contains("escape"));
     assert_eq!(storage.calls(), vec![format!("read:{INDEX_HEAD_KEY}")]);
 }
 
-#[test]
-fn publisher_rejects_file_backed_shard_source_before_starting_any_upload() {
+#[tokio::test]
+async fn publisher_rejects_file_backed_shard_source_before_starting_any_upload() {
     let build_root = temp_fixture_dir("publisher-file-backed-shard-source");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
@@ -881,6 +911,7 @@ fn publisher_rejects_file_backed_shard_source_before_starting_any_upload() {
             expected_current_version: Some(8),
             updated_at: 1_700_000_000_500,
         })
+        .await
         .unwrap_err();
 
     assert!(error.to_string().contains("directory"));

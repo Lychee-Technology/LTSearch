@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use ltsearch::error::{IngestError, ValidationError};
 use ltsearch::models::{Document, WalOperation, WalRecord};
 use ltsearch::write::{segment_key, WalStorage, WriteAheadLog};
@@ -28,8 +29,9 @@ impl MemoryWalStorage {
     }
 }
 
+#[async_trait]
 impl WalStorage for MemoryWalStorage {
-    fn append(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
+    async fn append(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
         let mut objects = self.objects.lock().unwrap();
         objects
             .entry(key.to_string())
@@ -38,7 +40,7 @@ impl WalStorage for MemoryWalStorage {
         Ok(())
     }
 
-    fn read(&self, key: &str) -> Result<Vec<u8>, IngestError> {
+    async fn read(&self, key: &str) -> Result<Vec<u8>, IngestError> {
         self.objects
             .lock()
             .unwrap()
@@ -82,20 +84,20 @@ fn segment_key_uses_canonical_date_partitioned_jsonl_layout() {
     );
 }
 
-#[test]
-fn append_writes_jsonl_records_in_order_and_read_returns_them() {
+#[tokio::test]
+async fn append_writes_jsonl_records_in_order_and_read_returns_them() {
     let storage = MemoryWalStorage::default();
     let wal = WriteAheadLog::new(storage.clone());
     let key = segment_key(1_700_000_000_000, "segment-000007").unwrap();
     let first = sample_record("evt-1", "doc-1");
     let second = sample_record("evt-2", "doc-2");
 
-    wal.append(&key, &first).unwrap();
-    wal.append(&key, &second).unwrap();
+    wal.append(&key, &first).await.unwrap();
+    wal.append(&key, &second).await.unwrap();
 
     let contents = storage.read_utf8(&key);
     let lines: Vec<_> = contents.lines().collect();
-    let read_back = wal.read(&key).unwrap();
+    let read_back = wal.read(&key).await.unwrap();
 
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0], serde_json::to_string(&first).unwrap());
@@ -104,8 +106,8 @@ fn append_writes_jsonl_records_in_order_and_read_returns_them() {
     assert!(contents.ends_with('\n'));
 }
 
-#[test]
-fn append_rejects_invalid_records_before_persistence() {
+#[tokio::test]
+async fn append_rejects_invalid_records_before_persistence() {
     let storage = MemoryWalStorage::default();
     let wal = WriteAheadLog::new(storage.clone());
     let key = segment_key(1_700_000_000_000, "segment-000003").unwrap();
@@ -114,7 +116,7 @@ fn append_rejects_invalid_records_before_persistence() {
         ..sample_record("evt-1", "doc-1")
     };
 
-    let error = wal.append(&key, &invalid).unwrap_err();
+    let error = wal.append(&key, &invalid).await.unwrap_err();
 
     assert!(matches!(
         error,
@@ -123,8 +125,8 @@ fn append_rejects_invalid_records_before_persistence() {
     assert!(!storage.contains_key(&key));
 }
 
-#[test]
-fn read_rejects_invalid_records_already_present_in_storage() {
+#[tokio::test]
+async fn read_rejects_invalid_records_already_present_in_storage() {
     let storage = MemoryWalStorage::default();
     let wal = WriteAheadLog::new(storage.clone());
     let key = segment_key(1_700_000_000_000, "segment-000005").unwrap();
@@ -135,9 +137,10 @@ fn read_rejects_invalid_records_already_present_in_storage() {
             br#"{"event_id":"","doc_id":"doc-1","op":"upsert","document":{"doc_id":"doc-1","text":"document doc-1","embedding":null,"metadata":{},"timestamp":1700000000000},"timestamp":1700000000000}
 "#,
         )
+        .await
         .unwrap();
 
-    let error = wal.read(&key).unwrap_err();
+    let error = wal.read(&key).await.unwrap_err();
 
     assert!(matches!(
         error,
