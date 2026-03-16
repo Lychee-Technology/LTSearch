@@ -47,10 +47,10 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertNotIn("github.event.pull_request.head.sha", test)
         self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", test)
         self.assertIn("cache: true", test)
-        self.assertIn("run: docker compose -f docker-compose.localstack.yml up -d", test)
+        self.assertIn("run: docker compose -f docker-compose.moto.yml up -d", test)
         self.assertIn("run: cargo test", test)
         self.assertIn(
-            "if: always()\n        run: docker compose -f docker-compose.localstack.yml down -v",
+            "if: always()\n        run: docker compose -f docker-compose.moto.yml down -v",
             test,
         )
         self.assertNotIn("run: cargo fmt --check", test)

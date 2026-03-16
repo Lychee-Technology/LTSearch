@@ -1,43 +1,43 @@
-# LocalStack Write-Build-Publish Implementation Plan
+# Moto Write-Build-Publish Implementation Plan
 
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add LocalStack-backed end-to-end integration coverage for the write-build-publish flow using real S3 and SQS interactions without implementing Lambda in this issue.
+**Goal:** Add Moto-backed end-to-end integration coverage for the write-build-publish flow using real S3 and SQS interactions without implementing Lambda in this issue.
 
-**Architecture:** Refactor the write/build/publish storage and queue traits to async so AWS SDK adapters can be implemented naturally. Then add only the smallest S3/SQS adapter layer needed to talk to LocalStack, while keeping queue consumption orchestration in the integration test as a one-shot harness that models the future SQS consumer Lambda without turning it into production runtime code.
+**Architecture:** Refactor the write/build/publish storage and queue traits to async so AWS SDK adapters can be implemented naturally. Then add only the smallest S3/SQS adapter layer needed to talk to Moto, while keeping queue consumption orchestration in the integration test as a one-shot harness that models the future SQS consumer Lambda without turning it into production runtime code.
 
-**Tech Stack:** Rust, `tokio`, `aws-config`, `aws-sdk-s3`, `aws-sdk-sqs`, LocalStack, Docker Compose, existing LTSearch write/indexing traits
+**Tech Stack:** Rust, `tokio`, `aws-config`, `aws-sdk-s3`, `aws-sdk-sqs`, Moto, Docker Compose, existing LTSearch write/indexing traits
 
 ---
 
 ## File Structure
 
-- Create: `src/adapters/s3_wal.rs` - LocalStack/AWS-backed `WalStorage`
-- Create: `src/adapters/sqs_build_queue.rs` - LocalStack/AWS-backed `BuildQueue`
-- Create: `src/adapters/s3_publish.rs` - LocalStack/AWS-backed `PublishStorage`
+- Create: `src/adapters/s3_wal.rs` - Moto/AWS-backed `WalStorage`
+- Create: `src/adapters/sqs_build_queue.rs` - Moto/AWS-backed `BuildQueue`
+- Create: `src/adapters/s3_publish.rs` - Moto/AWS-backed `PublishStorage`
 - Modify: `src/adapters/mod.rs` - export the new adapter modules
 - Modify: `src/write/wal.rs` - convert `WalStorage` and `WriteAheadLog` to async
 - Modify: `src/write/api.rs` - convert `BuildQueue` and `WriteApi` ingest/delete flow to async
 - Modify: `src/indexing/publisher.rs` - convert `PublishStorage` and `IndexPublisher` publish/rollback flow to async
 - Modify: `Cargo.toml` - add AWS SDK dependencies exactly once
-- Create: `tests/write_build_publish_test.rs` - LocalStack integration tests and one-shot consumer harness
-- Create: `docker-compose.localstack.yml` - LocalStack S3/SQS services for local integration runs
+- Create: `tests/write_build_publish_test.rs` - Moto integration tests and one-shot consumer harness
+- Create: `docker-compose.moto.yml` - Moto S3/SQS services for local integration runs
 
 ## Chunk 1: Bootstrap, dependencies, and readiness
 
-### Task 1: Add LocalStack bootstrap smoke coverage and SDK dependencies
+### Task 1: Add Moto bootstrap smoke coverage and SDK dependencies
 
 **Files:**
 - Modify: `Cargo.toml`
 - Create: `tests/write_build_publish_test.rs`
-- Create: `docker-compose.localstack.yml`
+- Create: `docker-compose.moto.yml`
 
-- [ ] **Step 1: Write the failing LocalStack readiness smoke test**
+- [ ] **Step 1: Write the failing Moto readiness smoke test**
 
 ```rust
 #[tokio::test]
-async fn localstack_smoke_test_can_create_bucket_and_queue() {
-    let harness = LocalstackHarness::new("bootstrap-smoke").await;
+async fn moto_smoke_test_can_create_bucket_and_queue() {
+    let harness = MotoHarness::new("bootstrap-smoke").await;
     assert!(harness.bucket_exists().await);
     assert!(harness.queue_exists().await);
 }
@@ -45,8 +45,8 @@ async fn localstack_smoke_test_can_create_bucket_and_queue() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test --test write_build_publish_test localstack_smoke_test_can_create_bucket_and_queue -- --exact --nocapture`
-Expected: FAIL with missing test file or missing `LocalstackHarness`.
+Run: `cargo test --test write_build_publish_test moto_smoke_test_can_create_bucket_and_queue -- --exact --nocapture`
+Expected: FAIL with missing test file or missing `MotoHarness`.
 
 - [ ] **Step 3: Add AWS dependencies in `Cargo.toml`**
 
@@ -56,47 +56,46 @@ aws-sdk-s3 = "1"
 aws-sdk-sqs = "1"
 ```
 
-- [ ] **Step 4: Add `docker-compose.localstack.yml`**
+- [ ] **Step 4: Add `docker-compose.moto.yml`**
 
 ```yaml
 services:
-  localstack:
-    image: localstack/localstack:3.8
+  moto:
+    image: motoserver/moto:latest
     ports:
-      - "4566:4566"
+      - "5000:5000"
     environment:
-      SERVICES: s3,sqs
-      AWS_DEFAULT_REGION: us-east-1
+      MOTO_PORT: "5000"
 ```
 
-- [ ] **Step 5: Start LocalStack**
+- [ ] **Step 5: Start Moto**
 
-Run: `docker compose -f docker-compose.localstack.yml up -d`
+Run: `docker compose -f docker-compose.moto.yml up -d`
 Expected: container starts.
 
 - [ ] **Step 6: Add the minimal smoke-test harness and readiness check**
 
 In `tests/write_build_publish_test.rs`, add only:
 
-- `LocalstackHarness { bucket, queue_url, s3, sqs }`
+- `MotoHarness { bucket, queue_url, s3, sqs }`
 - AWS SDK config using:
-  - endpoint `http://localhost:4566`
+  - endpoint `http://localhost:5000`
   - fixed region `us-east-1`
   - static test credentials
   - path-style S3
-- a readiness helper that repeatedly attempts real S3 `create_bucket` and SQS `create_queue` calls until LocalStack responds or times out
+- a readiness helper that repeatedly attempts real S3 `create_bucket` and SQS `create_queue` calls until Moto responds or times out
 - `bucket_exists()` and `queue_exists()` helpers that confirm those resources exist
 
 - [ ] **Step 7: Run the smoke test to verify it passes**
 
-Run: `cargo test --test write_build_publish_test localstack_smoke_test_can_create_bucket_and_queue -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test moto_smoke_test_can_create_bucket_and_queue -- --exact --nocapture`
 Expected: PASS.
 
-- [ ] **Step 8: Commit the LocalStack bootstrap**
+- [ ] **Step 8: Commit the Moto bootstrap**
 
 ```bash
-git add Cargo.toml tests/write_build_publish_test.rs docker-compose.localstack.yml
-git commit -m "test: add localstack bootstrap smoke coverage"
+git add Cargo.toml tests/write_build_publish_test.rs docker-compose.moto.yml
+git commit -m "test: add moto bootstrap smoke coverage"
 ```
 
 ## Chunk 2: Async trait refactor and adapter scaffolding
@@ -207,8 +206,8 @@ use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::adapters::sqs_build_queue::AwsSqsBuildQueue;
 
 #[tokio::test]
-async fn localstack_harness_can_construct_all_adapter_types() {
-    let harness = LocalstackHarness::new("adapter-constructors").await;
+async fn moto_harness_can_construct_all_adapter_types() {
+    let harness = MotoHarness::new("adapter-constructors").await;
     let _ = AwsS3WalStorage::new(harness.bucket.clone(), harness.s3.clone());
     let _ = AwsSqsBuildQueue::new(harness.queue_url.clone(), harness.sqs.clone());
     let _ = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
@@ -217,7 +216,7 @@ async fn localstack_harness_can_construct_all_adapter_types() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test --test write_build_publish_test localstack_harness_can_construct_all_adapter_types -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test moto_harness_can_construct_all_adapter_types -- --exact --nocapture`
 Expected: FAIL with missing adapter modules or missing constructors.
 
 - [ ] **Step 3: Add adapter module exports in `src/adapters/mod.rs`**
@@ -235,14 +234,14 @@ No trait methods yet. Just `new(...)` and stored fields.
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `cargo test --test write_build_publish_test localstack_harness_can_construct_all_adapter_types -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test moto_harness_can_construct_all_adapter_types -- --exact --nocapture`
 Expected: PASS.
 
 - [ ] **Step 6: Commit the adapter scaffolding**
 
 ```bash
 git add src/adapters/mod.rs src/adapters/s3_wal.rs src/adapters/sqs_build_queue.rs src/adapters/s3_publish.rs tests/write_build_publish_test.rs
-git commit -m "feat: scaffold localstack aws adapters"
+git commit -m "feat: scaffold moto aws adapters"
 ```
 
 ## Chunk 3: S3 WAL and SQS queue adapters
@@ -258,7 +257,7 @@ git commit -m "feat: scaffold localstack aws adapters"
 ```rust
 #[tokio::test]
 async fn s3_wal_storage_first_append_creates_object() {
-    let harness = LocalstackHarness::new("s3-wal-create").await;
+    let harness = MotoHarness::new("s3-wal-create").await;
     let wal = WriteAheadLog::new(AwsS3WalStorage::new(harness.bucket.clone(), harness.s3.clone()));
 
     wal.append_bytes("wal/2023/11/14/batch-test.jsonl", b"line-1\n").unwrap();
@@ -290,8 +289,8 @@ Expected: PASS.
 
 ```rust
 #[tokio::test]
-async fn s3_wal_storage_round_trips_jsonl_bytes_against_localstack() {
-    let harness = LocalstackHarness::new("s3-wal-roundtrip").await;
+async fn s3_wal_storage_round_trips_jsonl_bytes_against_moto() {
+    let harness = MotoHarness::new("s3-wal-roundtrip").await;
     let wal = WriteAheadLog::new(AwsS3WalStorage::new(harness.bucket.clone(), harness.s3.clone()));
     let key = "wal/2023/11/14/batch-test.jsonl";
 
@@ -306,7 +305,7 @@ async fn s3_wal_storage_round_trips_jsonl_bytes_against_localstack() {
 
 - [ ] **Step 6: Run the test to verify it fails**
 
-Run: `cargo test --test write_build_publish_test s3_wal_storage_round_trips_jsonl_bytes_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test s3_wal_storage_round_trips_jsonl_bytes_against_moto -- --exact --nocapture`
 Expected: FAIL with `WalStorage::read` not implemented.
 
 - [ ] **Step 7: Implement only `read`**
@@ -315,7 +314,7 @@ In `src/adapters/s3_wal.rs`, implement `read` by returning raw object bytes so `
 
 - [ ] **Step 8: Run the test to verify it passes**
 
-Run: `cargo test --test write_build_publish_test s3_wal_storage_round_trips_jsonl_bytes_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test s3_wal_storage_round_trips_jsonl_bytes_against_moto -- --exact --nocapture`
 Expected: PASS.
 
 - [ ] **Step 9: Commit the S3 WAL adapter**
@@ -335,8 +334,8 @@ git commit -m "feat: add s3-backed wal adapter"
 
 ```rust
 #[tokio::test]
-async fn sqs_build_queue_enqueues_batch_metadata_against_localstack() {
-    let harness = LocalstackHarness::new("sqs-build-queue").await;
+async fn sqs_build_queue_enqueues_batch_metadata_against_moto() {
+    let harness = MotoHarness::new("sqs-build-queue").await;
     let queue = AwsSqsBuildQueue::new(harness.queue_url.clone(), harness.sqs.clone());
 
     queue.enqueue(QueueBatch {
@@ -353,7 +352,7 @@ async fn sqs_build_queue_enqueues_batch_metadata_against_localstack() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test --test write_build_publish_test sqs_build_queue_enqueues_batch_metadata_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test sqs_build_queue_enqueues_batch_metadata_against_moto -- --exact --nocapture`
 Expected: FAIL with `BuildQueue::enqueue` not implemented.
 
 - [ ] **Step 3: Implement only `enqueue`**
@@ -366,7 +365,7 @@ In `tests/write_build_publish_test.rs`, implement only a helper that receives on
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `cargo test --test write_build_publish_test sqs_build_queue_enqueues_batch_metadata_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test sqs_build_queue_enqueues_batch_metadata_against_moto -- --exact --nocapture`
 Expected: PASS.
 
 - [ ] **Step 6: Commit the SQS queue adapter**
@@ -389,7 +388,7 @@ git commit -m "feat: add sqs-backed build queue adapter"
 ```rust
 #[tokio::test]
 async fn publish_storage_uploads_and_reads_manifest_bytes() {
-    let harness = LocalstackHarness::new("publish-storage-read").await;
+    let harness = MotoHarness::new("publish-storage-read").await;
     let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
     let artifact_root = harness.new_artifact_root();
     let manifest_path = artifact_root.join("index/versions/7/manifest.json");
@@ -420,7 +419,7 @@ Expected: PASS.
 ```rust
 #[tokio::test]
 async fn publish_storage_compare_and_swap_updates_head_when_expected_matches() {
-    let harness = LocalstackHarness::new("publish-storage-cas").await;
+    let harness = MotoHarness::new("publish-storage-cas").await;
     let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
 
     let swapped = storage.compare_and_swap("index/_head", None, b"{}").unwrap();
@@ -435,7 +434,7 @@ Expected: FAIL because `compare_and_swap` is not implemented.
 
 - [ ] **Step 7: Implement only success-path compare-and-swap**
 
-In `src/adapters/s3_publish.rs`, implement LocalStack test-scope byte-compare-put behavior:
+In `src/adapters/s3_publish.rs`, implement Moto test-scope byte-compare-put behavior:
 
 - read current object bytes
 - compare to `expected`
@@ -453,7 +452,7 @@ Expected: PASS.
 ```rust
 #[tokio::test]
 async fn publish_storage_compare_and_swap_returns_false_when_expected_mismatches() {
-    let harness = LocalstackHarness::new("publish-storage-cas-mismatch").await;
+    let harness = MotoHarness::new("publish-storage-cas-mismatch").await;
     let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
 
     assert!(storage.compare_and_swap("index/_head", None, b"old").unwrap());
@@ -491,8 +490,8 @@ git commit -m "feat: add s3-backed publish storage adapter"
 
 ```rust
 #[tokio::test]
-async fn localstack_harness_receives_and_decodes_one_queue_batch() {
-    let harness = LocalstackHarness::new("decode-batch").await;
+async fn moto_harness_receives_and_decodes_one_queue_batch() {
+    let harness = MotoHarness::new("decode-batch").await;
     AwsSqsBuildQueue::new(harness.queue_url.clone(), harness.sqs.clone())
         .enqueue(QueueBatch {
             batch_id: "batch-xyz".into(),
@@ -509,7 +508,7 @@ async fn localstack_harness_receives_and_decodes_one_queue_batch() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test --test write_build_publish_test localstack_harness_receives_and_decodes_one_queue_batch -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test moto_harness_receives_and_decodes_one_queue_batch -- --exact --nocapture`
 Expected: FAIL because `receive_batch()` does not exist.
 
 - [ ] **Step 3: Implement only `receive_batch()`**
@@ -522,14 +521,14 @@ In `tests/write_build_publish_test.rs`, add a helper that:
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test --test write_build_publish_test localstack_harness_receives_and_decodes_one_queue_batch -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test moto_harness_receives_and_decodes_one_queue_batch -- --exact --nocapture`
 Expected: PASS.
 
 - [ ] **Step 5: Commit the queue decode helper**
 
 ```bash
 git add tests/write_build_publish_test.rs
-git commit -m "test: add localstack queue batch decode helper"
+git commit -m "test: add moto queue batch decode helper"
 ```
 
 ### Task 7: Add the failing end-to-end integration test and implement the one-shot consumer harness in strict slices
@@ -541,8 +540,8 @@ git commit -m "test: add localstack queue batch decode helper"
 
 ```rust
 #[tokio::test]
-async fn write_build_publish_flow_runs_end_to_end_against_localstack() {
-    let harness = LocalstackHarness::new("write-build-publish").await;
+async fn write_build_publish_flow_runs_end_to_end_against_moto() {
+    let harness = MotoHarness::new("write-build-publish").await;
     let wal = WriteAheadLog::new(AwsS3WalStorage::new(harness.bucket.clone(), harness.s3.clone()));
     let queue = AwsSqsBuildQueue::new(harness.queue_url.clone(), harness.sqs.clone());
     let api = WriteApi::new(wal, queue).with_clock(|| 1_700_000_000_000);
@@ -561,14 +560,14 @@ async fn write_build_publish_flow_runs_end_to_end_against_localstack() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_moto -- --exact --nocapture`
 Expected: FAIL with missing `assert_wal_object_exists` or missing `consume_build_and_publish`.
 
 - [ ] **Step 3: Implement only `assert_wal_object_exists()`**
 
 - [ ] **Step 4: Run the same test again**
 
-Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_moto -- --exact --nocapture`
 Expected: FAIL with missing `consume_build_and_publish`.
 
 - [ ] **Step 5: Implement only `build_request_from_batch(...)`**
@@ -581,7 +580,7 @@ Use fixed values:
 
 - [ ] **Step 6: Run the same test again**
 
-Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_moto -- --exact --nocapture`
 Expected: FAIL with missing `build_from_batch(...)` or missing `consume_build_and_publish`.
 
 - [ ] **Step 7: Implement only `build_from_batch(...)`**
@@ -594,7 +593,7 @@ Add:
 
 - [ ] **Step 8: Run the same test again**
 
-Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_moto -- --exact --nocapture`
 Expected: FAIL with missing `publish_build_result(...)` or missing `consume_build_and_publish(...)`.
 
 - [ ] **Step 9: Implement only `publish_build_result(...)`**
@@ -606,35 +605,35 @@ Add:
 
 - [ ] **Step 10: Run the same test again**
 
-Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_moto -- --exact --nocapture`
 Expected: FAIL with missing `consume_build_and_publish(...)`, `assert_manifest_exists(...)`, or `assert_head_points_to(...)`.
 
 - [ ] **Step 11: Implement only `consume_build_and_publish()` as a thin composition of `build_request_from_batch(...)`, `build_from_batch(...)`, and `publish_build_result(...)`**
 
 - [ ] **Step 12: Run the same test again**
 
-Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_moto -- --exact --nocapture`
 Expected: FAIL with missing `assert_manifest_exists(...)` or `assert_head_points_to(...)`.
 
 - [ ] **Step 13: Implement only `assert_manifest_exists()`**
 
 - [ ] **Step 14: Run the same test again**
 
-Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_moto -- --exact --nocapture`
 Expected: FAIL with missing `assert_head_points_to(...)`.
 
 - [ ] **Step 15: Implement only `assert_head_points_to()`**
 
 - [ ] **Step 16: Run the same test to verify it passes**
 
-Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_localstack -- --exact --nocapture`
+Run: `cargo test --test write_build_publish_test write_build_publish_flow_runs_end_to_end_against_moto -- --exact --nocapture`
 Expected: PASS.
 
 - [ ] **Step 17: Commit the end-to-end coverage**
 
 ```bash
 git add tests/write_build_publish_test.rs
-git commit -m "test: add write-build-publish localstack flow"
+git commit -m "test: add write-build-publish moto flow"
 ```
 
 ## Chunk 5: Regression verification
@@ -644,7 +643,7 @@ git commit -m "test: add write-build-publish localstack flow"
 **Files:**
 - Modify: `tests/write_build_publish_test.rs`
 
-- [ ] **Step 1: Run the full LocalStack integration test file**
+- [ ] **Step 1: Run the full Moto integration test file**
 
 Run: `cargo test --test write_build_publish_test -- --nocapture`
 Expected: PASS.
@@ -658,7 +657,7 @@ Ensure the integration file still isolates:
 - build result creation
 - `_head` activation
 
-- [ ] **Step 3: Re-run the LocalStack integration test file**
+- [ ] **Step 3: Re-run the Moto integration test file**
 
 Run: `cargo test --test write_build_publish_test -- --nocapture`
 Expected: PASS.
@@ -677,5 +676,5 @@ Expected: PASS.
 
 ```bash
 git add tests/write_build_publish_test.rs
-git commit -m "test: finalize localstack integration verification"
+git commit -m "test: finalize moto integration verification"
 ```

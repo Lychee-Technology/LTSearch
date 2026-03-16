@@ -20,7 +20,7 @@ use ltsearch::indexing::{
 };
 use ltsearch::write::{BuildQueue, WalStorage};
 
-struct LocalstackHarness {
+struct MotoHarness {
     artifact_root: std::path::PathBuf,
     bucket: String,
     queue_url: String,
@@ -29,8 +29,8 @@ struct LocalstackHarness {
 }
 
 #[tokio::test]
-async fn localstack_smoke_test_can_create_bucket_and_queue() {
-    let harness = LocalstackHarness::new("bootstrap-smoke").await;
+async fn moto_smoke_test_can_create_bucket_and_queue() {
+    let harness = MotoHarness::new("bootstrap-smoke").await;
     assert!(harness.bucket_exists().await);
     assert!(harness.queue_exists().await);
 }
@@ -51,8 +51,8 @@ async fn index_publisher_publish_can_be_awaited_in_integration_context() {
 }
 
 #[tokio::test]
-async fn localstack_harness_can_construct_all_adapter_types() {
-    let harness = LocalstackHarness::new("adapter-constructors").await;
+async fn moto_harness_can_construct_all_adapter_types() {
+    let harness = MotoHarness::new("adapter-constructors").await;
     let _ = AwsS3WalStorage::new(harness.bucket.clone(), harness.s3.clone());
     let _ = AwsSqsBuildQueue::new(harness.queue_url.clone(), harness.sqs.clone());
     let _ = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
@@ -60,7 +60,7 @@ async fn localstack_harness_can_construct_all_adapter_types() {
 
 #[tokio::test]
 async fn s3_wal_storage_first_append_creates_object() {
-    let harness = LocalstackHarness::new("s3-wal-create").await;
+    let harness = MotoHarness::new("s3-wal-create").await;
     let wal = ltsearch::write::WriteAheadLog::new(AwsS3WalStorage::new(
         harness.bucket.clone(),
         harness.s3.clone(),
@@ -77,8 +77,8 @@ async fn s3_wal_storage_first_append_creates_object() {
 }
 
 #[tokio::test]
-async fn s3_wal_storage_round_trips_jsonl_bytes_against_localstack() {
-    let harness = LocalstackHarness::new("s3-wal-roundtrip").await;
+async fn s3_wal_storage_round_trips_jsonl_bytes_against_moto() {
+    let harness = MotoHarness::new("s3-wal-roundtrip").await;
     let wal = ltsearch::write::WriteAheadLog::new(AwsS3WalStorage::new(
         harness.bucket.clone(),
         harness.s3.clone(),
@@ -98,8 +98,8 @@ async fn s3_wal_storage_round_trips_jsonl_bytes_against_localstack() {
 }
 
 #[tokio::test]
-async fn sqs_build_queue_enqueues_batch_metadata_against_localstack() {
-    let harness = LocalstackHarness::new("sqs-build-queue").await;
+async fn sqs_build_queue_enqueues_batch_metadata_against_moto() {
+    let harness = MotoHarness::new("sqs-build-queue").await;
     let queue = AwsSqsBuildQueue::new(harness.queue_url.clone(), harness.sqs.clone());
 
     queue
@@ -119,7 +119,7 @@ async fn sqs_build_queue_enqueues_batch_metadata_against_localstack() {
 
 #[tokio::test]
 async fn publish_storage_uploads_and_reads_manifest_bytes() {
-    let harness = LocalstackHarness::new("publish-storage-read").await;
+    let harness = MotoHarness::new("publish-storage-read").await;
     let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
     let artifact_root = harness.new_artifact_root();
     let manifest_path = artifact_root.join("index/versions/7/manifest.json");
@@ -139,7 +139,7 @@ async fn publish_storage_uploads_and_reads_manifest_bytes() {
 
 #[tokio::test]
 async fn publish_storage_compare_and_swap_updates_head_when_expected_matches() {
-    let harness = LocalstackHarness::new("publish-storage-cas").await;
+    let harness = MotoHarness::new("publish-storage-cas").await;
     let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
 
     let swapped = storage
@@ -151,7 +151,7 @@ async fn publish_storage_compare_and_swap_updates_head_when_expected_matches() {
 
 #[tokio::test]
 async fn publish_storage_compare_and_swap_returns_false_when_expected_mismatches() {
-    let harness = LocalstackHarness::new("publish-storage-cas-mismatch").await;
+    let harness = MotoHarness::new("publish-storage-cas-mismatch").await;
     let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
 
     assert!(storage
@@ -209,8 +209,8 @@ async fn s3_wal_append_stops_before_put_when_existing_read_fails() {
 }
 
 #[tokio::test]
-async fn localstack_harness_receives_and_decodes_one_queue_batch() {
-    let harness = LocalstackHarness::new("decode-batch").await;
+async fn moto_harness_receives_and_decodes_one_queue_batch() {
+    let harness = MotoHarness::new("decode-batch").await;
     AwsSqsBuildQueue::new(harness.queue_url.clone(), harness.sqs.clone())
         .enqueue(ltsearch::write::QueueBatch {
             batch_id: "batch-xyz".into(),
@@ -227,8 +227,8 @@ async fn localstack_harness_receives_and_decodes_one_queue_batch() {
 }
 
 #[tokio::test]
-async fn write_build_publish_flow_runs_end_to_end_against_localstack() {
-    let harness = LocalstackHarness::new("write-build-publish").await;
+async fn write_build_publish_flow_runs_end_to_end_against_moto() {
+    let harness = MotoHarness::new("write-build-publish").await;
     let wal = ltsearch::write::WriteAheadLog::new(AwsS3WalStorage::new(
         harness.bucket.clone(),
         harness.s3.clone(),
@@ -249,7 +249,7 @@ async fn write_build_publish_flow_runs_end_to_end_against_localstack() {
 
 #[tokio::test]
 async fn publish_step_uses_original_build_artifacts_instead_of_rebuilding_documents() {
-    let harness = LocalstackHarness::new("publish-original-build").await;
+    let harness = MotoHarness::new("publish-original-build").await;
     let wal = ltsearch::write::WriteAheadLog::new(AwsS3WalStorage::new(
         harness.bucket.clone(),
         harness.s3.clone(),
@@ -275,7 +275,7 @@ async fn publish_step_uses_original_build_artifacts_instead_of_rebuilding_docume
     assert_eq!(manifest.document_count, original_document_count);
 }
 
-impl LocalstackHarness {
+impl MotoHarness {
     async fn new(name: &str) -> Self {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -286,13 +286,13 @@ impl LocalstackHarness {
         let artifact_root =
             std::env::temp_dir().join(format!("ltsearch-build-publish-artifacts-{name}-{suffix}"));
 
-        let credentials = Credentials::new("test", "test", None, None, "localstack");
+        let credentials = Credentials::new("test", "test", None, None, "moto");
         let region = Region::new("us-east-1");
 
         let shared_config = aws_config::defaults(BehaviorVersion::latest())
             .region(region.clone())
             .credentials_provider(credentials)
-            .endpoint_url("http://localhost:4566")
+            .endpoint_url("http://localhost:5000")
             .load()
             .await;
 
@@ -552,7 +552,7 @@ async fn wait_until_ready(
         }
 
         if std::time::Instant::now() >= deadline {
-            panic!("LocalStack did not become ready: {last_error}");
+            panic!("Moto did not become ready: {last_error}");
         }
 
         tokio::time::sleep(Duration::from_millis(500)).await;
