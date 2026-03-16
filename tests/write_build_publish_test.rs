@@ -5,17 +5,19 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use aws_config::BehaviorVersion;
 use aws_config::retry::RetryConfig;
-use aws_sdk_s3::Client as S3Client;
+use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
+use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sqs::Client as SqsClient;
 use ltsearch::adapters::s3_publish::AwsPublishStorage;
 use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::adapters::sqs_build_queue::AwsSqsBuildQueue;
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
-use ltsearch::indexing::{BuildIndexRequest, BuildIndexResult, IndexPublisher, LocalIndexBuilder, PublishRequest};
 use ltsearch::indexing::PublishStorage;
+use ltsearch::indexing::{
+    BuildIndexRequest, BuildIndexResult, IndexPublisher, LocalIndexBuilder, PublishRequest,
+};
 use ltsearch::write::{BuildQueue, WalStorage};
 
 struct LocalstackHarness {
@@ -68,7 +70,9 @@ async fn s3_wal_storage_first_append_creates_object() {
         .await
         .unwrap();
 
-    let stored = harness.read_s3_text("wal/2023/11/14/batch-test.jsonl").await;
+    let stored = harness
+        .read_s3_text("wal/2023/11/14/batch-test.jsonl")
+        .await;
     assert_eq!(stored, "line-1\n");
 }
 
@@ -138,7 +142,10 @@ async fn publish_storage_compare_and_swap_updates_head_when_expected_matches() {
     let harness = LocalstackHarness::new("publish-storage-cas").await;
     let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
 
-    let swapped = storage.compare_and_swap("index/_head", None, b"{}").await.unwrap();
+    let swapped = storage
+        .compare_and_swap("index/_head", None, b"{}")
+        .await
+        .unwrap();
     assert!(swapped);
 }
 
@@ -165,9 +172,14 @@ async fn publish_storage_read_propagates_non_missing_object_errors() {
         s3_client_for_endpoint(&server.endpoint_url).await,
     );
 
-    let error = storage.read("index/_head").await.expect_err("expected read to fail");
+    let error = storage
+        .read("index/_head")
+        .await
+        .expect_err("expected read to fail");
 
-    assert!(error.to_string().contains("failed to load object index/_head"));
+    assert!(error
+        .to_string()
+        .contains("failed to load object index/_head"));
     assert_eq!(
         server.finish(),
         vec!["GET /test-bucket/index/_head?x-id=GetObject".to_string()]
@@ -177,7 +189,10 @@ async fn publish_storage_read_propagates_non_missing_object_errors() {
 #[tokio::test]
 async fn s3_wal_append_stops_before_put_when_existing_read_fails() {
     let server = MockS3Server::start(vec![MockHttpResponse::access_denied()]);
-    let wal = AwsS3WalStorage::new("test-bucket", s3_client_for_endpoint(&server.endpoint_url).await);
+    let wal = AwsS3WalStorage::new(
+        "test-bucket",
+        s3_client_for_endpoint(&server.endpoint_url).await,
+    );
 
     let error = wal
         .append("wal/2023/11/14/batch-test.jsonl", b"line-2\n")
@@ -252,7 +267,9 @@ async fn publish_step_uses_original_build_artifacts_instead_of_rebuilding_docume
 
     let artifact_root = harness.latest_build_artifact_root();
     build_result.documents.clear();
-    harness.publish_build_result(&build_result, artifact_root).await;
+    harness
+        .publish_build_result(&build_result, artifact_root)
+        .await;
 
     let manifest = harness.read_manifest(1).await;
     assert_eq!(manifest.document_count, original_document_count);
@@ -266,7 +283,8 @@ impl LocalstackHarness {
             .as_millis();
         let bucket = format!("ltsearch-{name}-{suffix}").to_lowercase();
         let queue_name = format!("ltsearch-{name}-{suffix}");
-        let artifact_root = std::env::temp_dir().join(format!("ltsearch-build-publish-artifacts-{name}-{suffix}"));
+        let artifact_root =
+            std::env::temp_dir().join(format!("ltsearch-build-publish-artifacts-{name}-{suffix}"));
 
         let credentials = Credentials::new("test", "test", None, None, "localstack");
         let region = Region::new("us-east-1");
@@ -296,7 +314,12 @@ impl LocalstackHarness {
     }
 
     async fn bucket_exists(&self) -> bool {
-        self.s3.head_bucket().bucket(&self.bucket).send().await.is_ok()
+        self.s3
+            .head_bucket()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .is_ok()
     }
 
     async fn queue_exists(&self) -> bool {
@@ -399,7 +422,8 @@ impl LocalstackHarness {
     ) -> ltsearch::indexing::BuildIndexResult {
         let build_request = self.build_request_from_batch(batch).await;
         let build_result = self.build_from_batch(&build_request);
-        self.publish_build_result(&build_result, self.latest_build_artifact_root()).await;
+        self.publish_build_result(&build_result, self.latest_build_artifact_root())
+            .await;
         build_result
     }
 
@@ -434,10 +458,16 @@ impl LocalstackHarness {
             .expect("missing _head object");
         let head: ltsearch::storage::ManifestHead = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(head.version_id, version_id);
-        assert_eq!(head.manifest_path, format!("index/versions/{version_id}/manifest.json"));
+        assert_eq!(
+            head.manifest_path,
+            format!("index/versions/{version_id}/manifest.json")
+        );
     }
 
-    async fn build_request_from_batch(&self, batch: ltsearch::write::QueueBatch) -> BuildIndexRequest {
+    async fn build_request_from_batch(
+        &self,
+        batch: ltsearch::write::QueueBatch,
+    ) -> BuildIndexRequest {
         let wal = ltsearch::write::WriteAheadLog::new(AwsS3WalStorage::new(
             self.bucket.clone(),
             self.s3.clone(),
@@ -460,7 +490,11 @@ impl LocalstackHarness {
         builder.build(request).unwrap()
     }
 
-    async fn publish_build_result(&self, build_result: &BuildIndexResult, artifact_root: std::path::PathBuf) {
+    async fn publish_build_result(
+        &self,
+        build_result: &BuildIndexResult,
+        artifact_root: std::path::PathBuf,
+    ) {
         let publisher = IndexPublisher::new(
             &artifact_root,
             AwsPublishStorage::new(self.bucket.clone(), self.s3.clone()),
@@ -476,7 +510,12 @@ impl LocalstackHarness {
     }
 }
 
-async fn wait_until_ready(s3: &S3Client, sqs: &SqsClient, bucket: &str, queue_name: &str) -> String {
+async fn wait_until_ready(
+    s3: &S3Client,
+    sqs: &SqsClient,
+    bucket: &str,
+    queue_name: &str,
+) -> String {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut bucket_ready = false;
     let mut queue_url = None;
@@ -499,19 +538,17 @@ async fn wait_until_ready(s3: &S3Client, sqs: &SqsClient, bucket: &str, queue_na
         if queue_url.is_none() {
             match sqs.create_queue().queue_name(queue_name).send().await {
                 Ok(queue) => queue_url = queue.queue_url,
-                Err(error) => {
-                    match sqs.get_queue_url().queue_name(queue_name).send().await {
-                        Ok(existing) => queue_url = existing.queue_url,
-                        Err(_) => {
-                            last_error = format!("queue={error:?}");
-                        }
+                Err(error) => match sqs.get_queue_url().queue_name(queue_name).send().await {
+                    Ok(existing) => queue_url = existing.queue_url,
+                    Err(_) => {
+                        last_error = format!("queue={error:?}");
                     }
-                }
+                },
             }
         }
 
-        if bucket_ready && queue_url.is_some() {
-            return queue_url.expect("queue url missing");
+        if let (true, Some(queue_url)) = (bucket_ready, queue_url.clone()) {
+            return queue_url;
         }
 
         if std::time::Instant::now() >= deadline {
@@ -651,7 +688,10 @@ impl MockS3Server {
         if let Some(handle) = self.handle.take() {
             handle.join().unwrap();
         }
-        Arc::try_unwrap(self.requests).unwrap().into_inner().unwrap()
+        Arc::try_unwrap(self.requests)
+            .unwrap()
+            .into_inner()
+            .unwrap()
     }
 }
 

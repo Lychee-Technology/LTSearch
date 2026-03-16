@@ -196,7 +196,10 @@ async fn ingest_appends_upsert_records_and_enqueues_batch_metadata() {
     let first = sample_document("doc-1");
     let second = sample_document("doc-2");
 
-    let response = api.ingest(vec![first.clone(), second.clone()]).await.unwrap();
+    let response = api
+        .ingest(vec![first.clone(), second.clone()])
+        .await
+        .unwrap();
     let wal_key = format!("wal/2023/11/14/{}.jsonl", response.batch_id);
     let records = wal.read(&wal_key).await.unwrap();
     let queued = queue.batches();
@@ -230,7 +233,10 @@ async fn delete_appends_delete_records_and_enqueues_batch_metadata() {
     let wal = WriteAheadLog::new(storage.clone());
     let api = WriteApi::new(wal.clone(), queue.clone()).with_clock(|| 1_700_000_086_400);
 
-    let response = api.delete(vec!["doc-1".into(), "doc-2".into()]).await.unwrap();
+    let response = api
+        .delete(vec!["doc-1".into(), "doc-2".into()])
+        .await
+        .unwrap();
     let wal_key = format!("wal/2023/11/14/{}.jsonl", response.batch_id);
     let records = wal.read(&wal_key).await.unwrap();
     let queued = queue.batches();
@@ -372,8 +378,14 @@ async fn ingest_uses_distinct_batch_ids_across_write_api_instances() {
     )
     .with_clock(|| 1_700_000_000_001);
 
-    let first_response = first_api.ingest(vec![sample_document("doc-1")]).await.unwrap();
-    let second_response = second_api.ingest(vec![sample_document("doc-2")]).await.unwrap();
+    let first_response = first_api
+        .ingest(vec![sample_document("doc-1")])
+        .await
+        .unwrap();
+    let second_response = second_api
+        .ingest(vec![sample_document("doc-2")])
+        .await
+        .unwrap();
 
     assert_ne!(first_response.batch_id, second_response.batch_id);
     assert_ne!(
@@ -452,7 +464,10 @@ async fn ingest_reports_batch_context_when_enqueue_fails_after_wal_append() {
     )
     .with_clock(|| 1_700_000_000_000);
 
-    let error = api.ingest(vec![sample_document("doc-1")]).await.unwrap_err();
+    let error = api
+        .ingest(vec![sample_document("doc-1")])
+        .await
+        .unwrap_err();
 
     let message = error.to_string();
     assert!(message.contains("queue unavailable"));

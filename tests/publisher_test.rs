@@ -827,18 +827,17 @@ async fn publisher_handles_symlink_cycle_inside_shard_directory_without_hanging(
             .enable_all()
             .build()
             .unwrap();
-        let result = runtime
-            .block_on(async move {
-                publisher
-                    .publish(&PublishRequest {
-                        manifest,
-                        expected_current_version: Some(8),
-                        updated_at: 1_700_000_000_500,
-                    })
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-            });
+        let result = runtime.block_on(async move {
+            publisher
+                .publish(&PublishRequest {
+                    manifest,
+                    expected_current_version: Some(8),
+                    updated_at: 1_700_000_000_500,
+                })
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        });
         let _ = tx.send(result);
     });
 
