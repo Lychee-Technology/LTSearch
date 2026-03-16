@@ -109,7 +109,9 @@ where
         }
 
         for upload in &directory_uploads {
-            self.storage.upload_directory(&upload.key, &upload.source).await?;
+            self.storage
+                .upload_directory(&upload.key, &upload.source)
+                .await?;
         }
 
         self.storage
@@ -129,10 +131,10 @@ where
         let swapped = self
             .storage
             .compare_and_swap(
-            INDEX_HEAD_KEY,
-            current_head_bytes.as_deref(),
-            &new_head_bytes,
-        )
+                INDEX_HEAD_KEY,
+                current_head_bytes.as_deref(),
+                &new_head_bytes,
+            )
             .await?;
         if !swapped {
             let observed = self
@@ -201,10 +203,10 @@ where
         let swapped = self
             .storage
             .compare_and_swap(
-            INDEX_HEAD_KEY,
-            current_head_bytes.as_deref(),
-            &new_head_bytes,
-        )
+                INDEX_HEAD_KEY,
+                current_head_bytes.as_deref(),
+                &new_head_bytes,
+            )
             .await?;
         if !swapped {
             let observed = self

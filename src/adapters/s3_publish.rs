@@ -3,8 +3,8 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use aws_sdk_s3::error::ProvideErrorMetadata;
-use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::Client as S3Client;
 
 use crate::error::PublishError;
 use crate::indexing::PublishStorage;
@@ -81,7 +81,14 @@ impl PublishStorage for AwsPublishStorage {
     }
 
     async fn read(&self, key: &str) -> Result<Option<Vec<u8>>, PublishError> {
-        let object = match self.client.get_object().bucket(&self.bucket).key(key).send().await {
+        let object = match self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .send()
+            .await
+        {
             Ok(object) => object,
             Err(error) if is_missing_object_error(&error) => return Ok(None),
             Err(error) => {
@@ -130,9 +137,13 @@ impl PublishStorage for AwsPublishStorage {
     }
 }
 
-fn is_missing_object_error(error: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>) -> bool {
+fn is_missing_object_error(
+    error: &aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::get_object::GetObjectError>,
+) -> bool {
     matches!(
-        error.as_service_error().and_then(ProvideErrorMetadata::code),
+        error
+            .as_service_error()
+            .and_then(ProvideErrorMetadata::code),
         Some("NoSuchKey") | Some("NotFound")
     )
 }

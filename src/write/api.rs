@@ -93,7 +93,8 @@ where
             })
             .collect::<Vec<_>>();
 
-        self.append_and_enqueue(&batch_id, &wal_key, &records).await?;
+        self.append_and_enqueue(&batch_id, &wal_key, &records)
+            .await?;
 
         Ok(IngestResponse {
             accepted_count: records.len(),
@@ -133,7 +134,8 @@ where
             })
             .collect::<Vec<_>>();
 
-        self.append_and_enqueue(&batch_id, &wal_key, &records).await?;
+        self.append_and_enqueue(&batch_id, &wal_key, &records)
+            .await?;
 
         Ok(DeleteResponse {
             accepted_count: records.len(),
