@@ -135,6 +135,10 @@ fn build_embedding_generator(
                 message: error.to_string(),
             })
         }),
+        EmbeddingProvider::LTEmbed => Err(BuildLambdaPayload::Error(BuildLambdaError {
+            error_type: "build_error".into(),
+            message: "unsupported LTSEARCH_BUILD_EMBEDDING_PROVIDER: ltembed".into(),
+        })),
     }
 }
 

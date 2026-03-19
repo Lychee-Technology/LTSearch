@@ -1,3 +1,4 @@
+use std::env;
 use std::fmt;
 use std::fs;
 use std::str::FromStr;
@@ -7,7 +8,7 @@ use ltembed::error::LTEmbedError;
 use ltembed::traits::pooling::{CLSPooling, MeanPooling, Pooling};
 use thiserror::Error;
 
-use crate::embedding::{EmbeddingError, EmbeddingGenerator};
+use crate::embedding::{EmbeddingError, EmbeddingGenerator, EmbeddingProviderError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LTEmbedConfig {
@@ -94,6 +95,41 @@ impl LTEmbedEmbeddingGenerator<ZeroVecEngine> {
             prefix: normalize_prefix(config.prefix.clone()),
         })
     }
+}
+
+pub fn ltembed_config_from_env(
+    model_var: &str,
+    config_var: &str,
+    tokenizer_var: &str,
+    pooling_var: &str,
+    prefix_var: &str,
+) -> Result<LTEmbedConfig, EmbeddingProviderError> {
+    let model_path = env::var(model_var).map_err(|_| EmbeddingProviderError::Config {
+        message: format!("missing {model_var}"),
+    })?;
+    let config_path = env::var(config_var).map_err(|_| EmbeddingProviderError::Config {
+        message: format!("missing {config_var}"),
+    })?;
+    let tokenizer_path = env::var(tokenizer_var).map_err(|_| EmbeddingProviderError::Config {
+        message: format!("missing {tokenizer_var}"),
+    })?;
+    let pooling = env::var(pooling_var)
+        .map_err(|_| EmbeddingProviderError::Config {
+            message: format!("missing {pooling_var}"),
+        })?
+        .parse::<LTEmbedPoolingMode>()
+        .map_err(|error| EmbeddingProviderError::Config {
+            message: error.to_string(),
+        })?;
+    let prefix = env::var(prefix_var).ok();
+
+    Ok(LTEmbedConfig {
+        model_path,
+        config_path,
+        tokenizer_path,
+        pooling,
+        prefix,
+    })
 }
 
 impl<E> LTEmbedEmbeddingGenerator<E>
