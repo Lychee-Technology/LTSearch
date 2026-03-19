@@ -22,39 +22,40 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertNotIn("deploy", content.lower())
 
         jobs = self._parse_jobs(lines)
-        self.assertEqual(set(jobs.keys()), {"lint", "test"})
+        self.assertEqual(set(jobs.keys()), {"fast", "integration"})
 
-        lint = jobs["lint"]
-        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", lint)
-        self.assertIn("timeout-minutes: 20", lint)
-        self.assertIn("uses: actions/checkout@v6", lint)
+        fast = jobs["fast"]
+        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", fast)
+        self.assertIn("timeout-minutes: 30", fast)
+        self.assertIn("uses: actions/checkout@v6", fast)
         self.assertIn(
             "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
-            lint,
+            fast,
         )
-        self.assertIn("uses: actions/setup-python@v6", lint)
-        self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", lint)
-        self.assertIn("cache: true", lint)
-        self.assertIn("run: python3 -B tests/test_ci_workflow.py", lint)
-        self.assertIn("run: cargo fmt --check", lint)
-        self.assertIn("run: cargo clippy --all-targets --all-features -- -D warnings", lint)
-        self.assertNotIn("run: cargo test", lint)
+        self.assertIn("uses: actions/setup-python@v6", fast)
+        self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", fast)
+        self.assertIn("cache: true", fast)
+        self.assertIn("run: python3 -B tests/test_ci_workflow.py", fast)
+        self.assertIn("run: python3 -B tests/test_readme_workflow.py", fast)
+        self.assertIn("run: bash scripts/verify-fast.sh", fast)
+        self.assertNotIn("docker compose -f docker-compose.moto.yml up -d", fast)
 
-        test = jobs["test"]
-        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", test)
-        self.assertIn("timeout-minutes: 30", test)
-        self.assertIn("uses: actions/checkout@v6", test)
-        self.assertNotIn("github.event.pull_request.head.sha", test)
-        self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", test)
-        self.assertIn("cache: true", test)
-        self.assertIn("run: docker compose -f docker-compose.moto.yml up -d", test)
-        self.assertIn("run: cargo test", test)
+        integration = jobs["integration"]
+        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", integration)
+        self.assertIn("timeout-minutes: 30", integration)
+        self.assertIn("uses: actions/checkout@v6", integration)
+        self.assertNotIn("github.event.pull_request.head.sha", integration)
+        self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", integration)
+        self.assertIn("cache: true", integration)
+        self.assertIn("run: bash scripts/verify-moto.sh", integration)
         self.assertIn(
             "if: always()\n        run: docker compose -f docker-compose.moto.yml down -v",
-            test,
+            integration,
         )
-        self.assertNotIn("run: cargo fmt --check", test)
-        self.assertNotIn("run: cargo clippy --all-targets --all-features -- -D warnings", test)
+        self.assertNotIn("run: cargo fmt --check", integration)
+        self.assertNotIn(
+            "run: cargo clippy --all-targets --all-features -- -D warnings", integration
+        )
 
     def _parse_jobs(self, lines: list[str]) -> dict[str, str]:
         jobs: dict[str, list[str]] = {}
@@ -72,7 +73,11 @@ class CiWorkflowTest(unittest.TestCase):
             if line and not line.startswith(" "):
                 break
 
-            if line.startswith("  ") and line.endswith(":") and not line.startswith("    "):
+            if (
+                line.startswith("  ")
+                and line.endswith(":")
+                and not line.startswith("    ")
+            ):
                 current_job = line.strip()[:-1]
                 jobs[current_job] = []
                 continue
