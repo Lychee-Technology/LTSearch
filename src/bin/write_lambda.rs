@@ -46,20 +46,20 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<WriteLambdaPayloa
     let write_api = WriteApi::new(wal, build_queue);
 
     let result = match request {
-        WriteRequest::Ingest { documents } => write_api.ingest(documents).await.map(|r| {
-            WriteResponse {
+        WriteRequest::Ingest { documents } => {
+            write_api.ingest(documents).await.map(|r| WriteResponse {
                 accepted_count: r.accepted_count,
                 wal_event_ids: r.wal_event_ids,
                 batch_id: r.batch_id,
-            }
-        }),
-        WriteRequest::Delete { doc_ids } => write_api.delete(doc_ids).await.map(|r| {
-            WriteResponse {
+            })
+        }
+        WriteRequest::Delete { doc_ids } => {
+            write_api.delete(doc_ids).await.map(|r| WriteResponse {
                 accepted_count: r.accepted_count,
                 wal_event_ids: r.wal_event_ids,
                 batch_id: r.batch_id,
-            }
-        }),
+            })
+        }
     };
 
     let payload = match result {

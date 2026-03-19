@@ -38,8 +38,8 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<BuildLambdaPayloa
     let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
 
     let s3_bucket = env::var("LTSEARCH_BUILD_S3_BUCKET").unwrap_or_default();
-    let artifact_root = env::var("LTSEARCH_BUILD_ARTIFACT_ROOT")
-        .unwrap_or_else(|_| "/tmp/ltsearch".into());
+    let artifact_root =
+        env::var("LTSEARCH_BUILD_ARTIFACT_ROOT").unwrap_or_else(|_| "/tmp/ltsearch".into());
     let embedding_provider =
         env::var("LTSEARCH_BUILD_EMBEDDING_PROVIDER").unwrap_or_else(|_| "fixed".into());
 
@@ -74,10 +74,9 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<BuildLambdaPayloa
         records,
     };
 
-    let build_result =
-        tokio::task::spawn_blocking(move || builder.build(&build_request))
-            .await
-            .map_err(|error| Error::from(format!("build task panicked: {error}")))?;
+    let build_result = tokio::task::spawn_blocking(move || builder.build(&build_request))
+        .await
+        .map_err(|error| Error::from(format!("build task panicked: {error}")))?;
 
     let build_result = match build_result {
         Ok(result) => result,
@@ -164,9 +163,7 @@ fn parse_fixed_embedding(value: &str) -> Result<Vec<f32>, String> {
             "LTSEARCH_BUILD_FIXED_EMBEDDING must be a comma-separated list of numbers".to_string()
         })?;
         if !parsed.is_finite() {
-            return Err(
-                "LTSEARCH_BUILD_FIXED_EMBEDDING must contain only finite numbers".into(),
-            );
+            return Err("LTSEARCH_BUILD_FIXED_EMBEDDING must contain only finite numbers".into());
         }
         embedding.push(parsed);
     }

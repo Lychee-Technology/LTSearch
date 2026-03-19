@@ -10,7 +10,8 @@ use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
 use ltsearch::models::{IndexManifest, SearchRequest, ShardManifest};
 use ltsearch::query::{KeywordSearcher, QueryRouter, VectorSearcher};
 use ltsearch::storage::{
-    version_manifest_key, ActiveManifest, ManifestHead, ManifestStore, ManifestStoreError, INDEX_HEAD_KEY,
+    version_manifest_key, ActiveManifest, ManifestHead, ManifestStore, ManifestStoreError,
+    INDEX_HEAD_KEY,
 };
 use serde_json::json;
 use tantivy::collector::TopDocs;
@@ -263,11 +264,7 @@ fn query_flow_hybrid_retrieval_returns_correct_version_and_results() {
 
     // Seed fixtures: _head, manifest, tantivy index, lancedb table with 3 documents
     write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(1));
-    write_fixture(
-        &root,
-        &version_manifest_key(1),
-        &sample_manifest_json(1, 3),
-    );
+    write_fixture(&root, &version_manifest_key(1), &sample_manifest_json(1, 3));
 
     write_index(
         &root,
@@ -333,11 +330,7 @@ fn query_flow_keyword_only_fallback_when_vector_search_unavailable() {
 
     // Seed fixtures: _head, manifest, tantivy index (but NO lancedb data)
     write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(1));
-    write_fixture(
-        &root,
-        &version_manifest_key(1),
-        &sample_manifest_json(1, 3),
-    );
+    write_fixture(&root, &version_manifest_key(1), &sample_manifest_json(1, 3));
 
     write_index(
         &root,
