@@ -2,6 +2,16 @@
 
 Serverless hybrid search engine for RAG retrieval, combining vector similarity (LanceDB) with BM25 keyword search (Tantivy) via Reciprocal Rank Fusion. Runs on AWS Lambda + S3.
 
+## Project Status
+
+The MVP foundation is complete:
+
+- Sub-plan 1: Query Core MVP
+- Sub-plan 2: Write Build Publish MVP
+- Sub-plan 3: Lambda Verification MVP
+
+Current follow-on work is tracked in `Sub-plan 4: Real Embeddings + Dev Workflow`, which covers repository hygiene, streamlined verification workflows, and LTEmbed integration for real query/document embeddings.
+
 ## Prerequisites
 
 - **Rust** — automatically installed via `rust-toolchain.toml` (1.94.0)
