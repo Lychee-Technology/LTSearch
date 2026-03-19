@@ -20,20 +20,43 @@ Current follow-on work is tracked in `Sub-plan 4: Real Embeddings + Dev Workflow
 ## Quick Start
 
 ```bash
-# Build all binaries
-cargo build
+# Fast local verification
+bash scripts/verify-fast.sh
 
-# Run unit tests
-cargo test
-
-# Run integration tests (requires Moto)
+# Moto-backed integration verification
 docker compose -f docker-compose.moto.yml up -d
-cargo test --test write_build_publish_test -- --nocapture
-
-# Lint
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
+bash scripts/verify-moto.sh
+docker compose -f docker-compose.moto.yml down -v
 ```
+
+## Fast Local Checks
+
+Use `bash scripts/verify-fast.sh` for the default local workflow. It builds all Lambda binaries, runs the non-Moto test suite, then runs `cargo fmt --check` and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+```bash
+bash scripts/verify-fast.sh
+```
+
+This path is Docker-free and is the right default while iterating on most code changes.
+
+## Moto-backed Integration Checks
+
+Use the Moto-backed path when you need S3/SQS adapter coverage from `tests/write_build_publish_test.rs`.
+
+```bash
+docker compose -f docker-compose.moto.yml up -d
+bash scripts/verify-moto.sh
+docker compose -f docker-compose.moto.yml down -v
+```
+
+`scripts/verify-moto.sh` runs the Moto-dependent integration suite only; it assumes Moto is already running.
+
+## CI
+
+CI mirrors the same split:
+
+- a fast Docker-free verification path for build, non-Moto tests, formatting, linting, and workflow guard checks
+- a Moto-backed integration path for `tests/write_build_publish_test.rs`
 
 ## Lambda Binaries
 
