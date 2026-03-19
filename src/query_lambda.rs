@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::embedding::{EmbeddingError, EmbeddingGenerator};
+use crate::embedding::{
+    fixed_generator_from_env, required_provider_from_env, EmbeddingGenerator, EmbeddingProvider,
+};
 use crate::error::SearchError;
 use crate::models::{SearchRequest, SearchResponse};
 use crate::query::{KeywordSearcher, QueryRouter, VectorSearcher};
@@ -41,28 +43,18 @@ impl From<SearchError> for QueryLambdaError {
 }
 
 pub fn bootstrap_query_handler_from_env() -> Result<QueryRequestHandler, QueryLambdaError> {
-    let provider = env::var("LTSEARCH_QUERY_EMBEDDING_PROVIDER")
-        .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_EMBEDDING_PROVIDER"))?;
-
-    match provider.as_str() {
-        "fixed" => bootstrap_fixed_embedding_handler(None),
-        _ => Err(bootstrap_error(format!(
-            "unsupported LTSEARCH_QUERY_EMBEDDING_PROVIDER: {provider}"
-        ))),
+    match required_provider_from_env("LTSEARCH_QUERY_EMBEDDING_PROVIDER") {
+        Ok(EmbeddingProvider::Fixed) => bootstrap_fixed_embedding_handler(None),
+        Err(error) => Err(bootstrap_error(error.to_string())),
     }
 }
 
 pub fn bootstrap_query_handler_for_version_from_env(
     expected_version: u64,
 ) -> Result<QueryRequestHandler, QueryLambdaError> {
-    let provider = env::var("LTSEARCH_QUERY_EMBEDDING_PROVIDER")
-        .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_EMBEDDING_PROVIDER"))?;
-
-    match provider.as_str() {
-        "fixed" => bootstrap_fixed_embedding_handler(Some(expected_version)),
-        _ => Err(bootstrap_error(format!(
-            "unsupported LTSEARCH_QUERY_EMBEDDING_PROVIDER: {provider}"
-        ))),
+    match required_provider_from_env("LTSEARCH_QUERY_EMBEDDING_PROVIDER") {
+        Ok(EmbeddingProvider::Fixed) => bootstrap_fixed_embedding_handler(Some(expected_version)),
+        Err(error) => Err(bootstrap_error(error.to_string())),
     }
 }
 
@@ -90,10 +82,6 @@ fn bootstrap_fixed_embedding_handler(
     let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
         .map(PathBuf::from)
         .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_ARTIFACT_ROOT"))?;
-    let embedding = env::var("LTSEARCH_QUERY_FIXED_EMBEDDING")
-        .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_FIXED_EMBEDDING"))?;
-    let embedding = parse_fixed_embedding(&embedding)?;
-
     let manifest_store = LocalManifestStore::new(&artifact_root);
     let active_manifest = manifest_store
         .load_active_manifest()
@@ -106,6 +94,12 @@ fn bootstrap_fixed_embedding_handler(
             )));
         }
     }
+    let embedding_generator = fixed_generator_from_env("LTSEARCH_QUERY_FIXED_EMBEDDING", None)
+        .map_err(|error| bootstrap_error(error.to_string()))?;
+    let embedding = embedding_generator
+        .generate("ignored")
+        .map_err(|error| bootstrap_error(error.to_string()))?;
+
     if embedding.len() != active_manifest.manifest.embedding_dim {
         return Err(bootstrap_error(format!(
             "LTSEARCH_QUERY_FIXED_EMBEDDING dimension {} does not match manifest embedding_dim {}",
@@ -117,7 +111,7 @@ fn bootstrap_fixed_embedding_handler(
     let manifest_store = FixedManifestStore::new(active_manifest.clone());
     let router = QueryRouter::new(
         manifest_store.clone(),
-        FixedEmbeddingGenerator::new(embedding),
+        embedding_generator,
         KeywordSearcher::new(manifest_store.clone(), &artifact_root),
         VectorSearcher::new(manifest_store, &artifact_root),
     );
@@ -139,56 +133,6 @@ fn bootstrap_error(message: impl Into<String>) -> QueryLambdaError {
     QueryLambdaError {
         error_type: "execution_error".into(),
         message: format!("query lambda bootstrap failed: {}", message.into()),
-    }
-}
-
-fn parse_fixed_embedding(value: &str) -> Result<Vec<f32>, QueryLambdaError> {
-    let mut embedding = Vec::new();
-
-    for part in value.split(',') {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            return Err(bootstrap_error(
-                "LTSEARCH_QUERY_FIXED_EMBEDDING must be a comma-separated list of numbers",
-            ));
-        }
-
-        let parsed = trimmed.parse::<f32>().map_err(|_| {
-            bootstrap_error(
-                "LTSEARCH_QUERY_FIXED_EMBEDDING must be a comma-separated list of numbers",
-            )
-        })?;
-        if !parsed.is_finite() {
-            return Err(bootstrap_error(
-                "LTSEARCH_QUERY_FIXED_EMBEDDING must contain only finite numbers",
-            ));
-        }
-        embedding.push(parsed);
-    }
-
-    if embedding.is_empty() {
-        return Err(bootstrap_error(
-            "LTSEARCH_QUERY_FIXED_EMBEDDING must not be empty",
-        ));
-    }
-
-    Ok(embedding)
-}
-
-#[derive(Debug, Clone)]
-struct FixedEmbeddingGenerator {
-    embedding: Vec<f32>,
-}
-
-impl FixedEmbeddingGenerator {
-    fn new(embedding: Vec<f32>) -> Self {
-        Self { embedding }
-    }
-}
-
-impl EmbeddingGenerator for FixedEmbeddingGenerator {
-    fn generate(&self, _query: &str) -> Result<Vec<f32>, EmbeddingError> {
-        Ok(self.embedding.clone())
     }
 }
 

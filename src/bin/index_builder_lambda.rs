@@ -5,7 +5,9 @@ use lambda_runtime::{service_fn, Error, LambdaEvent};
 use ltsearch::adapters::s3_publish::AwsPublishStorage;
 use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::build_lambda::{BuildLambdaError, BuildRequest, BuildResponse};
-use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
+use ltsearch::embedding::{
+    fixed_generator_from_env, provider_from_env_or_default, EmbeddingGenerator, EmbeddingProvider,
+};
 use ltsearch::indexing::{BuildIndexRequest, LocalIndexBuilder};
 use ltsearch::indexing::{IndexPublisher, PublishRequest};
 use ltsearch::write::WriteAheadLog;
@@ -40,8 +42,18 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<BuildLambdaPayloa
     let s3_bucket = env::var("LTSEARCH_BUILD_S3_BUCKET").unwrap_or_default();
     let artifact_root =
         env::var("LTSEARCH_BUILD_ARTIFACT_ROOT").unwrap_or_else(|_| "/tmp/ltsearch".into());
-    let embedding_provider =
-        env::var("LTSEARCH_BUILD_EMBEDDING_PROVIDER").unwrap_or_else(|_| "fixed".into());
+    let embedding_provider = match provider_from_env_or_default(
+        "LTSEARCH_BUILD_EMBEDDING_PROVIDER",
+        EmbeddingProvider::Fixed,
+    ) {
+        Ok(provider) => provider,
+        Err(error) => {
+            return Ok(BuildLambdaPayload::Error(BuildLambdaError {
+                error_type: "build_error".into(),
+                message: error.to_string(),
+            }))
+        }
+    };
 
     let s3_client = aws_sdk_s3::Client::new(&config);
 
@@ -60,7 +72,7 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<BuildLambdaPayloa
     };
 
     // Build the embedding generator
-    let embedding_generator = match build_embedding_generator(&embedding_provider) {
+    let embedding_generator = match build_embedding_generator(embedding_provider) {
         Ok(generator) => generator,
         Err(payload) => return Ok(payload),
     };
@@ -109,68 +121,21 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<BuildLambdaPayloa
 }
 
 fn build_embedding_generator(
-    provider: &str,
-) -> Result<FixedEmbeddingGenerator, BuildLambdaPayload> {
+    provider: EmbeddingProvider,
+) -> Result<Box<dyn EmbeddingGenerator>, BuildLambdaPayload> {
     match provider {
-        "fixed" => {
-            let embedding_str = env::var("LTSEARCH_BUILD_FIXED_EMBEDDING").map_err(|_| {
-                BuildLambdaPayload::Error(BuildLambdaError {
-                    error_type: "build_error".into(),
-                    message: "missing LTSEARCH_BUILD_FIXED_EMBEDDING".into(),
-                })
-            })?;
-            let dim: usize = env::var("LTSEARCH_BUILD_EMBEDDING_DIM")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0);
-
-            let embedding = parse_fixed_embedding(&embedding_str).map_err(|message| {
-                BuildLambdaPayload::Error(BuildLambdaError {
-                    error_type: "build_error".into(),
-                    message,
-                })
-            })?;
-
-            if dim > 0 && embedding.len() != dim {
-                return Err(BuildLambdaPayload::Error(BuildLambdaError {
-                    error_type: "build_error".into(),
-                    message: format!(
-                        "LTSEARCH_BUILD_FIXED_EMBEDDING dimension {} does not match LTSEARCH_BUILD_EMBEDDING_DIM {dim}",
-                        embedding.len()
-                    ),
-                }));
-            }
-
-            Ok(FixedEmbeddingGenerator { embedding })
-        }
-        _ => Err(BuildLambdaPayload::Error(BuildLambdaError {
-            error_type: "build_error".into(),
-            message: format!("unsupported LTSEARCH_BUILD_EMBEDDING_PROVIDER: {provider}"),
-        })),
+        EmbeddingProvider::Fixed => fixed_generator_from_env(
+            "LTSEARCH_BUILD_FIXED_EMBEDDING",
+            Some("LTSEARCH_BUILD_EMBEDDING_DIM"),
+        )
+        .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
+        .map_err(|error| {
+            BuildLambdaPayload::Error(BuildLambdaError {
+                error_type: "build_error".into(),
+                message: error.to_string(),
+            })
+        }),
     }
-}
-
-fn parse_fixed_embedding(value: &str) -> Result<Vec<f32>, String> {
-    let mut embedding = Vec::new();
-    for part in value.split(',') {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            return Err(
-                "LTSEARCH_BUILD_FIXED_EMBEDDING must be a comma-separated list of numbers".into(),
-            );
-        }
-        let parsed = trimmed.parse::<f32>().map_err(|_| {
-            "LTSEARCH_BUILD_FIXED_EMBEDDING must be a comma-separated list of numbers".to_string()
-        })?;
-        if !parsed.is_finite() {
-            return Err("LTSEARCH_BUILD_FIXED_EMBEDDING must contain only finite numbers".into());
-        }
-        embedding.push(parsed);
-    }
-    if embedding.is_empty() {
-        return Err("LTSEARCH_BUILD_FIXED_EMBEDDING must not be empty".into());
-    }
-    Ok(embedding)
 }
 
 fn current_time_millis() -> i64 {
@@ -178,17 +143,6 @@ fn current_time_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
-}
-
-#[derive(Debug, Clone)]
-struct FixedEmbeddingGenerator {
-    embedding: Vec<f32>,
-}
-
-impl EmbeddingGenerator for FixedEmbeddingGenerator {
-    fn generate(&self, _query: &str) -> Result<Vec<f32>, EmbeddingError> {
-        Ok(self.embedding.clone())
-    }
 }
 
 fn main() -> Result<(), Error> {
