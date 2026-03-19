@@ -7,6 +7,7 @@ use crate::embedding::{EmbeddingError, EmbeddingGenerator};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingProvider {
     Fixed,
+    LTEmbed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -68,6 +69,7 @@ fn parse_provider(
 ) -> Result<EmbeddingProvider, EmbeddingProviderError> {
     match provider {
         "fixed" => Ok(EmbeddingProvider::Fixed),
+        "ltembed" => Ok(EmbeddingProvider::LTEmbed),
         _ => Err(EmbeddingProviderError::Config {
             message: format!("unsupported {provider_var}: {provider}"),
         }),

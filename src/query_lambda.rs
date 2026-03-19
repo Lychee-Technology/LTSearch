@@ -5,7 +5,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::embedding::{
-    fixed_generator_from_env, required_provider_from_env, EmbeddingGenerator, EmbeddingProvider,
+    fixed_generator_from_env, ltembed_config_from_env, required_provider_from_env,
+    EmbeddingGenerator, EmbeddingProvider, LTEmbedEmbeddingGenerator,
 };
 use crate::error::SearchError;
 use crate::models::{SearchRequest, SearchResponse};
@@ -44,7 +45,7 @@ impl From<SearchError> for QueryLambdaError {
 
 pub fn bootstrap_query_handler_from_env() -> Result<QueryRequestHandler, QueryLambdaError> {
     match required_provider_from_env("LTSEARCH_QUERY_EMBEDDING_PROVIDER") {
-        Ok(EmbeddingProvider::Fixed) => bootstrap_fixed_embedding_handler(None),
+        Ok(provider) => bootstrap_query_embedding_handler(provider, None),
         Err(error) => Err(bootstrap_error(error.to_string())),
     }
 }
@@ -53,7 +54,7 @@ pub fn bootstrap_query_handler_for_version_from_env(
     expected_version: u64,
 ) -> Result<QueryRequestHandler, QueryLambdaError> {
     match required_provider_from_env("LTSEARCH_QUERY_EMBEDDING_PROVIDER") {
-        Ok(EmbeddingProvider::Fixed) => bootstrap_fixed_embedding_handler(Some(expected_version)),
+        Ok(provider) => bootstrap_query_embedding_handler(provider, Some(expected_version)),
         Err(error) => Err(bootstrap_error(error.to_string())),
     }
 }
@@ -76,7 +77,8 @@ pub fn is_retriable_bootstrap_version_change(error: &QueryLambdaError) -> bool {
             .contains(ACTIVE_VERSION_CHANGED_DURING_BOOTSTRAP)
 }
 
-fn bootstrap_fixed_embedding_handler(
+fn bootstrap_query_embedding_handler(
+    provider: EmbeddingProvider,
     expected_version: Option<u64>,
 ) -> Result<QueryRequestHandler, QueryLambdaError> {
     let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
@@ -94,15 +96,45 @@ fn bootstrap_fixed_embedding_handler(
             )));
         }
     }
-    let embedding_generator = fixed_generator_from_env("LTSEARCH_QUERY_FIXED_EMBEDDING", None)
-        .map_err(|error| bootstrap_error(error.to_string()))?;
+    let (embedding_generator, dim_mismatch_name, dim_mismatch_message): (
+        Box<dyn EmbeddingGenerator>,
+        &str,
+        &str,
+    ) = match provider {
+        EmbeddingProvider::Fixed => (
+            Box::new(
+                fixed_generator_from_env("LTSEARCH_QUERY_FIXED_EMBEDDING", None)
+                    .map_err(|error| bootstrap_error(error.to_string()))?,
+            ),
+            "LTSEARCH_QUERY_FIXED_EMBEDDING",
+            "dimension",
+        ),
+        EmbeddingProvider::LTEmbed => {
+            let config = ltembed_config_from_env(
+                "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
+                "LTSEARCH_QUERY_LTEMBED_CONFIG_PATH",
+                "LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH",
+                "LTSEARCH_QUERY_LTEMBED_POOLING",
+                "LTSEARCH_QUERY_LTEMBED_PREFIX",
+            )
+            .map_err(|error| bootstrap_error(error.to_string()))?;
+            (
+                Box::new(
+                    LTEmbedEmbeddingGenerator::from_config(&config)
+                        .map_err(|error| bootstrap_error(error.to_string()))?,
+                ),
+                "LTSEARCH_QUERY_LTEMBED",
+                "embedding dimension",
+            )
+        }
+    };
     let embedding = embedding_generator
         .generate("ignored")
         .map_err(|error| bootstrap_error(error.to_string()))?;
 
     if embedding.len() != active_manifest.manifest.embedding_dim {
         return Err(bootstrap_error(format!(
-            "LTSEARCH_QUERY_FIXED_EMBEDDING dimension {} does not match manifest embedding_dim {}",
+            "{dim_mismatch_name} {dim_mismatch_message} {} does not match manifest embedding_dim {}",
             embedding.len(),
             active_manifest.manifest.embedding_dim,
         )));
