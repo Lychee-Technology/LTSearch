@@ -1,6 +1,7 @@
 pub const CRATE_NAME: &str = "ltsearch";
 
 pub mod adapters;
+pub mod build_lambda;
 pub mod config;
 pub mod embedding;
 pub mod error;
