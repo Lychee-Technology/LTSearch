@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone)]
@@ -103,7 +103,7 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<QueryLambdaPayloa
         return Ok(QueryLambdaPayload::Error(QueryLambdaError {
             error_type: "execution_error".into(),
             message: format!("query lambda bootstrap failed: {error}"),
-        }))
+        }));
     }
 
     let payload = match query_handler() {
@@ -142,7 +142,7 @@ async fn sync_prefix(
     client: &aws_sdk_s3::Client,
     bucket: &str,
     prefix: &str,
-    artifact_root: &PathBuf,
+    artifact_root: &Path,
 ) -> Result<(), String> {
     let mut continuation_token = None;
 
@@ -180,8 +180,9 @@ async fn sync_prefix(
 
             let destination = artifact_root.join(key);
             if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|error| format!("failed to create local artifact directories: {error}"))?;
+                fs::create_dir_all(parent).map_err(|error| {
+                    format!("failed to create local artifact directories: {error}")
+                })?;
             }
             fs::write(&destination, body)
                 .map_err(|error| format!("failed to write local artifact {key}: {error}"))?;
