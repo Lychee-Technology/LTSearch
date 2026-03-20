@@ -38,20 +38,32 @@ create_e2e_queue() {
 
 prepare_local_ltembed_checkout() {
   local repo_root="$1"
+  local configured_checkout="${LTSEARCH_LTEMBED_CHECKOUT:-}"
   local common_git_dir
   common_git_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)"
   local shared_repo_root
   shared_repo_root="$(dirname "$common_git_dir")"
   local sibling_checkout
   sibling_checkout="$(dirname "$shared_repo_root")/LTEmbed"
+  local nested_checkout
+  nested_checkout="$repo_root/LTEmbed"
   local vendor_root="$repo_root/.sam-local-deps/LTEmbed"
 
-  if [[ ! -f "$sibling_checkout/Cargo.toml" ]]; then
-    echo "Missing sibling LTEmbed checkout at $sibling_checkout" >&2
+  local source_checkout=""
+  if [[ -n "$configured_checkout" && -f "$configured_checkout/Cargo.toml" ]]; then
+    source_checkout="$configured_checkout"
+  elif [[ -f "$nested_checkout/Cargo.toml" ]]; then
+    source_checkout="$nested_checkout"
+  elif [[ -f "$sibling_checkout/Cargo.toml" ]]; then
+    source_checkout="$sibling_checkout"
+  fi
+
+  if [[ -z "$source_checkout" ]]; then
+    echo "Missing LTEmbed checkout. Looked at: ${configured_checkout:-<unset>}, $nested_checkout, $sibling_checkout" >&2
     return 1
   fi
 
-  python3 - <<'PY' "$sibling_checkout" "$vendor_root"
+  python3 - <<'PY' "$source_checkout" "$vendor_root"
 import pathlib, shutil, sys
 src = pathlib.Path(sys.argv[1])
 dst = pathlib.Path(sys.argv[2])
