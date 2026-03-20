@@ -22,7 +22,7 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertNotIn("deploy", content.lower())
 
         jobs = self._parse_jobs(lines)
-        self.assertEqual(set(jobs.keys()), {"fast", "integration"})
+        self.assertEqual(set(jobs.keys()), {"fast", "integration", "sam-e2e"})
 
         fast = jobs["fast"]
         self.assertIn("runs-on: [self-hosted, Linux, ARM64]", fast)
@@ -55,6 +55,21 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertNotIn("run: cargo fmt --check", integration)
         self.assertNotIn(
             "run: cargo clippy --all-targets --all-features -- -D warnings", integration
+        )
+
+        sam_e2e = jobs["sam-e2e"]
+        self.assertIn("needs: integration", sam_e2e)
+        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", sam_e2e)
+        self.assertIn("timeout-minutes: 45", sam_e2e)
+        self.assertIn("uses: actions/checkout@v6", sam_e2e)
+        self.assertIn("uses: actions/setup-python@v6", sam_e2e)
+        self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", sam_e2e)
+        self.assertIn("run: python3 -B tests/test_sam_invoke_e2e.py", sam_e2e)
+        self.assertIn("run: docker compose -f docker-compose.moto.yml up -d", sam_e2e)
+        self.assertIn("run: bash scripts/e2e/run-sam-local-invoke-e2e.sh", sam_e2e)
+        self.assertIn(
+            "if: always()\n        run: docker compose -f docker-compose.moto.yml down -v",
+            sam_e2e,
         )
 
     def _parse_jobs(self, lines: list[str]) -> dict[str, str]:

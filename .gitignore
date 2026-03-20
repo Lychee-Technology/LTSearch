@@ -1,4 +1,7 @@
 .kiro/
 .opencode/
 .worktrees/
+.aws-sam/
+.e2e-tmp/
+.sam-local-deps/
 target/

@@ -7,6 +7,9 @@ use ltsearch::query_lambda::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use std::env;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone)]
@@ -96,6 +99,13 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<QueryLambdaPayloa
         Err(payload) => return Ok(payload),
     };
 
+    if let Err(error) = sync_query_artifacts_from_s3_if_configured().await {
+        return Ok(QueryLambdaPayload::Error(QueryLambdaError {
+            error_type: "execution_error".into(),
+            message: format!("query lambda bootstrap failed: {error}"),
+        }))
+    }
+
     let payload = match query_handler() {
         Ok(handler) => match handle_search_request(handler.as_ref(), request) {
             Ok(response) => QueryLambdaPayload::Success(response),
@@ -105,6 +115,100 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<QueryLambdaPayloa
     };
 
     Ok(payload)
+}
+
+async fn sync_query_artifacts_from_s3_if_configured() -> Result<(), String> {
+    let bucket = match env::var("LTSEARCH_QUERY_S3_BUCKET") {
+        Ok(bucket) => bucket,
+        Err(_) => return Ok(()),
+    };
+
+    let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
+        .map_err(|_| "missing LTSEARCH_QUERY_ARTIFACT_ROOT".to_string())?;
+    let artifact_root = PathBuf::from(artifact_root);
+    fs::create_dir_all(&artifact_root)
+        .map_err(|error| format!("failed to create query artifact root: {error}"))?;
+
+    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let client = s3_client_from_env(&config);
+
+    sync_prefix(&client, &bucket, "index/", &artifact_root).await?;
+    sync_prefix(&client, &bucket, "lance/", &artifact_root).await?;
+
+    Ok(())
+}
+
+async fn sync_prefix(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    prefix: &str,
+    artifact_root: &PathBuf,
+) -> Result<(), String> {
+    let mut continuation_token = None;
+
+    loop {
+        let mut request = client.list_objects_v2().bucket(bucket).prefix(prefix);
+        if let Some(token) = continuation_token.as_deref() {
+            request = request.continuation_token(token);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("failed to list {prefix} objects from S3: {error}"))?;
+
+        for object in response.contents() {
+            let Some(key) = object.key() else {
+                continue;
+            };
+            if key.ends_with('/') {
+                continue;
+            }
+
+            let body = client
+                .get_object()
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|error| format!("failed to download {key} from S3: {error}"))?
+                .body
+                .collect()
+                .await
+                .map_err(|error| format!("failed to read {key} body from S3: {error}"))?
+                .into_bytes();
+
+            let destination = artifact_root.join(key);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("failed to create local artifact directories: {error}"))?;
+            }
+            fs::write(&destination, body)
+                .map_err(|error| format!("failed to write local artifact {key}: {error}"))?;
+        }
+
+        if !response.is_truncated().unwrap_or(false) {
+            break;
+        }
+        continuation_token = response
+            .next_continuation_token()
+            .map(|value| value.to_string());
+    }
+
+    Ok(())
+}
+
+fn s3_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client {
+    match env::var("AWS_ENDPOINT_URL_S3") {
+        Ok(endpoint_url) => {
+            let s3_config = aws_sdk_s3::config::Builder::from(config)
+                .endpoint_url(endpoint_url)
+                .force_path_style(true)
+                .build();
+            aws_sdk_s3::Client::from_conf(s3_config)
+        }
+        Err(_) => aws_sdk_s3::Client::new(config),
+    }
 }
 
 fn main() -> Result<(), Error> {

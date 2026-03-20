@@ -79,7 +79,9 @@ class E2EFixturesTest(unittest.TestCase):
         self.assertIn("wait_for_moto()", content)
         self.assertIn("create_e2e_bucket()", content)
         self.assertIn("create_e2e_queue()", content)
+        self.assertIn("prepare_local_ltembed_checkout()", content)
         self.assertIn("receive_one_sqs_batch()", content)
+        self.assertIn("sync_e2e_artifacts_from_moto()", content)
         self.assertIn("assert_json_field()", content)
 
 

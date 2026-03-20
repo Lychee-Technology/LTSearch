@@ -56,7 +56,7 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<BuildLambdaPayloa
         }
     };
 
-    let s3_client = aws_sdk_s3::Client::new(&config);
+    let s3_client = s3_client_from_env(&config);
 
     // Read WAL records from S3
     let wal_storage = AwsS3WalStorage::new(s3_bucket.clone(), s3_client.clone());
@@ -169,6 +169,19 @@ fn current_time_millis() -> i64 {
         .unwrap_or_default()
 }
 
+fn s3_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client {
+    match env::var("AWS_ENDPOINT_URL_S3") {
+        Ok(endpoint_url) => {
+            let s3_config = aws_sdk_s3::config::Builder::from(config)
+                .endpoint_url(endpoint_url)
+                .force_path_style(true)
+                .build();
+            aws_sdk_s3::Client::from_conf(s3_config)
+        }
+        Err(_) => aws_sdk_s3::Client::new(config),
+    }
+}
+
 fn main() -> Result<(), Error> {
     tokio::runtime::Runtime::new()?
         .block_on(async { lambda_runtime::run(service_fn(function_handler)).await })
@@ -198,6 +211,20 @@ mod tests {
                     && candidate.join("tokenizer.json").exists()
                     && candidate.join("model.safetensors").exists()
             })
+    }
+
+    #[test]
+    fn s3_endpoint_override_is_applied_without_panicking() {
+        let _guard = build_env_guard();
+        std::env::set_var("AWS_ENDPOINT_URL_S3", "http://localhost:5000");
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .load()
+                .await;
+            let _ = s3_client_from_env(&config);
+        });
     }
 
     #[test]
