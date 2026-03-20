@@ -6,7 +6,8 @@ use ltsearch::adapters::s3_publish::AwsPublishStorage;
 use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::build_lambda::{BuildLambdaError, BuildRequest, BuildResponse};
 use ltsearch::embedding::{
-    fixed_generator_from_env, provider_from_env_or_default, EmbeddingGenerator, EmbeddingProvider,
+    fixed_generator_from_env, ltembed_config_from_env, provider_from_env_or_default,
+    EmbeddingGenerator, EmbeddingProvider, LTEmbedEmbeddingGenerator,
 };
 use ltsearch::indexing::{BuildIndexRequest, LocalIndexBuilder};
 use ltsearch::indexing::{IndexPublisher, PublishRequest};
@@ -135,10 +136,29 @@ fn build_embedding_generator(
                 message: error.to_string(),
             })
         }),
-        EmbeddingProvider::LTEmbed => Err(BuildLambdaPayload::Error(BuildLambdaError {
-            error_type: "build_error".into(),
-            message: "unsupported LTSEARCH_BUILD_EMBEDDING_PROVIDER: ltembed".into(),
-        })),
+        EmbeddingProvider::LTEmbed => ltembed_config_from_env(
+            "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
+            "LTSEARCH_BUILD_LTEMBED_CONFIG_PATH",
+            "LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH",
+            "LTSEARCH_BUILD_LTEMBED_POOLING",
+            "LTSEARCH_BUILD_LTEMBED_PREFIX",
+        )
+        .map_err(|error| {
+            BuildLambdaPayload::Error(BuildLambdaError {
+                error_type: "build_error".into(),
+                message: error.to_string(),
+            })
+        })
+        .and_then(|config| {
+            LTEmbedEmbeddingGenerator::from_config(&config)
+                .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
+                .map_err(|error| {
+                    BuildLambdaPayload::Error(BuildLambdaError {
+                        error_type: "build_error".into(),
+                        message: error.to_string(),
+                    })
+                })
+        }),
     }
 }
 
@@ -156,7 +176,29 @@ fn main() -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
     use super::*;
+
+    static BUILD_LAMBDA_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn build_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        BUILD_LAMBDA_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .map(|ancestor| ancestor.join("LTEmbed/assets"))
+            .find(|candidate| {
+                candidate.join("config.json").exists()
+                    && candidate.join("tokenizer.json").exists()
+                    && candidate.join("model.safetensors").exists()
+            })
+    }
 
     #[test]
     fn malformed_event_payload_returns_typed_error_envelope() {
@@ -192,5 +234,83 @@ mod tests {
         assert_eq!(request.wal_key, "wal/2026/03/19/batch-abc.jsonl");
         assert_eq!(request.version_id, 1);
         assert_eq!(request.embedding_dim, 3);
+    }
+
+    #[test]
+    fn ltembed_provider_reports_missing_model_path() {
+        let _guard = build_env_guard();
+        std::env::remove_var("LTSEARCH_BUILD_FIXED_EMBEDDING");
+        std::env::remove_var("LTSEARCH_BUILD_EMBEDDING_DIM");
+        std::env::remove_var("LTSEARCH_BUILD_LTEMBED_MODEL_PATH");
+        std::env::remove_var("LTSEARCH_BUILD_LTEMBED_CONFIG_PATH");
+        std::env::remove_var("LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH");
+        std::env::remove_var("LTSEARCH_BUILD_LTEMBED_POOLING");
+        std::env::remove_var("LTSEARCH_BUILD_LTEMBED_PREFIX");
+
+        let error = match build_embedding_generator(EmbeddingProvider::LTEmbed) {
+            Ok(_) => panic!("expected LTEmbed build bootstrap to fail without model path"),
+            Err(BuildLambdaPayload::Error(error)) => error,
+            Err(BuildLambdaPayload::Success(_)) => panic!("expected build error payload"),
+        };
+
+        assert_eq!(error.error_type, "build_error");
+        assert_eq!(error.message, "missing LTSEARCH_BUILD_LTEMBED_MODEL_PATH");
+    }
+
+    #[test]
+    fn ltembed_provider_reports_unsupported_pooling_mode() {
+        let _guard = build_env_guard();
+        std::env::set_var(
+            "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
+            "/tmp/model.safetensors",
+        );
+        std::env::set_var("LTSEARCH_BUILD_LTEMBED_CONFIG_PATH", "/tmp/config.json");
+        std::env::set_var(
+            "LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH",
+            "/tmp/tokenizer.json",
+        );
+        std::env::set_var("LTSEARCH_BUILD_LTEMBED_POOLING", "median");
+        std::env::remove_var("LTSEARCH_BUILD_LTEMBED_PREFIX");
+
+        let error = match build_embedding_generator(EmbeddingProvider::LTEmbed) {
+            Ok(_) => panic!("expected LTEmbed build bootstrap to reject pooling mode"),
+            Err(BuildLambdaPayload::Error(error)) => error,
+            Err(BuildLambdaPayload::Success(_)) => panic!("expected build error payload"),
+        };
+
+        assert_eq!(error.error_type, "build_error");
+        assert_eq!(error.message, "unsupported LTEmbed pooling mode: median");
+    }
+
+    #[test]
+    fn ltembed_provider_builds_embedding_generator_when_assets_are_available() {
+        let _guard = build_env_guard();
+        let Some(assets_dir) = maybe_ltembed_assets_dir() else {
+            eprintln!("Skipping: LTEmbed assets not found in sibling checkout");
+            return;
+        };
+
+        std::env::set_var(
+            "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
+            assets_dir.join("model.safetensors"),
+        );
+        std::env::set_var(
+            "LTSEARCH_BUILD_LTEMBED_CONFIG_PATH",
+            assets_dir.join("config.json"),
+        );
+        std::env::set_var(
+            "LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH",
+            assets_dir.join("tokenizer.json"),
+        );
+        std::env::set_var("LTSEARCH_BUILD_LTEMBED_POOLING", "mean");
+        std::env::set_var("LTSEARCH_BUILD_LTEMBED_PREFIX", "passage:");
+
+        let generator = build_embedding_generator(EmbeddingProvider::LTEmbed)
+            .expect("expected LTEmbed build bootstrap to construct generator");
+        let embedding = generator
+            .generate("rust search document")
+            .expect("expected LTEmbed generator to produce an embedding");
+
+        assert_eq!(embedding.len(), 384);
     }
 }
