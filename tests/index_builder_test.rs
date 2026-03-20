@@ -6,10 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_schema::DataType;
-use ltsearch::embedding::{
-    EmbeddingError, EmbeddingGenerator, LTEmbedConfig, LTEmbedEmbeddingGenerator,
-    LTEmbedPoolingMode,
-};
+use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
+#[cfg(feature = "ltembed")]
+use ltsearch::embedding::{LTEmbedConfig, LTEmbedEmbeddingGenerator, LTEmbedPoolingMode};
 use ltsearch::indexing::{
     materialize_latest_snapshot, BuildIndexRequest, BuildIndexResult, LocalIndexBuilder,
 };
@@ -34,6 +33,7 @@ fn temp_fixture_dir(test_name: &str) -> PathBuf {
     dir
 }
 
+#[cfg(feature = "ltembed")]
 fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -45,6 +45,7 @@ fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
         })
 }
 
+#[cfg(feature = "ltembed")]
 fn repeated_embedding(dim: usize, value: f32) -> Vec<f32> {
     (0..dim).map(|_| value).collect()
 }
@@ -507,6 +508,7 @@ fn local_index_builder_generates_missing_embeddings_and_writes_searcher_compatib
     assert!((vector_results[1].score - 0.3).abs() < f32::EPSILON);
 }
 
+#[cfg(feature = "ltembed")]
 #[test]
 fn local_index_builder_generates_missing_embeddings_with_ltembed() {
     let Some(assets_dir) = maybe_ltembed_assets_dir() else {

@@ -7,6 +7,7 @@ use crate::embedding::{EmbeddingError, EmbeddingGenerator};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingProvider {
     Fixed,
+    #[cfg(feature = "ltembed")]
     LTEmbed,
 }
 
@@ -69,7 +70,12 @@ fn parse_provider(
 ) -> Result<EmbeddingProvider, EmbeddingProviderError> {
     match provider {
         "fixed" => Ok(EmbeddingProvider::Fixed),
+        #[cfg(feature = "ltembed")]
         "ltembed" => Ok(EmbeddingProvider::LTEmbed),
+        #[cfg(not(feature = "ltembed"))]
+        "ltembed" => Err(EmbeddingProviderError::Config {
+            message: format!("unsupported {provider_var}: ltembed (feature disabled)"),
+        }),
         _ => Err(EmbeddingProviderError::Config {
             message: format!("unsupported {provider_var}: {provider}"),
         }),

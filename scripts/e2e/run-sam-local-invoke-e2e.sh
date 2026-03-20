@@ -17,7 +17,6 @@ mkdir -p "$E2E_OUTPUT_DIR"
 wait_for_moto
 create_e2e_bucket "$E2E_BUCKET"
 QUEUE_URL="$(create_e2e_queue "$E2E_QUEUE_NAME")"
-prepare_local_ltembed_checkout "$REPO_ROOT"
 
 sam build --template-file "$SAM_SOURCE_TEMPLATE"
 

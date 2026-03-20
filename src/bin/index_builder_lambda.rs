@@ -6,9 +6,10 @@ use ltsearch::adapters::s3_publish::AwsPublishStorage;
 use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::build_lambda::{BuildLambdaError, BuildRequest, BuildResponse};
 use ltsearch::embedding::{
-    fixed_generator_from_env, ltembed_config_from_env, provider_from_env_or_default,
-    EmbeddingGenerator, EmbeddingProvider, LTEmbedEmbeddingGenerator,
+    fixed_generator_from_env, provider_from_env_or_default, EmbeddingGenerator, EmbeddingProvider,
 };
+#[cfg(feature = "ltembed")]
+use ltsearch::embedding::{ltembed_config_from_env, LTEmbedEmbeddingGenerator};
 use ltsearch::indexing::{BuildIndexRequest, LocalIndexBuilder};
 use ltsearch::indexing::{IndexPublisher, PublishRequest};
 use ltsearch::write::WriteAheadLog;
@@ -136,6 +137,7 @@ fn build_embedding_generator(
                 message: error.to_string(),
             })
         }),
+        #[cfg(feature = "ltembed")]
         EmbeddingProvider::LTEmbed => ltembed_config_from_env(
             "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
             "LTSEARCH_BUILD_LTEMBED_CONFIG_PATH",
@@ -189,6 +191,7 @@ fn main() -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "ltembed")]
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -202,6 +205,7 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
+    #[cfg(feature = "ltembed")]
     fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -263,6 +267,7 @@ mod tests {
         assert_eq!(request.embedding_dim, 3);
     }
 
+    #[cfg(feature = "ltembed")]
     #[test]
     fn ltembed_provider_reports_missing_model_path() {
         let _guard = build_env_guard();
@@ -284,6 +289,7 @@ mod tests {
         assert_eq!(error.message, "missing LTSEARCH_BUILD_LTEMBED_MODEL_PATH");
     }
 
+    #[cfg(feature = "ltembed")]
     #[test]
     fn ltembed_provider_reports_unsupported_pooling_mode() {
         let _guard = build_env_guard();
@@ -309,6 +315,7 @@ mod tests {
         assert_eq!(error.message, "unsupported LTEmbed pooling mode: median");
     }
 
+    #[cfg(feature = "ltembed")]
     #[test]
     fn ltembed_provider_builds_embedding_generator_when_assets_are_available() {
         let _guard = build_env_guard();
