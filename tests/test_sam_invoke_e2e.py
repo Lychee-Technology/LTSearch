@@ -1,0 +1,63 @@
+import unittest
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+SAM_TEMPLATE_PATH = REPO_ROOT / "template.sam-e2e.yaml"
+INVOKE_SCRIPT_PATH = REPO_ROOT / "scripts" / "e2e" / "run-sam-local-invoke-e2e.sh"
+
+
+class SamInvokeE2ETest(unittest.TestCase):
+    def test_sam_template_defines_three_lambdas_for_local_e2e(self) -> None:
+        self.assertTrue(
+            SAM_TEMPLATE_PATH.exists(), f"missing SAM template: {SAM_TEMPLATE_PATH}"
+        )
+
+        content = SAM_TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.assertIn("Transform: AWS::Serverless-2016-10-31", content)
+        self.assertIn("WriteFunction:", content)
+        self.assertIn("BuildFunction:", content)
+        self.assertIn("QueryFunction:", content)
+        self.assertIn("PackageType: Image", content)
+        self.assertIn("sam/write_lambda.Dockerfile", content)
+        self.assertIn("sam/index_builder_lambda.Dockerfile", content)
+        self.assertIn("sam/query_lambda.Dockerfile", content)
+        self.assertIn("LTSEARCH_WRITE_S3_BUCKET", content)
+        self.assertIn("LTSEARCH_BUILD_S3_BUCKET", content)
+        self.assertIn("LTSEARCH_QUERY_ARTIFACT_ROOT", content)
+        self.assertIn("/tmp/ltsearch-e2e-artifacts", content)
+
+    def test_invoke_e2e_script_has_expected_flow_steps(self) -> None:
+        self.assertTrue(
+            INVOKE_SCRIPT_PATH.exists(),
+            f"missing invoke E2E script: {INVOKE_SCRIPT_PATH}",
+        )
+
+        content = INVOKE_SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("set -euo pipefail", content)
+        self.assertIn('source "$(dirname "$0")/lib.sh"', content)
+        self.assertIn('sam build --template-file "$SAM_SOURCE_TEMPLATE"', content)
+        self.assertIn('--env-vars "$ENV_VARS_JSON"', content)
+        self.assertIn("sam local invoke WriteFunction", content)
+        self.assertIn("sam local invoke BuildFunction", content)
+        self.assertIn("sam local invoke QueryFunction", content)
+        self.assertIn("wait_for_moto", content)
+        self.assertIn("create_e2e_bucket", content)
+        self.assertIn("create_e2e_queue", content)
+        self.assertIn("receive_one_sqs_batch", content)
+        self.assertIn("ENV_VARS_JSON", content)
+
+    def test_ci_workflow_includes_separate_sam_e2e_job(self) -> None:
+        self.assertTrue(WORKFLOW_PATH.exists(), f"missing workflow: {WORKFLOW_PATH}")
+
+        content = WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertIn("sam-e2e:", content)
+        self.assertIn("needs: integration", content)
+        self.assertIn("bash scripts/e2e/run-sam-local-invoke-e2e.sh", content)
+        self.assertIn("docker compose -f docker-compose.moto.yml up -d", content)
+        self.assertIn("docker compose -f docker-compose.moto.yml down -v", content)
+
+
+if __name__ == "__main__":
+    unittest.main()
