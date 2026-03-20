@@ -1,0 +1,65 @@
+{
+  "operation": "ingest",
+  "documents": [
+    {
+      "doc_id": "doc-rust-hybrid",
+      "text": "rust retrieval with hybrid ranking and vector search",
+      "metadata": {
+        "lang": "rust",
+        "category": "hybrid",
+        "tenant": "tenant-a"
+      },
+      "timestamp": 1700000000100
+    },
+    {
+      "doc_id": "doc-rust-keyword",
+      "text": "rust keyword search with tantivy scoring",
+      "metadata": {
+        "lang": "rust",
+        "category": "keyword",
+        "tenant": "tenant-a"
+      },
+      "timestamp": 1700000000200
+    },
+    {
+      "doc_id": "doc-vector-near",
+      "text": "semantic retrieval using dense embeddings for ranking",
+      "metadata": {
+        "lang": "rust",
+        "category": "vector",
+        "tenant": "tenant-b"
+      },
+      "timestamp": 1700000000300
+    },
+    {
+      "doc_id": "doc-python-noise",
+      "text": "python web server and api application",
+      "metadata": {
+        "lang": "python",
+        "category": "noise",
+        "tenant": "tenant-b"
+      },
+      "timestamp": 1700000000400
+    },
+    {
+      "doc_id": "doc-tenant-a-filter",
+      "text": "tenant a retrieval document for filtered hybrid queries",
+      "metadata": {
+        "lang": "rust",
+        "category": "filter",
+        "tenant": "tenant-a"
+      },
+      "timestamp": 1700000000500
+    },
+    {
+      "doc_id": "doc-tenant-b-filter",
+      "text": "tenant b retrieval document for filtered hybrid queries",
+      "metadata": {
+        "lang": "rust",
+        "category": "filter",
+        "tenant": "tenant-b"
+      },
+      "timestamp": 1700000000600
+    }
+  ]
+}
