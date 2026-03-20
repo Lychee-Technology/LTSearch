@@ -51,7 +51,7 @@ prepare_local_ltembed_checkout() {
   local cargo_checkout=""
   local vendor_root="$repo_root/.sam-local-deps/LTEmbed"
 
-  cargo metadata --format-version 1 --no-deps >/dev/null
+  cargo fetch --locked >/dev/null
 
   if [[ -d "$cargo_home/git/checkouts" ]]; then
     cargo_checkout="$(find "$cargo_home/git/checkouts" -maxdepth 2 -mindepth 2 -type f -name Cargo.toml -path '*/ltembed-*/*' 2>/dev/null | head -n 1 | xargs -I{} dirname '{}')"
