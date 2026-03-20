@@ -39,6 +39,7 @@ create_e2e_queue() {
 prepare_local_ltembed_checkout() {
   local repo_root="$1"
   local configured_checkout="${LTSEARCH_LTEMBED_CHECKOUT:-}"
+  local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
   local common_git_dir
   common_git_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)"
   local shared_repo_root
@@ -47,7 +48,14 @@ prepare_local_ltembed_checkout() {
   sibling_checkout="$(dirname "$shared_repo_root")/LTEmbed"
   local nested_checkout
   nested_checkout="$repo_root/LTEmbed"
+  local cargo_checkout=""
   local vendor_root="$repo_root/.sam-local-deps/LTEmbed"
+
+  cargo metadata --format-version 1 --no-deps >/dev/null
+
+  if [[ -d "$cargo_home/git/checkouts" ]]; then
+    cargo_checkout="$(find "$cargo_home/git/checkouts" -maxdepth 2 -mindepth 2 -type f -name Cargo.toml -path '*/ltembed-*/*' 2>/dev/null | head -n 1 | xargs -I{} dirname '{}')"
+  fi
 
   local source_checkout=""
   if [[ -n "$configured_checkout" && -f "$configured_checkout/Cargo.toml" ]]; then
@@ -56,10 +64,12 @@ prepare_local_ltembed_checkout() {
     source_checkout="$nested_checkout"
   elif [[ -f "$sibling_checkout/Cargo.toml" ]]; then
     source_checkout="$sibling_checkout"
+  elif [[ -n "$cargo_checkout" && -f "$cargo_checkout/Cargo.toml" ]]; then
+    source_checkout="$cargo_checkout"
   fi
 
   if [[ -z "$source_checkout" ]]; then
-    echo "Missing LTEmbed checkout. Looked at: ${configured_checkout:-<unset>}, $nested_checkout, $sibling_checkout" >&2
+    echo "Missing LTEmbed checkout. Looked at: ${configured_checkout:-<unset>}, $nested_checkout, $sibling_checkout, ${cargo_checkout:-<cargo-cache-miss>}" >&2
     return 1
   fi
 
