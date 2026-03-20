@@ -196,6 +196,7 @@ fn valid_search_request() -> SearchRequest {
     }
 }
 
+#[cfg(feature = "ltembed")]
 fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -207,6 +208,7 @@ fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
         })
 }
 
+#[cfg(feature = "ltembed")]
 fn repeated_embedding(dim: usize, value: f32) -> Vec<serde_json::Value> {
     (0..dim).map(|_| json!(value)).collect()
 }
@@ -281,6 +283,7 @@ fn query_lambda_bootstrap_returns_service_error_when_embedding_provider_is_missi
     );
 }
 
+#[cfg(feature = "ltembed")]
 #[test]
 fn query_lambda_bootstrap_reports_missing_ltembed_model_path() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
@@ -309,6 +312,7 @@ fn query_lambda_bootstrap_reports_missing_ltembed_model_path() {
     );
 }
 
+#[cfg(feature = "ltembed")]
 #[test]
 fn query_lambda_bootstrap_reports_unsupported_ltembed_pooling_mode() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
@@ -413,6 +417,7 @@ fn query_lambda_bootstrap_rejects_fixed_embedding_dim_mismatch_before_serving_re
     );
 }
 
+#[cfg(feature = "ltembed")]
 #[test]
 fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
@@ -477,6 +482,7 @@ fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() 
     assert_eq!(response.results.len(), 2);
 }
 
+#[cfg(feature = "ltembed")]
 #[test]
 fn query_lambda_bootstrap_rejects_ltembed_dim_mismatch_before_serving_requests() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();

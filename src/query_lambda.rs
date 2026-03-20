@@ -5,9 +5,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::embedding::{
-    fixed_generator_from_env, ltembed_config_from_env, required_provider_from_env,
-    EmbeddingGenerator, EmbeddingProvider, LTEmbedEmbeddingGenerator,
+    fixed_generator_from_env, required_provider_from_env, EmbeddingGenerator, EmbeddingProvider,
 };
+#[cfg(feature = "ltembed")]
+use crate::embedding::{ltembed_config_from_env, LTEmbedEmbeddingGenerator};
 use crate::error::SearchError;
 use crate::models::{SearchRequest, SearchResponse};
 use crate::query::{KeywordSearcher, QueryRouter, VectorSearcher};
@@ -109,6 +110,7 @@ fn bootstrap_query_embedding_handler(
             "LTSEARCH_QUERY_FIXED_EMBEDDING",
             "dimension",
         ),
+        #[cfg(feature = "ltembed")]
         EmbeddingProvider::LTEmbed => {
             let config = ltembed_config_from_env(
                 "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",

@@ -48,6 +48,19 @@ fn provider_parsing_rejects_unsupported_provider() {
 }
 
 #[test]
+fn provider_parsing_rejects_ltembed_when_feature_is_disabled() {
+    let _guard = EMBEDDING_PROVIDER_ENV_LOCK.lock().unwrap();
+    std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "ltembed");
+
+    let error = required_provider_from_env("LTSEARCH_QUERY_EMBEDDING_PROVIDER").unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "unsupported LTSEARCH_QUERY_EMBEDDING_PROVIDER: ltembed (feature disabled)"
+    );
+}
+
+#[test]
 fn fixed_generator_from_env_builds_compatible_embedding_generator() {
     let _guard = EMBEDDING_PROVIDER_ENV_LOCK.lock().unwrap();
     std::env::set_var("LTSEARCH_BUILD_FIXED_EMBEDDING", "0.1,0.2,0.3");
