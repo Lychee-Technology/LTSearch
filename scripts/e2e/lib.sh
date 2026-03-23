@@ -12,15 +12,33 @@ aws_e2e() {
 }
 
 wait_for_moto() {
-  local attempts="${1:-30}"
+  local attempts="${1:-90}"
   local i
   for ((i = 1; i <= attempts; i++)); do
-    if aws_e2e s3api list-buckets >/dev/null 2>&1; then
-      return 0
+    if python3 - <<'PY' "$LTSEARCH_E2E_MOTO_ENDPOINT" >/dev/null 2>&1
+import sys, urllib.request
+endpoint = sys.argv[1].rstrip('/') + '/'
+with urllib.request.urlopen(endpoint, timeout=2) as response:
+    if response.status >= 200 and response.status < 500:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+    then
+      if aws_e2e s3api list-buckets >/dev/null 2>&1; then
+        return 0
+      fi
     fi
     sleep 1
   done
-  echo "Moto did not become ready at $LTSEARCH_E2E_MOTO_ENDPOINT" >&2
+
+  if command -v docker >/dev/null 2>&1; then
+    echo "=== docker compose ps ===" >&2
+    docker compose -f docker-compose.moto.yml ps >&2 || true
+    echo "=== moto logs ===" >&2
+    docker compose -f docker-compose.moto.yml logs moto >&2 || true
+  fi
+
+  echo "Moto did not become ready at $LTSEARCH_E2E_MOTO_ENDPOINT after ${attempts}s" >&2
   return 1
 }
 
