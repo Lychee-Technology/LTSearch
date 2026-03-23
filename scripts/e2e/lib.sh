@@ -5,6 +5,11 @@ readonly LTSEARCH_E2E_MOTO_ENDPOINT="${LTSEARCH_E2E_MOTO_ENDPOINT:-http://localh
 readonly LTSEARCH_E2E_AWS_REGION="${LTSEARCH_E2E_AWS_REGION:-us-east-1}"
 
 aws_e2e() {
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "aws CLI is required for SAM E2E helpers but was not found on PATH" >&2
+    return 127
+  fi
+
   AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}" \
   AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}" \
   AWS_DEFAULT_REGION="$LTSEARCH_E2E_AWS_REGION" \
