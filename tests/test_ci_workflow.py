@@ -65,6 +65,9 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("uses: actions/setup-python@v6", sam_e2e)
         self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", sam_e2e)
         self.assertIn("run: python3 -B tests/test_sam_invoke_e2e.py", sam_e2e)
+        self.assertIn(
+            "run: python3 -m pip install --upgrade pip awscli aws-sam-cli", sam_e2e
+        )
         self.assertIn("run: docker compose -f docker-compose.moto.yml up -d", sam_e2e)
         self.assertIn("run: bash scripts/e2e/run-sam-local-invoke-e2e.sh", sam_e2e)
         self.assertIn(
