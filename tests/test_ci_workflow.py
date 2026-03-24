@@ -60,7 +60,7 @@ class CiWorkflowTest(unittest.TestCase):
         sam_e2e = jobs["sam-e2e"]
         self.assertIn("needs: integration", sam_e2e)
         self.assertIn("runs-on: [self-hosted, Linux, ARM64]", sam_e2e)
-        self.assertIn("timeout-minutes: 45", sam_e2e)
+        self.assertIn("timeout-minutes: 120", sam_e2e)
         self.assertIn("uses: actions/checkout@v6", sam_e2e)
         self.assertIn("uses: actions/setup-python@v6", sam_e2e)
         self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", sam_e2e)

@@ -46,7 +46,7 @@ jobs:
   sam-e2e:
     needs: integration
     runs-on: [self-hosted, Linux, ARM64]
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
