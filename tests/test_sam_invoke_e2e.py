@@ -6,6 +6,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 SAM_TEMPLATE_PATH = REPO_ROOT / "template.sam-e2e.yaml"
 INVOKE_SCRIPT_PATH = REPO_ROOT / "scripts" / "e2e" / "run-sam-local-invoke-e2e.sh"
+WRITE_DOCKERFILE_PATH = REPO_ROOT / "sam" / "write_lambda.Dockerfile"
+BUILD_DOCKERFILE_PATH = REPO_ROOT / "sam" / "index_builder_lambda.Dockerfile"
+QUERY_DOCKERFILE_PATH = REPO_ROOT / "sam" / "query_lambda.Dockerfile"
 
 
 class SamInvokeE2ETest(unittest.TestCase):
@@ -67,6 +70,20 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("bash scripts/e2e/run-sam-local-invoke-e2e.sh", content)
         self.assertIn("docker compose -f docker-compose.moto.yml up -d", content)
         self.assertIn("docker compose -f docker-compose.moto.yml down -v", content)
+
+    def test_sam_dockerfiles_use_explicit_arm_images(self) -> None:
+        for dockerfile_path in [
+            WRITE_DOCKERFILE_PATH,
+            BUILD_DOCKERFILE_PATH,
+            QUERY_DOCKERFILE_PATH,
+        ]:
+            content = dockerfile_path.read_text(encoding="utf-8")
+            self.assertIn(
+                "FROM --platform=linux/arm64 public.ecr.aws/amazonlinux/amazonlinux:2023 AS builder",
+                content,
+                dockerfile_path.as_posix(),
+            )
+            self.assertIn("FROM public.ecr.aws/lambda/provided:al2023-arm64", content)
 
 
 if __name__ == "__main__":
