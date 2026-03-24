@@ -18,6 +18,14 @@ wait_for_moto
 create_e2e_bucket "$E2E_BUCKET"
 QUEUE_URL="$(create_e2e_queue "$E2E_QUEUE_NAME")"
 
+BUILDER_LOG="$E2E_OUTPUT_DIR/ltsearch-builder.log"
+BUILDER_DOCKER_EVENTS_LOG="$E2E_OUTPUT_DIR/ltsearch-builder-docker-events.log"
+run_with_heartbeat "docker build ltsearch-e2e-builder" "$BUILDER_LOG" "$BUILDER_DOCKER_EVENTS_LOG" \
+  env DOCKER_BUILDKIT=1 docker build \
+    --tag ltsearch-e2e-builder \
+    --file "$REPO_ROOT/sam/builder.Dockerfile" \
+    "$REPO_ROOT"
+
 SAM_BUILD_LOG="$E2E_OUTPUT_DIR/sam-build.log"
 SAM_BUILD_DOCKER_EVENTS_LOG="$E2E_OUTPUT_DIR/sam-build-docker-events.log"
 run_with_heartbeat "sam build" "$SAM_BUILD_LOG" "$SAM_BUILD_DOCKER_EVENTS_LOG" sam build --debug --template-file "$SAM_SOURCE_TEMPLATE"
