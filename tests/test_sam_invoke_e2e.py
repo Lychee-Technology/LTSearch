@@ -30,6 +30,8 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("LTSEARCH_BUILD_S3_BUCKET", content)
         self.assertIn("LTSEARCH_QUERY_ARTIFACT_ROOT", content)
         self.assertIn("/tmp/ltsearch-e2e-artifacts", content)
+        self.assertIn("http://moto:5000", content)
+        self.assertNotIn("host.docker.internal", content)
 
     def test_invoke_e2e_script_has_expected_flow_steps(self) -> None:
         self.assertTrue(
@@ -50,6 +52,7 @@ class SamInvokeE2ETest(unittest.TestCase):
             content,
         )
         self.assertIn('--env-vars "$ENV_VARS_JSON"', content)
+        self.assertIn("--docker-network ltsearch-e2e", content)
         self.assertIn("sam local invoke WriteFunction", content)
         self.assertIn("sam local invoke BuildFunction", content)
         self.assertIn("sam local invoke QueryFunction", content)
@@ -58,6 +61,8 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("create_e2e_queue", content)
         self.assertIn("receive_one_sqs_batch", content)
         self.assertIn("ENV_VARS_JSON", content)
+        self.assertIn("http://moto:5000", content)
+        self.assertNotIn("host.docker.internal", content)
 
     def test_e2e_helpers_keep_long_sam_builds_alive_in_ci(self) -> None:
         helpers = (REPO_ROOT / "scripts" / "e2e" / "lib.sh").read_text(encoding="utf-8")

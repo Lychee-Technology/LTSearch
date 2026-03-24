@@ -14,8 +14,8 @@ Globals:
         AWS_SECRET_ACCESS_KEY: test
         AWS_DEFAULT_REGION: us-east-1
         AWS_REGION: us-east-1
-        AWS_ENDPOINT_URL_S3: http://host.docker.internal:5000
-        AWS_ENDPOINT_URL_SQS: http://host.docker.internal:5000
+        AWS_ENDPOINT_URL_S3: http://moto:5000
+        AWS_ENDPOINT_URL_SQS: http://moto:5000
 
 Resources:
   WriteFunction:
@@ -34,7 +34,7 @@ Resources:
       Environment:
         Variables:
           LTSEARCH_WRITE_S3_BUCKET: ltsearch-e2e-bucket
-          LTSEARCH_WRITE_SQS_QUEUE_URL: http://host.docker.internal:5000/123456789012/ltsearch-e2e-queue
+          LTSEARCH_WRITE_SQS_QUEUE_URL: http://moto:5000/123456789012/ltsearch-e2e-queue
     Metadata:
       Dockerfile: sam/write_lambda.Dockerfile
       DockerContext: .
