@@ -83,17 +83,21 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("docker compose -f docker-compose.moto.yml down -v", content)
 
     def test_sam_dockerfiles_use_explicit_arm_images(self) -> None:
+        builder_path = REPO_ROOT / "sam" / "builder.Dockerfile"
+        builder_content = builder_path.read_text(encoding="utf-8")
+        self.assertIn(
+            "FROM --platform=linux/arm64 public.ecr.aws/amazonlinux/amazonlinux:2023",
+            builder_content,
+        )
+        self.assertIn("cargo build --release --no-default-features", builder_content)
+
         for dockerfile_path in [
             WRITE_DOCKERFILE_PATH,
             BUILD_DOCKERFILE_PATH,
             QUERY_DOCKERFILE_PATH,
         ]:
             content = dockerfile_path.read_text(encoding="utf-8")
-            self.assertIn(
-                "FROM --platform=linux/arm64 public.ecr.aws/amazonlinux/amazonlinux:2023 AS builder",
-                content,
-                dockerfile_path.as_posix(),
-            )
+            self.assertIn("ltsearch-e2e-builder", content, dockerfile_path.as_posix())
             self.assertIn("FROM public.ecr.aws/lambda/provided:al2023-arm64", content)
 
 
