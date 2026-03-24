@@ -34,22 +34,24 @@ ENV_VARS_JSON="$E2E_OUTPUT_DIR/env-vars.json"
 python3 - <<'PY' "$ENV_VARS_JSON" "$E2E_BUCKET" "$QUEUE_URL"
 import json, sys
 env_path, bucket, queue_url = sys.argv[1:4]
+moto_endpoint = 'http://moto:5000'
+container_queue_url = queue_url.replace('http://localhost:5000', moto_endpoint)
 env = {
     'WriteFunction': {
         'LTSEARCH_WRITE_S3_BUCKET': bucket,
-        'LTSEARCH_WRITE_SQS_QUEUE_URL': queue_url,
-        'AWS_ENDPOINT_URL_S3': 'http://host.docker.internal:5000',
-        'AWS_ENDPOINT_URL_SQS': 'http://host.docker.internal:5000',
+        'LTSEARCH_WRITE_SQS_QUEUE_URL': container_queue_url,
+        'AWS_ENDPOINT_URL_S3': moto_endpoint,
+        'AWS_ENDPOINT_URL_SQS': moto_endpoint,
     },
     'BuildFunction': {
         'LTSEARCH_BUILD_S3_BUCKET': bucket,
         'LTSEARCH_BUILD_ARTIFACT_ROOT': '/tmp/ltsearch-e2e-artifacts',
-        'AWS_ENDPOINT_URL_S3': 'http://host.docker.internal:5000',
+        'AWS_ENDPOINT_URL_S3': moto_endpoint,
     },
     'QueryFunction': {
         'LTSEARCH_QUERY_ARTIFACT_ROOT': '/tmp/ltsearch-e2e-artifacts',
         'LTSEARCH_QUERY_S3_BUCKET': bucket,
-        'AWS_ENDPOINT_URL_S3': 'http://host.docker.internal:5000',
+        'AWS_ENDPOINT_URL_S3': moto_endpoint,
     },
 }
 json.dump(env, open(env_path, 'w'))
@@ -60,6 +62,7 @@ sam local invoke WriteFunction \
   --template-file "$SAM_BUILT_TEMPLATE" \
   --env-vars "$ENV_VARS_JSON" \
   --event "$E2E_FIXTURES_DIR/write_request.json" \
+  --docker-network ltsearch-e2e \
   > "$WRITE_RESPONSE_JSON"
 
 BATCH_RESPONSE_JSON="$E2E_OUTPUT_DIR/batch-response.json"
@@ -86,6 +89,7 @@ sam local invoke BuildFunction \
   --template-file "$SAM_BUILT_TEMPLATE" \
   --env-vars "$ENV_VARS_JSON" \
   --event "$E2E_OUTPUT_DIR/build-event.json" \
+  --docker-network ltsearch-e2e \
   > "$BUILD_RESPONSE_JSON"
 
 QUERY_RESPONSE_JSON="$E2E_OUTPUT_DIR/query-response.json"
@@ -93,6 +97,7 @@ sam local invoke QueryFunction \
   --template-file "$SAM_BUILT_TEMPLATE" \
   --env-vars "$ENV_VARS_JSON" \
   --event "$E2E_FIXTURES_DIR/query_request.json" \
+  --docker-network ltsearch-e2e \
   > "$QUERY_RESPONSE_JSON"
 
 assert_json_field "$WRITE_RESPONSE_JSON" accepted_count 6
