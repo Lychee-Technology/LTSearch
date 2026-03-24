@@ -19,7 +19,8 @@ create_e2e_bucket "$E2E_BUCKET"
 QUEUE_URL="$(create_e2e_queue "$E2E_QUEUE_NAME")"
 
 SAM_BUILD_LOG="$E2E_OUTPUT_DIR/sam-build.log"
-run_with_heartbeat "sam build" "$SAM_BUILD_LOG" sam build --debug --template-file "$SAM_SOURCE_TEMPLATE"
+SAM_BUILD_DOCKER_EVENTS_LOG="$E2E_OUTPUT_DIR/sam-build-docker-events.log"
+run_with_heartbeat "sam build" "$SAM_BUILD_LOG" "$SAM_BUILD_DOCKER_EVENTS_LOG" sam build --debug --template-file "$SAM_SOURCE_TEMPLATE"
 
 ENV_VARS_JSON="$E2E_OUTPUT_DIR/env-vars.json"
 python3 - <<'PY' "$ENV_VARS_JSON" "$E2E_BUCKET" "$QUEUE_URL"

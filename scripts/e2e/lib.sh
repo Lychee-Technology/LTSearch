@@ -20,11 +20,37 @@ PY
   fi
 }
 
+start_docker_events_capture() {
+  local docker_events_log="$1"
+  if ! command -v docker >/dev/null 2>&1; then
+    return 1
+  fi
+
+  : > "$docker_events_log"
+  docker events --since 0s > "$docker_events_log" 2>&1 &
+  echo $!
+}
+
+stop_docker_events_capture() {
+  local docker_events_pid="$1"
+  if [[ -n "$docker_events_pid" ]] && kill -0 "$docker_events_pid" >/dev/null 2>&1; then
+    kill "$docker_events_pid" >/dev/null 2>&1 || true
+    wait "$docker_events_pid" >/dev/null 2>&1 || true
+  fi
+}
+
 run_with_heartbeat() {
   local label="$1"
   local log_file="$2"
+  local docker_events_log="$3"
   shift
   shift
+  shift
+
+  local docker_events_pid=""
+  if command -v docker >/dev/null 2>&1; then
+    docker_events_pid="$(start_docker_events_capture "$docker_events_log")"
+  fi
 
   "$@" 2>&1 | tee "$log_file" &
   local command_pid=$!
@@ -34,9 +60,11 @@ run_with_heartbeat() {
     if kill -0 "$command_pid" >/dev/null 2>&1; then
       echo "$label still running..."
       tail_log_snapshot "$log_file"
+      tail_log_snapshot "$docker_events_log"
     fi
   done
 
+  stop_docker_events_capture "$docker_events_pid"
   wait "$command_pid"
 }
 

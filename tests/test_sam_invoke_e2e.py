@@ -42,7 +42,11 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn('source "$(dirname "$0")/lib.sh"', content)
         self.assertIn('SAM_BUILD_LOG="$E2E_OUTPUT_DIR/sam-build.log"', content)
         self.assertIn(
-            'run_with_heartbeat "sam build" "$SAM_BUILD_LOG" sam build --debug --template-file "$SAM_SOURCE_TEMPLATE"',
+            'SAM_BUILD_DOCKER_EVENTS_LOG="$E2E_OUTPUT_DIR/sam-build-docker-events.log"',
+            content,
+        )
+        self.assertIn(
+            'run_with_heartbeat "sam build" "$SAM_BUILD_LOG" "$SAM_BUILD_DOCKER_EVENTS_LOG" sam build --debug --template-file "$SAM_SOURCE_TEMPLATE"',
             content,
         )
         self.assertIn('--env-vars "$ENV_VARS_JSON"', content)
@@ -60,9 +64,12 @@ class SamInvokeE2ETest(unittest.TestCase):
 
         self.assertIn("run_with_heartbeat()", helpers)
         self.assertIn('local log_file="$1"', helpers)
+        self.assertIn('local docker_events_log="$3"', helpers)
         self.assertIn('tee "$log_file"', helpers)
         self.assertIn('echo "$label still running..."', helpers)
         self.assertIn('tail_log_snapshot "$log_file"', helpers)
+        self.assertIn('start_docker_events_capture "$docker_events_log"', helpers)
+        self.assertIn("stop_docker_events_capture", helpers)
         self.assertIn("LTSEARCH_E2E_HEARTBEAT_SECONDS", helpers)
 
     def test_ci_workflow_includes_separate_sam_e2e_job(self) -> None:
