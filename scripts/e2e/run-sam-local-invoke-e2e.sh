@@ -18,7 +18,7 @@ wait_for_moto
 create_e2e_bucket "$E2E_BUCKET"
 QUEUE_URL="$(create_e2e_queue "$E2E_QUEUE_NAME")"
 
-sam build --template-file "$SAM_SOURCE_TEMPLATE"
+run_with_heartbeat "sam build" sam build --template-file "$SAM_SOURCE_TEMPLATE"
 
 ENV_VARS_JSON="$E2E_OUTPUT_DIR/env-vars.json"
 python3 - <<'PY' "$ENV_VARS_JSON" "$E2E_BUCKET" "$QUEUE_URL"

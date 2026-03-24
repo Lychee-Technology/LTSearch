@@ -37,7 +37,10 @@ class SamInvokeE2ETest(unittest.TestCase):
         content = INVOKE_SCRIPT_PATH.read_text(encoding="utf-8")
         self.assertIn("set -euo pipefail", content)
         self.assertIn('source "$(dirname "$0")/lib.sh"', content)
-        self.assertIn('sam build --template-file "$SAM_SOURCE_TEMPLATE"', content)
+        self.assertIn(
+            'run_with_heartbeat "sam build" sam build --template-file "$SAM_SOURCE_TEMPLATE"',
+            content,
+        )
         self.assertIn('--env-vars "$ENV_VARS_JSON"', content)
         self.assertIn("sam local invoke WriteFunction", content)
         self.assertIn("sam local invoke BuildFunction", content)
@@ -47,6 +50,13 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("create_e2e_queue", content)
         self.assertIn("receive_one_sqs_batch", content)
         self.assertIn("ENV_VARS_JSON", content)
+
+    def test_e2e_helpers_keep_long_sam_builds_alive_in_ci(self) -> None:
+        helpers = (REPO_ROOT / "scripts" / "e2e" / "lib.sh").read_text(encoding="utf-8")
+
+        self.assertIn("run_with_heartbeat()", helpers)
+        self.assertIn('echo "$label still running..."', helpers)
+        self.assertIn("LTSEARCH_E2E_HEARTBEAT_SECONDS", helpers)
 
     def test_ci_workflow_includes_separate_sam_e2e_job(self) -> None:
         self.assertTrue(WORKFLOW_PATH.exists(), f"missing workflow: {WORKFLOW_PATH}")

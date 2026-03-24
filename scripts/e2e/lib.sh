@@ -3,6 +3,24 @@ set -euo pipefail
 
 readonly LTSEARCH_E2E_MOTO_ENDPOINT="${LTSEARCH_E2E_MOTO_ENDPOINT:-http://localhost:5000}"
 readonly LTSEARCH_E2E_AWS_REGION="${LTSEARCH_E2E_AWS_REGION:-us-east-1}"
+readonly LTSEARCH_E2E_HEARTBEAT_SECONDS="${LTSEARCH_E2E_HEARTBEAT_SECONDS:-20}"
+
+run_with_heartbeat() {
+  local label="$1"
+  shift
+
+  "$@" &
+  local command_pid=$!
+
+  while kill -0 "$command_pid" >/dev/null 2>&1; do
+    sleep "$LTSEARCH_E2E_HEARTBEAT_SECONDS"
+    if kill -0 "$command_pid" >/dev/null 2>&1; then
+      echo "$label still running..."
+    fi
+  done
+
+  wait "$command_pid"
+}
 
 aws_e2e() {
   if ! command -v aws >/dev/null 2>&1; then
