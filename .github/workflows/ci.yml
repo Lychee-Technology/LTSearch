@@ -57,6 +57,17 @@ jobs:
           cache: true
       - run: python3 -B tests/test_sam_invoke_e2e.py
       - run: python3 -m pip install --upgrade pip awscli aws-sam-cli
+      - name: Enable Docker BuildKit
+        run: |
+          existing=$(cat /etc/docker/daemon.json 2>/dev/null || echo '{}')
+          echo "$existing" | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          d.setdefault('features', {})['buildkit'] = True
+          print(json.dumps(d))
+          " | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          timeout 30 bash -c 'until docker info >/dev/null 2>&1; do sleep 1; done'
       - run: docker compose -f docker-compose.moto.yml up -d
       - run: bash scripts/e2e/run-sam-local-invoke-e2e.sh
       - if: always()
