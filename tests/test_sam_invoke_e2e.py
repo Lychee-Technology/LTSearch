@@ -40,8 +40,9 @@ class SamInvokeE2ETest(unittest.TestCase):
         content = INVOKE_SCRIPT_PATH.read_text(encoding="utf-8")
         self.assertIn("set -euo pipefail", content)
         self.assertIn('source "$(dirname "$0")/lib.sh"', content)
+        self.assertIn('SAM_BUILD_LOG="$E2E_OUTPUT_DIR/sam-build.log"', content)
         self.assertIn(
-            'run_with_heartbeat "sam build" sam build --template-file "$SAM_SOURCE_TEMPLATE"',
+            'run_with_heartbeat "sam build" "$SAM_BUILD_LOG" sam build --debug --template-file "$SAM_SOURCE_TEMPLATE"',
             content,
         )
         self.assertIn('--env-vars "$ENV_VARS_JSON"', content)
@@ -58,7 +59,10 @@ class SamInvokeE2ETest(unittest.TestCase):
         helpers = (REPO_ROOT / "scripts" / "e2e" / "lib.sh").read_text(encoding="utf-8")
 
         self.assertIn("run_with_heartbeat()", helpers)
+        self.assertIn('local log_file="$1"', helpers)
+        self.assertIn('tee "$log_file"', helpers)
         self.assertIn('echo "$label still running..."', helpers)
+        self.assertIn('tail_log_snapshot "$log_file"', helpers)
         self.assertIn("LTSEARCH_E2E_HEARTBEAT_SECONDS", helpers)
 
     def test_ci_workflow_includes_separate_sam_e2e_job(self) -> None:
