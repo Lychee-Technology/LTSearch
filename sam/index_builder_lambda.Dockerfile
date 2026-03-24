@@ -5,7 +5,11 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 WORKDIR /src
 COPY . .
 RUN printf '\n[patch."https://github.com/Lychee-Technology/LTEmbed"]\nltembed = { path = "/src/vendor/ltembed-stub" }\n' >> /src/.cargo/config.toml
-RUN cargo build --release --no-default-features --bin index_builder_lambda
+RUN --mount=type=cache,id=ltsearch-cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=ltsearch-cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=ltsearch-cargo-target,target=/src/target \
+    cargo build --release --no-default-features --bin index_builder_lambda && \
+    cp target/release/index_builder_lambda /index_builder_lambda
 
 FROM public.ecr.aws/lambda/provided:al2023-arm64
-COPY --from=builder /src/target/release/index_builder_lambda /var/runtime/bootstrap
+COPY --from=builder /index_builder_lambda /var/runtime/bootstrap
