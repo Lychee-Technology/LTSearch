@@ -5,17 +5,35 @@ readonly LTSEARCH_E2E_MOTO_ENDPOINT="${LTSEARCH_E2E_MOTO_ENDPOINT:-http://localh
 readonly LTSEARCH_E2E_AWS_REGION="${LTSEARCH_E2E_AWS_REGION:-us-east-1}"
 readonly LTSEARCH_E2E_HEARTBEAT_SECONDS="${LTSEARCH_E2E_HEARTBEAT_SECONDS:-20}"
 
+tail_log_snapshot() {
+  local log_file="$1"
+  if [[ -f "$log_file" ]]; then
+    echo "--- recent log: $log_file ---"
+    python3 - <<'PY' "$log_file"
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+for line in lines[-20:]:
+    print(line)
+PY
+    echo "--- end log: $log_file ---"
+  fi
+}
+
 run_with_heartbeat() {
   local label="$1"
+  local log_file="$2"
+  shift
   shift
 
-  "$@" &
+  "$@" 2>&1 | tee "$log_file" &
   local command_pid=$!
 
   while kill -0 "$command_pid" >/dev/null 2>&1; do
     sleep "$LTSEARCH_E2E_HEARTBEAT_SECONDS"
     if kill -0 "$command_pid" >/dev/null 2>&1; then
       echo "$label still running..."
+      tail_log_snapshot "$log_file"
     fi
   done
 
