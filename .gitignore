@@ -5,3 +5,4 @@
 .e2e-tmp/
 .sam-local-deps/
 target/
+.claude/
