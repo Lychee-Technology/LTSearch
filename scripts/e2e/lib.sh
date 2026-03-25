@@ -170,33 +170,6 @@ shutil.copytree(src, dst, ignore=shutil.ignore_patterns('.git', 'target'))
 PY
 }
 
-check_ltembed_assets() {
-  local assets_dir="${LTSEARCH_LTEMBED_ASSETS_DIR:-$HOME/.cache/ltembed-assets}"
-  for f in model.safetensors config.json tokenizer.json; do
-    if [[ ! -f "$assets_dir/$f" ]]; then
-      echo "LTEmbed assets not found at $assets_dir (missing: $f) — skipping LTEmbed scenarios" >&2
-      return 1
-    fi
-  done
-  echo "LTEmbed assets ready at $assets_dir" >&2
-}
-
-stage_ltembed_assets() {
-  local repo_root="$1"
-  local src_dir="${LTSEARCH_LTEMBED_ASSETS_DIR:-$HOME/.cache/ltembed-assets}"
-  local dst_dir="$repo_root/.sam-local-deps/ltembed-assets"
-  python3 - <<'PY' "$src_dir" "$dst_dir"
-import pathlib, shutil, sys
-src = pathlib.Path(sys.argv[1])
-dst = pathlib.Path(sys.argv[2])
-if dst.exists():
-    shutil.rmtree(dst)
-dst.mkdir(parents=True)
-for name in ('model.safetensors', 'config.json', 'tokenizer.json'):
-    shutil.copy2(src / name, dst / name)
-PY
-}
-
 receive_one_sqs_batch() {
   local queue_url="$1"
   aws_e2e sqs receive-message \

@@ -105,15 +105,20 @@ class SamInvokeE2ETest(unittest.TestCase):
             self.assertIn("ltsearch-e2e-builder", content, dockerfile_path.as_posix())
             self.assertIn("FROM public.ecr.aws/lambda/provided:al2023-arm64", content)
 
-    def test_ltembed_asset_support_helpers_are_defined(self) -> None:
-        helpers = (REPO_ROOT / "scripts" / "e2e" / "lib.sh").read_text(encoding="utf-8")
+    def test_builder_dockerfile_downloads_from_huggingface(self) -> None:
+        builder_path = REPO_ROOT / "sam" / "builder.Dockerfile"
+        content = builder_path.read_text(encoding="utf-8")
 
-        self.assertIn("check_ltembed_assets()", helpers)
-        self.assertIn("stage_ltembed_assets()", helpers)
-        self.assertIn("LTSEARCH_LTEMBED_ASSETS_DIR", helpers)
-        self.assertIn("model.safetensors", helpers)
-        self.assertIn("config.json", helpers)
-        self.assertIn("tokenizer.json", helpers)
+        self.assertIn("huggingface.co/${HF_MODEL}", content)
+        self.assertIn("intfloat/multilingual-e5-small", content)
+        self.assertIn("model.safetensors", content)
+        self.assertIn("config.json", content)
+        self.assertIn("tokenizer.json", content)
+        self.assertIn("HF_MODEL", content)
+        # download must happen before COPY so the layer is cached independently
+        download_pos = content.index("huggingface.co")
+        copy_pos = content.index("COPY . .")
+        self.assertLess(download_pos, copy_pos)
 
     def test_ltembed_env_vars_wired_in_sam_template(self) -> None:
         content = SAM_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -137,6 +142,8 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn(".sam-local-deps/LTEmbed", content)
         self.assertIn("--features ltembed", content)
         self.assertIn("/ltembed-assets", content)
+        self.assertNotIn("stage_ltembed_assets", content)
+        self.assertNotIn(".sam-local-deps/ltembed-assets", content)
 
     def test_build_and_query_dockerfiles_copy_ltembed_assets(self) -> None:
         for dockerfile_path in [BUILD_DOCKERFILE_PATH, QUERY_DOCKERFILE_PATH]:
