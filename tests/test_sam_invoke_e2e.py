@@ -105,6 +105,48 @@ class SamInvokeE2ETest(unittest.TestCase):
             self.assertIn("ltsearch-e2e-builder", content, dockerfile_path.as_posix())
             self.assertIn("FROM public.ecr.aws/lambda/provided:al2023-arm64", content)
 
+    def test_ltembed_asset_support_helpers_are_defined(self) -> None:
+        helpers = (REPO_ROOT / "scripts" / "e2e" / "lib.sh").read_text(encoding="utf-8")
+
+        self.assertIn("check_ltembed_assets()", helpers)
+        self.assertIn("stage_ltembed_assets()", helpers)
+        self.assertIn("LTSEARCH_LTEMBED_ASSETS_DIR", helpers)
+        self.assertIn("model.safetensors", helpers)
+        self.assertIn("config.json", helpers)
+        self.assertIn("tokenizer.json", helpers)
+
+    def test_ltembed_env_vars_wired_in_sam_template(self) -> None:
+        content = SAM_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("LTSEARCH_BUILD_LTEMBED_MODEL_PATH", content)
+        self.assertIn("LTSEARCH_BUILD_LTEMBED_CONFIG_PATH", content)
+        self.assertIn("LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH", content)
+        self.assertIn("LTSEARCH_BUILD_LTEMBED_POOLING", content)
+        self.assertIn("LTSEARCH_QUERY_LTEMBED_MODEL_PATH", content)
+        self.assertIn("LTSEARCH_QUERY_LTEMBED_CONFIG_PATH", content)
+        self.assertIn("LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH", content)
+        self.assertIn("LTSEARCH_QUERY_LTEMBED_POOLING", content)
+        self.assertIn("/ltembed-assets/model.safetensors", content)
+
+    def test_builder_dockerfile_supports_ltembed_mode(self) -> None:
+        builder_path = REPO_ROOT / "sam" / "builder.Dockerfile"
+        content = builder_path.read_text(encoding="utf-8")
+
+        self.assertIn("ARG LTEMBED_MODE=stub", content)
+        self.assertIn("ltembed-stub", content)
+        self.assertIn(".sam-local-deps/LTEmbed", content)
+        self.assertIn("--features ltembed", content)
+        self.assertIn("/ltembed-assets", content)
+
+    def test_build_and_query_dockerfiles_copy_ltembed_assets(self) -> None:
+        for dockerfile_path in [BUILD_DOCKERFILE_PATH, QUERY_DOCKERFILE_PATH]:
+            content = dockerfile_path.read_text(encoding="utf-8")
+            self.assertIn(
+                "COPY --from=builder /ltembed-assets /ltembed-assets",
+                content,
+                dockerfile_path.as_posix(),
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

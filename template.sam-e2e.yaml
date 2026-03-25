@@ -54,6 +54,10 @@ Resources:
           LTSEARCH_BUILD_EMBEDDING_PROVIDER: fixed
           LTSEARCH_BUILD_FIXED_EMBEDDING: 0.9,0.1,0.0
           LTSEARCH_BUILD_EMBEDDING_DIM: 3
+          LTSEARCH_BUILD_LTEMBED_MODEL_PATH: /ltembed-assets/model.safetensors
+          LTSEARCH_BUILD_LTEMBED_CONFIG_PATH: /ltembed-assets/config.json
+          LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH: /ltembed-assets/tokenizer.json
+          LTSEARCH_BUILD_LTEMBED_POOLING: mean
     Metadata:
       Dockerfile: sam/index_builder_lambda.Dockerfile
       DockerContext: .
@@ -72,6 +76,10 @@ Resources:
           LTSEARCH_QUERY_S3_BUCKET: ltsearch-e2e-bucket
           LTSEARCH_QUERY_EMBEDDING_PROVIDER: fixed
           LTSEARCH_QUERY_FIXED_EMBEDDING: 0.9,0.1,0.0
+          LTSEARCH_QUERY_LTEMBED_MODEL_PATH: /ltembed-assets/model.safetensors
+          LTSEARCH_QUERY_LTEMBED_CONFIG_PATH: /ltembed-assets/config.json
+          LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH: /ltembed-assets/tokenizer.json
+          LTSEARCH_QUERY_LTEMBED_POOLING: mean
       Events:
         QueryApi:
           Type: Api
