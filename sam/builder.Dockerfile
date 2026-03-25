@@ -1,5 +1,5 @@
 FROM --platform=linux/arm64 public.ecr.aws/amazonlinux/amazonlinux:2023
-RUN dnf install -y gcc gcc-c++ make perl pkgconfig openssl-devel git tar gzip curl && dnf clean all
+RUN dnf install -y --allowerasing gcc gcc-c++ make perl pkgconfig openssl-devel git tar gzip curl && dnf clean all
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.94.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 ARG LTEMBED_MODE=stub
