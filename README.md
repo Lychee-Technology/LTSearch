@@ -72,9 +72,13 @@ cargo build --bin query_lambda
 
 | Env Var | Description |
 |---------|-------------|
-| `LTSEARCH_QUERY_EMBEDDING_PROVIDER` | Embedding provider (`fixed` for MVP) |
+| `LTSEARCH_QUERY_EMBEDDING_PROVIDER` | Embedding provider: `fixed` or `ltembed` |
 | `LTSEARCH_QUERY_ARTIFACT_ROOT` | Local path to index artifacts |
-| `LTSEARCH_QUERY_FIXED_EMBEDDING` | Comma-separated fixed embedding values |
+| `LTSEARCH_QUERY_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
+| `LTSEARCH_QUERY_LTEMBED_MODEL_PATH` | Path to `model.safetensors` (provider=`ltembed`) |
+| `LTSEARCH_QUERY_LTEMBED_CONFIG_PATH` | Path to `config.json` |
+| `LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH` | Path to `tokenizer.json` |
+| `LTSEARCH_QUERY_LTEMBED_POOLING` | Pooling strategy (e.g. `mean`) |
 
 ### write_lambda
 
@@ -101,9 +105,82 @@ cargo build --bin index_builder_lambda
 |---------|-------------|
 | `LTSEARCH_BUILD_S3_BUCKET` | S3 bucket for WAL + artifacts |
 | `LTSEARCH_BUILD_ARTIFACT_ROOT` | Local path for staging builds (default: `/tmp/ltsearch`) |
-| `LTSEARCH_BUILD_EMBEDDING_PROVIDER` | Embedding provider (`fixed` for MVP) |
-| `LTSEARCH_BUILD_FIXED_EMBEDDING` | Comma-separated fixed embedding values |
+| `LTSEARCH_BUILD_EMBEDDING_PROVIDER` | Embedding provider: `fixed` or `ltembed` |
+| `LTSEARCH_BUILD_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
 | `LTSEARCH_BUILD_EMBEDDING_DIM` | Embedding dimension |
+| `LTSEARCH_BUILD_LTEMBED_MODEL_PATH` | Path to `model.safetensors` (provider=`ltembed`) |
+| `LTSEARCH_BUILD_LTEMBED_CONFIG_PATH` | Path to `config.json` |
+| `LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH` | Path to `tokenizer.json` |
+| `LTSEARCH_BUILD_LTEMBED_POOLING` | Pooling strategy (e.g. `mean`) |
+
+## Local E2E Workflow
+
+The SAM Local E2E scripts run the full write → build → query pipeline against a local Moto-backed AWS environment without deploying to real AWS.
+
+### Prerequisites
+
+- **SAM CLI** — `brew install aws-sam-cli`
+- **AWS CLI** — for SQS polling helpers
+- **Docker** — for Lambda containers and Moto
+
+### Embedding modes
+
+| Mode | Description | When to use |
+|------|-------------|-------------|
+| `fixed` (default) | Deterministic 3-dim stub vector, no model required | CI, quick local iteration |
+| `ltembed` | Real `intfloat/multilingual-e5-small` model, 384-dim | Testing real semantic search locally |
+
+The `ltembed` mode downloads `model.safetensors` (~471 MB), `config.json`, and `tokenizer.json` from HuggingFace automatically during `docker build`. No manual file setup is required.
+
+### SAM invoke E2E (CI-compatible)
+
+Runs the full pipeline via `sam local invoke` — no persistent SAM process needed.
+
+```bash
+# Start Moto
+docker compose -f docker-compose.moto.yml up -d
+
+# Run fixed-embedding invoke flow (matches CI)
+bash scripts/e2e/run-sam-local-invoke-e2e.sh
+
+# Run LTEmbed invoke flow (downloads model on first run, ~471 MB)
+LTSEARCH_E2E_LTEMBED=true bash scripts/e2e/run-sam-local-invoke-e2e.sh
+
+# Stop Moto
+docker compose -f docker-compose.moto.yml down -v
+```
+
+### SAM start-api E2E (interactive / HTTP)
+
+Exposes `POST /write` and `POST /query` as a persistent local HTTP API. Useful for manual testing with curl or any HTTP client.
+
+```bash
+# Start Moto + SAM API in background (fixed-embedding mode)
+bash scripts/e2e/start-sam-moto.sh
+
+# Run write → build → query HTTP flow with assertions
+bash scripts/e2e/run-http-flow.sh
+
+# Teardown
+bash scripts/e2e/stop-sam-moto.sh
+```
+
+After `start-sam-moto.sh`, the API is available at `http://localhost:3000`:
+
+```bash
+curl -X POST http://localhost:3000/write  -H 'Content-Type: application/json' -d @tests/fixtures/e2e/write_request.json
+curl -X POST http://localhost:3000/query  -H 'Content-Type: application/json' -d @tests/fixtures/e2e/query_request.json
+```
+
+`BuildFunction` has no HTTP route and must be invoked directly:
+
+```bash
+sam local invoke BuildFunction \
+  --template-file .aws-sam/build/template.yaml \
+  --env-vars .e2e-tmp/env-vars.json \
+  --event .e2e-tmp/build-event.json \
+  --docker-network ltsearch-e2e
+```
 
 ## Architecture
 
