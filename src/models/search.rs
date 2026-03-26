@@ -16,17 +16,12 @@ pub enum FilterValue {
     NumberEquals(f64),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkSource {
     Static,
+    #[default]
     Dynamic,
-}
-
-impl Default for ChunkSource {
-    fn default() -> Self {
-        Self::Dynamic
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
