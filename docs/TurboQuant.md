@@ -61,7 +61,10 @@ Assuming the target bit-width $b=3$  for $d=384$ (`e5-small`), the structure per
 To search against the `mmap` struct, the inner product between the high-precision query vector $y$ and the compressed representation must be calculated dynamically. 
 
 The custom distance metric implements the `TurboQuant_prod` estimator:
-`Score` $= \langle y, \tilde{x}_{mse} \rangle + \gamma \cdot \langle y, Q^{-1}_{qjl}(qjl) \rangle$
+
+$$
+{Score} = \langle y, \tilde{x}_{mse} \rangle + \gamma \cdot \langle y, Q^{-1}_{qjl}(qjl) \rangle
+$$
 
 Where:
 * $\tilde{x}_{mse}$ is reconstructed on-the-fly using the pre-computed 1D centroids and the stored `idx`.
