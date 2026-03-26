@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use ltsearch::models::{
-    CacheStats, DeleteResponse, Document, FilterValue, HealthStatus, IndexCache, IndexManifest,
-    IngestResponse, SearchRequest, SearchResponse, SearchResult, SearchSource, ShardManifest,
-    WalOperation, WalRecord,
+    CacheStats, ChunkSource, DeleteResponse, Document, FilterValue, HealthStatus, IndexCache,
+    IndexManifest, IngestResponse, SearchRequest, SearchResponse, SearchResult, SearchSource,
+    ShardManifest, WalOperation, WalRecord,
 };
 use serde_json::{json, Value};
 
@@ -91,6 +91,7 @@ fn search_models_round_trip_through_serde() {
         text: "hello".into(),
         metadata: Some(HashMap::from([("lang".into(), json!("en"))])),
         source: SearchSource::Hybrid,
+        chunk_source: ChunkSource::Dynamic,
         corpus_type: None,
     };
     assert!(result.validate().is_ok());

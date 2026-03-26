@@ -14,7 +14,7 @@ use lancedb::DistanceType;
 use serde_json::Value;
 
 use crate::error::{SearchError, ValidationError};
-use crate::models::{CacheStats, SearchRequest, SearchResult, SearchSource, ShardManifest};
+use crate::models::{CacheStats, ChunkSource, SearchRequest, SearchResult, SearchSource, ShardManifest};
 use crate::storage::{ActiveManifest, ManifestStore};
 
 const LANCE_TABLE_NAME: &str = "documents";
@@ -542,6 +542,7 @@ fn decode_lancedb_batches(
                 text: texts.value(index).to_string(),
                 metadata,
                 source: SearchSource::Vector,
+                chunk_source: ChunkSource::Dynamic,
                 corpus_type: None,
             };
 

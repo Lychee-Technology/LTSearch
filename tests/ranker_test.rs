@@ -9,6 +9,7 @@ fn sample_result(doc_id: &str, score: f32, source: SearchSource) -> SearchResult
         text: format!("text for {doc_id}"),
         metadata: None,
         source,
+        chunk_source: ltsearch::models::ChunkSource::Dynamic,
         corpus_type: None,
     }
 }
@@ -122,6 +123,7 @@ fn fuse_preserves_metadata_from_duplicate_result_when_available() {
             json!("rust"),
         )])),
         source: SearchSource::Keyword,
+        chunk_source: ltsearch::models::ChunkSource::Dynamic,
         corpus_type: None,
     }];
 
@@ -146,6 +148,7 @@ fn fuse_merges_metadata_maps_from_duplicate_results() {
             ("shared".into(), json!("vector")),
         ])),
         source: SearchSource::Vector,
+        chunk_source: ltsearch::models::ChunkSource::Dynamic,
         corpus_type: None,
     }];
     let keyword_results = vec![SearchResult {
@@ -157,6 +160,7 @@ fn fuse_merges_metadata_maps_from_duplicate_results() {
             ("shared".into(), json!("keyword")),
         ])),
         source: SearchSource::Keyword,
+        chunk_source: ltsearch::models::ChunkSource::Dynamic,
         corpus_type: None,
     }];
 
