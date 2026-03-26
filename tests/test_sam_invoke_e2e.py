@@ -154,6 +154,20 @@ class SamInvokeE2ETest(unittest.TestCase):
                 dockerfile_path.as_posix(),
             )
 
+    def test_ltembed_scenarios_are_asset_gated(self) -> None:
+        content = INVOKE_SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertIn("LTSEARCH_E2E_LTEMBED", content)
+        self.assertIn("LTEMBED_MODE=real", content)
+        self.assertIn("embedding_dim': 384", content)
+        self.assertIn("env-vars-ltembed.json", content)
+        self.assertIn("LTSEARCH_BUILD_EMBEDDING_PROVIDER", content)
+        self.assertIn("LTSEARCH_QUERY_EMBEDDING_PROVIDER", content)
+        self.assertIn("ltembed-build-event.json", content)
+        # LTEmbed block must come after the fixed-embedding assertions
+        fixed_end = content.index("assert 'doc-rust-hybrid' in doc_ids")
+        ltembed_gate = content.index("LTSEARCH_E2E_LTEMBED")
+        self.assertGreater(ltembed_gate, fixed_end)
+
 
 if __name__ == "__main__":
     unittest.main()
