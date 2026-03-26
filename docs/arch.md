@@ -537,3 +537,68 @@ The system is optimized for:
 * AI retrieval pipelines
 
 while maintaining **very low operational overhead and infrastructure cost**.
+
+---
+
+# **21\. Embedding Layer**
+
+The system supports two embedding providers, selected per deployment via environment variable.
+
+---
+
+## **Providers**
+
+| Provider | Env value | Description |
+| -------- | --------- | ----------- |
+| Fixed | `fixed` | Deterministic stub vector; all documents and queries share the same vector. Used in CI and unit tests. |
+| LTEmbed | `ltembed` | Real model inference using `intfloat/multilingual-e5-small` (384-dim). Used in production and local LTEmbed E2E. |
+
+The provider is configured independently for the build pipeline (`LTSEARCH_BUILD_EMBEDDING_PROVIDER`) and the query path (`LTSEARCH_QUERY_EMBEDDING_PROVIDER`). Both must use the same provider and dimension for a given index version.
+
+---
+
+## **LTEmbed Asset Delivery**
+
+The `intfloat/multilingual-e5-small` model (~471 MB) is too large for Lambda Layers and impractical to download at cold-start. Instead, the model files are **baked into the Lambda container image** at build time.
+
+Build flow:
+
+```
+docker build --build-arg LTEMBED_MODE=real sam/builder.Dockerfile
+  → downloads model.safetensors, config.json, tokenizer.json from HuggingFace
+  → compiles Rust binaries with --features ltembed
+  → embeds files at /ltembed-assets/ in the builder image
+
+sam build
+  → index_builder_lambda.Dockerfile: COPY --from=builder /ltembed-assets /ltembed-assets
+  → query_lambda.Dockerfile:         COPY --from=builder /ltembed-assets /ltembed-assets
+```
+
+The default `LTEMBED_MODE=stub` skips the download and compiles with the ltembed-stub crate, which produces zero-overhead deterministic vectors. This is the CI default.
+
+Model files inside Lambda containers:
+
+| File | Container path |
+| ---- | -------------- |
+| `model.safetensors` | `/ltembed-assets/model.safetensors` |
+| `config.json` | `/ltembed-assets/config.json` |
+| `tokenizer.json` | `/ltembed-assets/tokenizer.json` |
+
+---
+
+## **Dimension Validation**
+
+The build event carries an `embedding_dim` field. The index builder validates that the configured embedding dimension matches before writing the LanceDB dataset. This prevents silent dimension mismatches when switching providers.
+
+---
+
+## **Performance**
+
+With `ltembed`, embedding generation adds latency versus the fixed stub:
+
+| Stage | Fixed | LTEmbed |
+| ----- | ----- | ------- |
+| Embedding generation | ~0 ms | 20–40 ms |
+| Total query latency | 50–150 ms (warm) | 70–190 ms (warm) |
+
+The model is loaded once per Lambda container lifetime (warm path reuse).
