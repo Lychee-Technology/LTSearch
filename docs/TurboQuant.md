@@ -48,7 +48,7 @@ Assuming the target bit-width $b=3$  for $d=384$ (`e5-small`), the structure per
 | `doc_id` | Unique identifier for the document chunk. | 8 bytes | 64-bit unsigned integer |
 | `idx` | Phase 1 MSE quantization pointers. | 96 bytes | 384 dims $\times$ 2 bits ($b-1$)  |
 | `qjl` | Phase 2 residual sign bits (+1 or -1). | 48 bytes | 384 dims $\times$ 1 bit  |
-| `gamma` | The L2 norm ($||r||_2$) of the residual vector. | 4 bytes | 32-bit floating point |
+| `gamma` | The L2 norm ($\|\|r\|\|_2$) of the residual vector. | 4 bytes | 32-bit floating point |
 
 **Total Memory Footprint:** **156 Bytes per vector.**
 *A knowledge base of 1,000,000 documents will result in a single `~156 MB` binary file.*
