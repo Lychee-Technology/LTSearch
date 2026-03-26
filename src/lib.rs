@@ -11,5 +11,6 @@ pub mod models;
 pub mod query;
 pub mod query_lambda;
 pub mod storage;
+pub mod turbo;
 pub mod write;
 pub mod write_lambda;
