@@ -54,3 +54,7 @@ tempfile = "3"
 
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "turbo_index_builder"
+path = "src/bin/turbo_index_builder.rs"
