@@ -10,5 +10,5 @@ pub struct ModuleBoundary;
 pub use keyword_searcher::KeywordSearcher;
 pub use ranker::HybridRanker;
 pub use router::{KeywordRetriever, NoopWarningSink, QueryRouter, VectorRetriever, WarningSink};
-pub use turbo_searcher::TurboQuantSearcher;
+pub use turbo_searcher::{NoopStaticRetriever, StaticRetriever, TurboQuantSearcher};
 pub use vector_searcher::VectorSearcher;

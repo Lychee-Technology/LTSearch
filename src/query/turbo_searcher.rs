@@ -5,21 +5,33 @@ use rayon::prelude::*;
 
 use crate::error::{SearchError, ValidationError};
 use crate::index::{encode_vector, score_query_against_record_512, MmapIndex, TurboRecordSlice};
-use crate::models::{CorpusType, SearchResult, SearchSource};
+use crate::models::{ChunkSource, CorpusType, SearchResult, SearchSource};
 
 const TOP_K_MAX: usize = 100;
 
+/// Trait for searching the static TurboQuant index.
+/// Unlike VectorRetriever, no ActiveManifest is needed.
+pub trait StaticRetriever: Send + Sync {
+    fn search(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError>;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TurboQuantSearcher {
-    index: &'static MmapIndex,
+    pub index: &'static MmapIndex,
 }
 
 impl TurboQuantSearcher {
     pub fn new(index: &'static MmapIndex) -> Self {
         Self { index }
     }
+}
 
-    pub fn search(
+impl StaticRetriever for TurboQuantSearcher {
+    fn search(
         &self,
         query_embedding: &[f32],
         top_k: usize,
@@ -82,9 +94,20 @@ impl TurboQuantSearcher {
                 text: candidate.text,
                 metadata: None,
                 source: SearchSource::Static,
+                chunk_source: ChunkSource::Static,
                 corpus_type: Some(candidate.corpus_type),
             })
             .collect())
+    }
+}
+
+/// No-op static retriever — returns empty results.
+/// Used as the default when no TurboQuant index is configured.
+pub struct NoopStaticRetriever;
+
+impl StaticRetriever for NoopStaticRetriever {
+    fn search(&self, _: &[f32], _: usize) -> Result<Vec<SearchResult>, SearchError> {
+        Ok(vec![])
     }
 }
 
@@ -173,4 +196,40 @@ fn validate_top_k(top_k: usize) -> Result<(), SearchError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeStaticRetriever(Vec<SearchResult>);
+
+    impl StaticRetriever for FakeStaticRetriever {
+        fn search(&self, _: &[f32], top_k: usize) -> Result<Vec<SearchResult>, SearchError> {
+            Ok(self.0.iter().take(top_k).cloned().collect())
+        }
+    }
+
+    #[test]
+    fn noop_returns_empty() {
+        let r = NoopStaticRetriever.search(&[0.1; 384], 5).unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn fake_retriever_respects_top_k() {
+        let results: Vec<SearchResult> = (0..10)
+            .map(|i| SearchResult {
+                doc_id: i.to_string(),
+                score: i as f32,
+                text: String::new(),
+                metadata: None,
+                source: SearchSource::Static,
+                chunk_source: ChunkSource::Static,
+                corpus_type: None,
+            })
+            .collect();
+        let r = FakeStaticRetriever(results).search(&[], 3).unwrap();
+        assert_eq!(r.len(), 3);
+    }
 }
