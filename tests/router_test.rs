@@ -541,6 +541,7 @@ fn router_fuses_hybrid_results_and_runs_retrievers_in_parallel() {
     let load_head_calls = manifest_store.load_head_calls.clone();
     let load_active_manifest_calls = manifest_store.load_active_manifest_calls.clone();
     let generator = StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]);
+    // sample_request has top_k=3; search_hybrid uses retrieval_top_k = top_k * 3 = 9
     let keyword = StubKeywordRetriever::new(
         vec![
             sample_result("doc-2", 8.0, SearchSource::Keyword),
@@ -549,7 +550,7 @@ fn router_fuses_hybrid_results_and_runs_retrievers_in_parallel() {
         Duration::from_millis(200),
         start.clone(),
         42,
-        3,
+        9,
     );
     let vector = StubVectorRetriever::new(
         vec![
@@ -559,7 +560,7 @@ fn router_fuses_hybrid_results_and_runs_retrievers_in_parallel() {
         Duration::from_millis(200),
         start.clone(),
         42,
-        3,
+        9,
     );
     let router = QueryRouter::new(manifest_store, generator, keyword.clone(), vector.clone());
 
@@ -681,19 +682,20 @@ fn router_retries_embedding_generation_before_keyword_only_fallback() {
         ],
     );
     let generator_calls = generator.calls.clone();
+    // sample_request has top_k=3; search_hybrid uses retrieval_top_k = top_k * 3 = 9
     let keyword = StubKeywordRetriever::new(
         vec![sample_result("doc-1", 5.0, SearchSource::Keyword)],
         Duration::from_millis(0),
         start.clone(),
         8,
-        3,
+        9,
     );
     let vector = StubVectorRetriever::new(
         vec![sample_result("doc-2", 0.9, SearchSource::Vector)],
         Duration::from_millis(0),
         start,
         8,
-        3,
+        9,
     );
     let router = QueryRouter::new(manifest_store, generator, keyword.clone(), vector.clone());
 
@@ -829,6 +831,8 @@ fn router_applies_non_empty_filters_with_concrete_retrievers_using_local_metadat
 #[test]
 fn router_overfetches_for_filtered_queries_before_applying_filters() {
     let start = Arc::new(Instant::now());
+    // request top_k=2, iterative filtering, search_hybrid called with window=2
+    // search_hybrid internally uses retrieval_top_k = 2 * 3 = 6
     let router = QueryRouter::new(
         StubManifestStore::new(18),
         StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
@@ -856,7 +860,7 @@ source: SearchSource::Keyword,
             Duration::from_millis(0),
             start.clone(),
             18,
-            2,
+            6,
         ),
         StubVectorRetriever::new(
             vec![
@@ -882,7 +886,7 @@ source: SearchSource::Vector,
             Duration::from_millis(0),
             start,
             18,
-            2,
+            6,
         ),
     );
     let request = SearchRequest {
@@ -912,10 +916,12 @@ source: SearchSource::Vector,
 #[test]
 fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_satisfied() {
     let start = Arc::new(Instant::now());
+    // request top_k=2, iterative filtering, search_hybrid called with windows [2, 4]
+    // search_hybrid internally triples: [6, 12]
     let keyword = StubKeywordRetriever::with_results_by_top_k(
         HashMap::from([
             (
-                2,
+                6,
                 vec![SearchResult {
                     doc_id: "doc-1".into(),
                     score: 10.0,
@@ -927,7 +933,7 @@ source: SearchSource::Keyword,
                 }],
             ),
             (
-                4,
+                12,
                 vec![
                     SearchResult {
                         doc_id: "doc-1".into(),
@@ -953,12 +959,12 @@ source: SearchSource::Keyword,
         Duration::from_millis(0),
         start.clone(),
         19,
-        vec![2, 4],
+        vec![6, 12],
     );
     let vector = StubVectorRetriever::with_results_by_top_k(
         HashMap::from([
             (
-                2,
+                6,
                 vec![SearchResult {
                     doc_id: "doc-3".into(),
                     score: 0.95,
@@ -970,7 +976,7 @@ source: SearchSource::Vector,
                 }],
             ),
             (
-                4,
+                12,
                 vec![
                     SearchResult {
                         doc_id: "doc-3".into(),
@@ -996,7 +1002,7 @@ source: SearchSource::Vector,
         Duration::from_millis(0),
         start,
         19,
-        vec![2, 4],
+        vec![6, 12],
     );
     let router = QueryRouter::new(
         StubManifestStore::new(19),
@@ -1025,13 +1031,15 @@ source: SearchSource::Vector,
 #[test]
 fn router_can_return_match_found_beyond_initial_top_k_window() {
     let start = Arc::new(Instant::now());
+    // request top_k=1, iterative filtering, search_hybrid called with windows [1, 2]
+    // search_hybrid internally triples: [3, 6]
     let router = QueryRouter::new(
         StubManifestStore::new(20),
         StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
         StubKeywordRetriever::with_results_by_top_k(
             HashMap::from([
                 (
-                    1,
+                    3,
                     vec![SearchResult {
                         doc_id: "doc-1".into(),
                         score: 10.0,
@@ -1043,7 +1051,7 @@ source: SearchSource::Keyword,
                     }],
                 ),
                 (
-                    2,
+                    6,
                     vec![
                         SearchResult {
                             doc_id: "doc-1".into(),
@@ -1069,14 +1077,14 @@ source: SearchSource::Keyword,
             Duration::from_millis(0),
             start.clone(),
             20,
-            vec![1, 2],
+            vec![3, 6],
         ),
         StubVectorRetriever::with_results_by_top_k(
-            HashMap::from([(1, vec![]), (2, vec![])]),
+            HashMap::from([(3, vec![]), (6, vec![])]),
             Duration::from_millis(0),
             start,
             20,
-            vec![1, 2],
+            vec![3, 6],
         ),
     );
     let request = SearchRequest {
@@ -1169,6 +1177,8 @@ fn router_applies_exact_match_filters_before_returning_results() {
     let start = Arc::new(Instant::now());
     let manifest_store = StubManifestStore::new(11);
     let generator = StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]);
+    // request top_k=1, iterative filtering, search_hybrid called with window=1
+    // search_hybrid internally uses retrieval_top_k = 1 * 3 = 3
     let keyword = StubKeywordRetriever::new(
         vec![SearchResult {
             doc_id: "doc-1".into(),
@@ -1185,7 +1195,7 @@ source: SearchSource::Keyword,
         Duration::from_millis(0),
         start.clone(),
         11,
-        1,
+        3,
     );
     let vector = StubVectorRetriever::new(
         vec![
@@ -1217,7 +1227,7 @@ source: SearchSource::Vector,
         Duration::from_millis(0),
         start,
         11,
-        1,
+        3,
     );
     let router = QueryRouter::new(manifest_store, generator, keyword, vector);
     let request = SearchRequest {
@@ -1244,11 +1254,12 @@ source: SearchSource::Vector,
 #[test]
 fn router_returns_search_error_when_parallel_retriever_panics() {
     let start = Arc::new(Instant::now());
+    // sample_request has top_k=3; search_hybrid uses retrieval_top_k = top_k * 3 = 9
     let router = QueryRouter::new(
         StubManifestStore::new(21),
         StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
         PanickingKeywordRetriever,
-        StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 21, 3),
+        StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 21, 9),
     );
 
     let error = router.search(&sample_request()).unwrap_err();
@@ -1260,6 +1271,7 @@ fn router_returns_search_error_when_parallel_retriever_panics() {
 #[test]
 fn router_rejects_invalid_retriever_results_before_ranking() {
     let start = Arc::new(Instant::now());
+    // sample_request has top_k=3; search_hybrid uses retrieval_top_k = top_k * 3 = 9
     let router = QueryRouter::new(
         StubManifestStore::new(22),
         StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
@@ -1276,14 +1288,14 @@ source: SearchSource::Keyword,
             Duration::from_millis(0),
             start.clone(),
             22,
-            3,
+            9,
         ),
         StubVectorRetriever::new(
             vec![sample_result("doc-2", 0.8, SearchSource::Vector)],
             Duration::from_millis(0),
             start,
             22,
-            3,
+            9,
         ),
     );
 

@@ -7,6 +7,7 @@ use crate::models::{SearchRequest, SearchResponse, SearchResult};
 use crate::storage::{ActiveManifest, ManifestStore};
 
 use super::filter::{apply_filters, strip_metadata};
+use super::turbo_searcher::{NoopStaticRetriever, StaticRetriever};
 use super::{HybridRanker, KeywordSearcher, VectorSearcher};
 
 const EMBEDDING_GENERATION_MAX_ATTEMPTS: usize = 2;
@@ -42,16 +43,17 @@ pub trait VectorRetriever: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct QueryRouter<M, E, K, V, W = NoopWarningSink> {
+pub struct QueryRouter<M, E, K, V, S = NoopStaticRetriever, W = NoopWarningSink> {
     manifest_store: M,
     embedding_generator: E,
     keyword_retriever: K,
     vector_retriever: V,
+    static_retriever: S,
     warning_sink: W,
     ranker: HybridRanker,
 }
 
-impl<M, E, K, V> QueryRouter<M, E, K, V, NoopWarningSink>
+impl<M, E, K, V> QueryRouter<M, E, K, V, NoopStaticRetriever, NoopWarningSink>
 where
     M: ManifestStore + Send + Sync,
     E: EmbeddingGenerator + Send + Sync,
@@ -69,21 +71,38 @@ where
             embedding_generator,
             keyword_retriever,
             vector_retriever,
+            static_retriever: NoopStaticRetriever,
             warning_sink: NoopWarningSink,
             ranker: HybridRanker::new(60.0),
         }
     }
 }
 
-impl<M, E, K, V, W> QueryRouter<M, E, K, V, W>
+impl<M, E, K, V, S, W> QueryRouter<M, E, K, V, S, W>
 where
     M: ManifestStore + Send + Sync,
     E: EmbeddingGenerator + Send + Sync,
     K: KeywordRetriever,
     V: VectorRetriever,
+    S: StaticRetriever,
     W: WarningSink,
 {
-    pub fn with_warning_sink<W2>(self, warning_sink: W2) -> QueryRouter<M, E, K, V, W2>
+    pub fn with_static_retriever<S2>(self, static_retriever: S2) -> QueryRouter<M, E, K, V, S2, W>
+    where
+        S2: StaticRetriever,
+    {
+        QueryRouter {
+            manifest_store: self.manifest_store,
+            embedding_generator: self.embedding_generator,
+            keyword_retriever: self.keyword_retriever,
+            vector_retriever: self.vector_retriever,
+            static_retriever,
+            warning_sink: self.warning_sink,
+            ranker: self.ranker,
+        }
+    }
+
+    pub fn with_warning_sink<W2>(self, warning_sink: W2) -> QueryRouter<M, E, K, V, S, W2>
     where
         W2: WarningSink,
     {
@@ -92,6 +111,7 @@ where
             embedding_generator: self.embedding_generator,
             keyword_retriever: self.keyword_retriever,
             vector_retriever: self.vector_retriever,
+            static_retriever: self.static_retriever,
             warning_sink,
             ranker: self.ranker,
         }
@@ -207,33 +227,48 @@ where
         query_embedding: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        let (keyword_results, vector_results) = thread::scope(|scope| {
-            let keyword_handle =
-                scope.spawn(|| self.keyword_retriever.search(active_manifest, query, top_k));
+        let retrieval_top_k = (top_k * 3).min(SEARCH_WINDOW_MAX);
+
+        let (static_results, keyword_results, vector_results) = thread::scope(|scope| {
+            let static_handle = scope.spawn(|| {
+                self.static_retriever.search(query_embedding, retrieval_top_k)
+            });
+            let keyword_handle = scope.spawn(|| {
+                self.keyword_retriever
+                    .search(active_manifest, query, retrieval_top_k)
+            });
             let vector_handle = scope.spawn(|| {
                 self.vector_retriever
-                    .search(active_manifest, query_embedding, top_k)
+                    .search(active_manifest, query_embedding, retrieval_top_k)
             });
 
-            let keyword_results =
-                keyword_handle
-                    .join()
-                    .map_err(|payload| SearchError::Execution {
-                        message: panic_payload_message("keyword retrieval", payload),
-                    })?;
-            let vector_results =
-                vector_handle
-                    .join()
-                    .map_err(|payload| SearchError::Execution {
-                        message: panic_payload_message("vector retrieval", payload),
-                    })?;
+            let static_results = static_handle
+                .join()
+                .map_err(|p| SearchError::Execution {
+                    message: panic_payload_message("static retrieval", p),
+                })?;
+            let keyword_results = keyword_handle
+                .join()
+                .map_err(|p| SearchError::Execution {
+                    message: panic_payload_message("keyword retrieval", p),
+                })?;
+            let vector_results = vector_handle
+                .join()
+                .map_err(|p| SearchError::Execution {
+                    message: panic_payload_message("vector retrieval", p),
+                })?;
 
-            Ok::<_, SearchError>((keyword_results?, vector_results?))
+            Ok::<_, SearchError>((static_results?, keyword_results?, vector_results?))
         })?;
+
+        validate_results(&static_results)?;
         validate_results(&keyword_results)?;
         validate_results(&vector_results)?;
 
-        Ok(self.ranker.fuse(vector_results, keyword_results))
+        // RRF fuses dynamic (vector+keyword) results; static results appended as-is.
+        let mut dynamic_results = self.ranker.fuse(vector_results, keyword_results);
+        dynamic_results.extend(static_results);
+        Ok(dynamic_results)
     }
 
     fn search_keyword_only(
@@ -323,5 +358,26 @@ where
         top_k: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
         self.search_active_manifest(active_manifest, query_embedding, top_k)
+    }
+}
+
+#[cfg(test)]
+mod turbo_router_tests {
+    use super::*;
+
+    // This test just verifies the type system accepts a QueryRouter with all type params.
+    #[test]
+    fn router_accepts_static_retriever_type_param() {
+        fn _accept<M, E, K, V, S, W>(_: &QueryRouter<M, E, K, V, S, W>)
+        where
+            M: ManifestStore + Send + Sync,
+            E: crate::embedding::EmbeddingGenerator + Send + Sync,
+            K: KeywordRetriever,
+            V: VectorRetriever,
+            S: StaticRetriever,
+            W: WarningSink,
+        {
+        }
+        // Compiles = pass.
     }
 }
