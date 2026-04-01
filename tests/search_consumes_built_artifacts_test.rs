@@ -218,6 +218,7 @@ fn router_hybrid_searches_over_builder_generated_artifacts() {
             top_k: 2,
             filters: None,
             include_metadata: true,
+            corpus_weights: None,
         })
         .unwrap();
 

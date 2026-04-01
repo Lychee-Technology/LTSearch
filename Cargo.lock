@@ -4318,6 +4318,8 @@ dependencies = [
  "lance",
  "lancedb",
  "ltembed",
+ "memmap2",
+ "rayon",
  "serde",
  "serde_json",
  "tantivy",

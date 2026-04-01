@@ -182,6 +182,7 @@ fn build_to_hybrid_query_flow_returns_built_version_and_unique_results() {
             top_k: 2,
             filters: None,
             include_metadata: true,
+            corpus_weights: None,
         })
         .unwrap();
 
@@ -239,6 +240,7 @@ fn build_to_query_flow_falls_back_to_keyword_only_when_query_embedding_fails() {
                 FilterValue::StringEquals("rust".into()),
             )])),
             include_metadata: true,
+            corpus_weights: None,
         })
         .unwrap();
 

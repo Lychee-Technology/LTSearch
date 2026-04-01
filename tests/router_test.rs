@@ -226,6 +226,7 @@ fn sample_request() -> SearchRequest {
         top_k: 3,
         filters: None,
         include_metadata: false,
+        corpus_weights: None,
     }
 }
 
@@ -236,6 +237,7 @@ fn sample_result(doc_id: &str, score: f32, source: SearchSource) -> SearchResult
         text: format!("text for {doc_id}"),
         metadata: None,
         source,
+        corpus_type: None,
     }
 }
 
@@ -719,6 +721,7 @@ fn router_rejects_invalid_requests_before_touching_dependencies() {
         top_k: 3,
         filters: None,
         include_metadata: false,
+        corpus_weights: None,
     };
 
     let error = router.search(&request).unwrap_err();
@@ -763,6 +766,7 @@ fn router_uses_concrete_retrievers_without_forwarding_router_only_request_fields
         top_k: 2,
         filters: Some(HashMap::new()),
         include_metadata: true,
+        corpus_weights: None,
     };
 
     let response = router.search(&request).unwrap();
@@ -805,6 +809,7 @@ fn router_applies_non_empty_filters_with_concrete_retrievers_using_local_metadat
             FilterValue::StringEquals("rust".into()),
         )])),
         include_metadata: true,
+        corpus_weights: None,
     };
 
     let response = router.search(&request).unwrap();
@@ -833,6 +838,7 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
                     text: "go result".into(),
                     metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
                     source: SearchSource::Keyword,
+                    corpus_type: None,
                 },
                 SearchResult {
                     doc_id: "doc-2".into(),
@@ -840,6 +846,7 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
                     text: "rust result".into(),
                     metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
                     source: SearchSource::Keyword,
+                    corpus_type: None,
                 },
             ],
             Duration::from_millis(0),
@@ -855,6 +862,7 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
                     text: "go vector".into(),
                     metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
                     source: SearchSource::Vector,
+                    corpus_type: None,
                 },
                 SearchResult {
                     doc_id: "doc-4".into(),
@@ -862,6 +870,7 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
                     text: "rust vector".into(),
                     metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
                     source: SearchSource::Vector,
+                    corpus_type: None,
                 },
             ],
             Duration::from_millis(0),
@@ -878,6 +887,7 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
             FilterValue::StringEquals("rust".into()),
         )])),
         include_metadata: true,
+        corpus_weights: None,
     };
 
     let response = router.search(&request).unwrap();
@@ -906,6 +916,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                     text: "go keyword".into(),
                     metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
                     source: SearchSource::Keyword,
+                    corpus_type: None,
                 }],
             ),
             (
@@ -917,6 +928,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                         text: "go keyword".into(),
                         metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
                         source: SearchSource::Keyword,
+                        corpus_type: None,
                     },
                     SearchResult {
                         doc_id: "doc-2".into(),
@@ -924,6 +936,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                         text: "rust keyword".into(),
                         metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
                         source: SearchSource::Keyword,
+                        corpus_type: None,
                     },
                 ],
             ),
@@ -943,6 +956,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                     text: "go vector".into(),
                     metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
                     source: SearchSource::Vector,
+                    corpus_type: None,
                 }],
             ),
             (
@@ -954,6 +968,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                         text: "go vector".into(),
                         metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
                         source: SearchSource::Vector,
+                        corpus_type: None,
                     },
                     SearchResult {
                         doc_id: "doc-4".into(),
@@ -961,6 +976,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                         text: "rust vector".into(),
                         metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
                         source: SearchSource::Vector,
+                        corpus_type: None,
                     },
                 ],
             ),
@@ -984,6 +1000,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
             FilterValue::StringEquals("rust".into()),
         )])),
         include_metadata: true,
+        corpus_weights: None,
     };
 
     let response = router.search(&request).unwrap();
@@ -1009,6 +1026,7 @@ fn router_can_return_match_found_beyond_initial_top_k_window() {
                         text: "go keyword".into(),
                         metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
                         source: SearchSource::Keyword,
+                        corpus_type: None,
                     }],
                 ),
                 (
@@ -1020,6 +1038,7 @@ fn router_can_return_match_found_beyond_initial_top_k_window() {
                             text: "go keyword".into(),
                             metadata: Some(HashMap::from([("lang".into(), json!("go"))])),
                             source: SearchSource::Keyword,
+                            corpus_type: None,
                         },
                         SearchResult {
                             doc_id: "doc-2".into(),
@@ -1027,6 +1046,7 @@ fn router_can_return_match_found_beyond_initial_top_k_window() {
                             text: "rust keyword".into(),
                             metadata: Some(HashMap::from([("lang".into(), json!("rust"))])),
                             source: SearchSource::Keyword,
+                            corpus_type: None,
                         },
                     ],
                 ),
@@ -1052,6 +1072,7 @@ fn router_can_return_match_found_beyond_initial_top_k_window() {
             FilterValue::StringEquals("rust".into()),
         )])),
         include_metadata: true,
+        corpus_weights: None,
     };
 
     let response = router.search(&request).unwrap();
@@ -1114,6 +1135,7 @@ fn router_applies_non_empty_filters_with_keyword_only_fallback_using_concrete_me
             FilterValue::StringEquals("rust".into()),
         )])),
         include_metadata: true,
+        corpus_weights: None,
     };
 
     let response = router.search(&request).unwrap();
@@ -1142,6 +1164,7 @@ fn router_applies_exact_match_filters_before_returning_results() {
                 ("published".into(), json!(true)),
             ])),
             source: SearchSource::Keyword,
+            corpus_type: None,
         }],
         Duration::from_millis(0),
         start.clone(),
@@ -1159,6 +1182,7 @@ fn router_applies_exact_match_filters_before_returning_results() {
                     ("published".into(), json!(true)),
                 ])),
                 source: SearchSource::Vector,
+                corpus_type: None,
             },
             SearchResult {
                 doc_id: "doc-3".into(),
@@ -1169,6 +1193,7 @@ fn router_applies_exact_match_filters_before_returning_results() {
                     ("published".into(), json!(false)),
                 ])),
                 source: SearchSource::Vector,
+                corpus_type: None,
             },
         ],
         Duration::from_millis(0),
@@ -1227,6 +1252,7 @@ fn router_rejects_invalid_retriever_results_before_ranking() {
                 text: "broken keyword result".into(),
                 metadata: None,
                 source: SearchSource::Keyword,
+                corpus_type: None,
             }],
             Duration::from_millis(0),
             start.clone(),

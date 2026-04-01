@@ -53,6 +53,7 @@ fn search_request_validates_boundaries() {
             ("boost".into(), FilterValue::NumberEquals(1.5)),
         ])),
         include_metadata: true,
+        corpus_weights: None,
     };
 
     assert!(request.validate().is_ok());
@@ -90,6 +91,7 @@ fn search_models_round_trip_through_serde() {
         text: "hello".into(),
         metadata: Some(HashMap::from([("lang".into(), json!("en"))])),
         source: SearchSource::Hybrid,
+        corpus_type: None,
     };
     assert!(result.validate().is_ok());
 

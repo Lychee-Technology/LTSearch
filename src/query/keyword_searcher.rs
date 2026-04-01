@@ -313,6 +313,7 @@ fn build_search_result(
         text: text.to_string(),
         metadata,
         source: SearchSource::Keyword,
+        corpus_type: None,
     })
 }
 

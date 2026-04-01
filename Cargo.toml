@@ -35,6 +35,8 @@ lance = { workspace = true }
 lancedb = { workspace = true }
 lambda_runtime = "0.13"
 ltembed = { git = "https://github.com/Lychee-Technology/LTEmbed", branch = "main", optional = true }
+memmap2 = "0.9"
+rayon = "1.10"
 serde = { workspace = true, features = ["derive"] }
 serde_json = "1.0"
 tantivy = "=0.24.2"

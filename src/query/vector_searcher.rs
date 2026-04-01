@@ -542,6 +542,7 @@ fn decode_lancedb_batches(
                 text: texts.value(index).to_string(),
                 metadata,
                 source: SearchSource::Vector,
+                corpus_type: None,
             };
 
             result.validate()?;
