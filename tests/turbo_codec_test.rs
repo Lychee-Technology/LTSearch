@@ -180,11 +180,7 @@ fn typed_score_breakdown_separates_centroid_qjl_and_gamma_terms() {
         0.0, 0.0, 0.0, 0.0, // dim 2
         0.0, 0.0, 1.0, 0.0, // dim 3
     ]);
-    let centroids = centroid_table(
-        dim,
-        4,
-        &centroid_values,
-    );
+    let centroids = centroid_table(dim, 4, &centroid_values);
     let projection = identity_projection(dim as usize);
     let mut query = vec![0.0; dim as usize];
     query[0] = 2.0;
@@ -216,14 +212,9 @@ fn typed_score_breakdown_separates_centroid_qjl_and_gamma_terms() {
     assert!((breakdown.qjl_term - 0.5).abs() < 1e-6);
     assert!((breakdown.gamma_multiplier - 0.547_722_6).abs() < 1e-6);
 
-    let score = score_query_against_record_512(
-        &query,
-        &encoded_query,
-        &record,
-        &centroids,
-        &projection,
-    )
-    .unwrap();
+    let score =
+        score_query_against_record_512(&query, &encoded_query, &record, &centroids, &projection)
+            .unwrap();
 
     assert!((score - breakdown.total()).abs() < 1e-6);
 }

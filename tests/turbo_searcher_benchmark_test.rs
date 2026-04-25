@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ltsearch::index::{
-    encode_vector, CentroidTable, KnownRecordLayout, MetaRecord, MmapIndex,
-    ProjectionMatrix, TurboHeader, TurboRecord512, TurboRecordSlice, META_RECORD_SIZE,
+    encode_vector, CentroidTable, KnownRecordLayout, MetaRecord, MmapIndex, ProjectionMatrix,
+    TurboHeader, TurboRecord512, TurboRecordSlice, META_RECORD_SIZE,
 };
 use ltsearch::query::TurboQuantSearcher;
 

@@ -84,7 +84,11 @@ fn synthetic_dataset() -> SyntheticDataset {
 
     for topic in 0..TOPICS {
         for doc_variant in 0..DOCS_PER_TOPIC {
-            documents.push(synthetic_vector(&mut document_rng, topic, Some(doc_variant)));
+            documents.push(synthetic_vector(
+                &mut document_rng,
+                topic,
+                Some(doc_variant),
+            ));
         }
 
         for _ in 0..QUERIES_PER_TOPIC {
@@ -299,8 +303,8 @@ fn recall_report(
         })
         .collect::<Vec<_>>();
 
-    let mean_recall = query_reports.iter().map(|query| query.recall).sum::<f32>()
-        / query_reports.len() as f32;
+    let mean_recall =
+        query_reports.iter().map(|query| query.recall).sum::<f32>() / query_reports.len() as f32;
 
     RecallReport {
         mean_recall,
@@ -315,7 +319,12 @@ fn exact_top_k_doc_ids(documents: &[Vec<f32>], query: &[f32], top_k: usize) -> V
         .map(|(index, document)| (index + 1, dot_product(query, document)))
         .collect::<Vec<_>>();
 
-    scored.sort_by(|left, right| right.1.total_cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
     scored
         .into_iter()
         .take(top_k)

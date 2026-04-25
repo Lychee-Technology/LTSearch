@@ -105,13 +105,8 @@ pub fn score_query_against_record_512(
     centroids: &CentroidTable,
     projection: &ProjectionMatrix,
 ) -> Result<f32, AssetError> {
-    let breakdown = score_query_against_record_512_breakdown(
-        query,
-        encoded,
-        record,
-        centroids,
-        projection,
-    )?;
+    let breakdown =
+        score_query_against_record_512_breakdown(query, encoded, record, centroids, projection)?;
 
     Ok(breakdown.total())
 }
