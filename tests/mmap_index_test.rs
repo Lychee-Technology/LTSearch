@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ltsearch::index::{MetaRecord, MmapIndex, TurboHeader, META_RECORD_SIZE};
+use ltsearch::index::{
+    CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader, META_RECORD_SIZE,
+};
 
 fn temp_dir(name: &str) -> PathBuf {
     let unique = std::time::SystemTime::now()
@@ -57,6 +59,17 @@ fn write_test_index(
         meta_data.extend_from_slice(meta_bytes);
     }
     fs::write(dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
+
+    fs::write(
+        dir.join("centroids.bin"),
+        CentroidTable::generate(dim, 16, 7).to_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("projection.bin"),
+        ProjectionMatrix::generate(dim, dim, 11).to_bytes(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -115,6 +128,16 @@ fn mmap_index_rejects_truncated_bin_file() {
     fs::write(dir.join("turbo_static.bin"), header.to_bytes()).unwrap();
     fs::write(dir.join("turbo_static_meta.bin"), &[]).unwrap();
     fs::write(dir.join("turbo_static_text.bin"), &[]).unwrap();
+    fs::write(
+        dir.join("centroids.bin"),
+        CentroidTable::generate(512, 16, 7).to_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("projection.bin"),
+        ProjectionMatrix::generate(512, 512, 11).to_bytes(),
+    )
+    .unwrap();
 
     let err = MmapIndex::load(&dir).unwrap_err();
     assert!(err.to_string().contains("size"));
@@ -129,7 +152,7 @@ fn mmap_index_rejects_mismatched_meta_count() {
     fs::write(&meta_path, &meta_data[..META_RECORD_SIZE]).unwrap();
 
     let err = MmapIndex::load(&dir).unwrap_err();
-    assert!(err.to_string().contains("meta"));
+    assert!(err.to_string().contains("record count mismatch"));
 }
 
 #[test]

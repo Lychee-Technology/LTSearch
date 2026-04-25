@@ -4,6 +4,7 @@ use std::path::Path;
 
 use memmap2::Mmap;
 
+use super::assets::{AssetError, CentroidTable, ProjectionMatrix};
 use super::header::{TurboHeader, TurboHeaderError};
 use super::meta::{MetaRecord, META_RECORD_SIZE};
 use super::record::TurboRecordRef;
@@ -14,6 +15,8 @@ pub struct MmapIndex {
     bin_mmap: Mmap,
     meta_mmap: Mmap,
     text_mmap: Mmap,
+    centroids: CentroidTable,
+    projection: ProjectionMatrix,
 }
 
 #[derive(Debug)]
@@ -23,6 +26,10 @@ pub enum MmapIndexError {
         source: std::io::Error,
     },
     Header(TurboHeaderError),
+    Asset {
+        file: &'static str,
+        source: AssetError,
+    },
     FileSizeMismatch {
         file: &'static str,
         expected: u64,
@@ -32,6 +39,11 @@ pub enum MmapIndexError {
         expected: u64,
         actual: u64,
     },
+    AssetDimensionMismatch {
+        file: &'static str,
+        expected: u32,
+        actual: u32,
+    },
 }
 
 impl fmt::Display for MmapIndexError {
@@ -39,6 +51,7 @@ impl fmt::Display for MmapIndexError {
         match self {
             Self::Io { path, source } => write!(f, "failed to open {path}: {source}"),
             Self::Header(err) => write!(f, "invalid header: {err}"),
+            Self::Asset { file, source } => write!(f, "invalid {file}: {source}"),
             Self::FileSizeMismatch {
                 file,
                 expected,
@@ -55,6 +68,14 @@ impl fmt::Display for MmapIndexError {
                     "meta record count mismatch: expected {expected}, got {actual}"
                 )
             }
+            Self::AssetDimensionMismatch {
+                file,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{file} dimension mismatch: expected {expected}, got {actual}"
+            ),
         }
     }
 }
@@ -72,11 +93,12 @@ impl MmapIndex {
         let bin_path = dir.join("turbo_static.bin");
         let meta_path = dir.join("turbo_static_meta.bin");
         let text_path = dir.join("turbo_static_text.bin");
+        let centroids_path = dir.join("centroids.bin");
+        let projection_path = dir.join("projection.bin");
 
         let bin_mmap = mmap_file(&bin_path)?;
         let meta_mmap = mmap_file(&meta_path)?;
         let text_mmap = mmap_file(&text_path)?;
-
         if bin_mmap.len() < TurboHeader::SIZE {
             return Err(MmapIndexError::FileSizeMismatch {
                 file: "turbo_static.bin",
@@ -111,11 +133,51 @@ impl MmapIndex {
             });
         }
 
+        let centroids_mmap = mmap_file(&centroids_path)?;
+        let projection_mmap = mmap_file(&projection_path)?;
+
+        let centroids =
+            CentroidTable::from_bytes(&centroids_mmap).map_err(|source| MmapIndexError::Asset {
+                file: "centroids.bin",
+                source,
+            })?;
+        if centroids.dim() != header.dim() {
+            return Err(MmapIndexError::AssetDimensionMismatch {
+                file: "centroids.bin",
+                expected: header.dim(),
+                actual: centroids.dim(),
+            });
+        }
+
+        let projection = ProjectionMatrix::from_bytes(&projection_mmap).map_err(|source| {
+            MmapIndexError::Asset {
+                file: "projection.bin",
+                source,
+            }
+        })?;
+        if projection.input_dim() != header.dim() {
+            return Err(MmapIndexError::AssetDimensionMismatch {
+                file: "projection.bin",
+                expected: header.dim(),
+                actual: projection.input_dim(),
+            });
+        }
+        let expected_projection_output = header.dim();
+        if projection.output_dim() != expected_projection_output {
+            return Err(MmapIndexError::AssetDimensionMismatch {
+                file: "projection.bin",
+                expected: expected_projection_output,
+                actual: projection.output_dim(),
+            });
+        }
+
         Ok(Self {
             header,
             bin_mmap,
             meta_mmap,
             text_mmap,
+            centroids,
+            projection,
         })
     }
 
@@ -129,6 +191,14 @@ impl MmapIndex {
 
     pub fn header(&self) -> &TurboHeader {
         &self.header
+    }
+
+    pub fn centroids(&self) -> &CentroidTable {
+        &self.centroids
+    }
+
+    pub fn projection(&self) -> &ProjectionMatrix {
+        &self.projection
     }
 
     pub fn record(&self, index: u64) -> TurboRecordRef<'_> {
