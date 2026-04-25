@@ -475,6 +475,7 @@ fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() 
             top_k: 2,
             filters: None,
             include_metadata: false,
+            corpus_weights: None,
         },
     )
     .expect("expected LTEmbed bootstrapped handler to search local fixtures");
