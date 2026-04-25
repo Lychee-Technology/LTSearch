@@ -126,8 +126,8 @@ fn mmap_index_rejects_truncated_bin_file() {
     let dir = temp_dir("truncated-bin");
     let header = TurboHeader::new(512, 10);
     fs::write(dir.join("turbo_static.bin"), header.to_bytes()).unwrap();
-    fs::write(dir.join("turbo_static_meta.bin"), &[]).unwrap();
-    fs::write(dir.join("turbo_static_text.bin"), &[]).unwrap();
+    fs::write(dir.join("turbo_static_meta.bin"), []).unwrap();
+    fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
         CentroidTable::generate(512, 16, 7).to_bytes(),
