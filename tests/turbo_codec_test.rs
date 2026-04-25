@@ -1,6 +1,7 @@
 use ltsearch::index::{
-    encode_vector, score_query_against_record, score_query_against_record_512, CentroidTable,
-    ProjectionMatrix, TurboHeader, TurboRecord512,
+    encode_vector, score_query_against_record, score_query_against_record_512,
+    score_query_against_record_512_breakdown, CentroidTable, ProjectionMatrix, TurboHeader,
+    TurboRecord512,
 };
 
 fn centroid_table(dim: u32, centroids_per_dim: u32, values: &[f32]) -> CentroidTable {
@@ -167,4 +168,104 @@ fn score_query_against_typed_record_512_uses_centroid_dot_plus_gamma_weighted_si
             .unwrap();
 
     assert!(score.is_finite());
+}
+
+#[test]
+fn typed_score_breakdown_separates_centroid_qjl_and_gamma_terms() {
+    let dim = 512;
+    let mut centroid_values = vec![0.0; dim as usize * 4];
+    centroid_values[0..16].copy_from_slice(&[
+        0.0, 0.0, 1.0, 0.0, // dim 0
+        0.0, -1.0, 0.0, 0.0, // dim 1
+        0.0, 0.0, 0.0, 0.0, // dim 2
+        0.0, 0.0, 1.0, 0.0, // dim 3
+    ]);
+    let centroids = centroid_table(dim, 4, &centroid_values);
+    let projection = identity_projection(dim as usize);
+    let mut query = vec![0.0; dim as usize];
+    query[0] = 2.0;
+    query[1] = -1.0;
+    query[2] = 0.5;
+    query[3] = 3.0;
+    let encoded_query = encode_vector(&query, &centroids, &projection).unwrap();
+
+    let mut record = TurboRecord512 {
+        doc_id: 1,
+        idx: [0; 128],
+        qjl: [0; 64],
+        gamma: 0.547_722_6,
+        _reserved: [0; 4],
+    };
+    record.idx[0] = 0x86;
+    record.qjl[0] = 0x05;
+
+    let breakdown = score_query_against_record_512_breakdown(
+        &query,
+        &encoded_query,
+        &record,
+        &centroids,
+        &projection,
+    )
+    .unwrap();
+
+    assert!((breakdown.centroid_term - 6.0).abs() < 1e-6);
+    assert!((breakdown.qjl_term - 0.5).abs() < 1e-6);
+    assert!((breakdown.gamma_multiplier - 0.547_722_6).abs() < 1e-6);
+
+    let score =
+        score_query_against_record_512(&query, &encoded_query, &record, &centroids, &projection)
+            .unwrap();
+
+    assert!((score - breakdown.total()).abs() < 1e-6);
+}
+
+#[test]
+fn typed_score_breakdown_rejects_invalid_encoded_query_layout() {
+    let dim = 512;
+    let centroids = centroid_table(dim, 4, &vec![0.0; dim as usize * 4]);
+    let projection = identity_projection(dim as usize);
+    let record = TurboRecord512 {
+        doc_id: 1,
+        idx: [0; 128],
+        qjl: [0; 64],
+        gamma: 0.0,
+        _reserved: [0; 4],
+    };
+
+    let error = score_query_against_record_512_breakdown(
+        &[0.0; 512],
+        &Default::default(),
+        &record,
+        &centroids,
+        &projection,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("expected 128"));
+}
+
+#[test]
+fn typed_score_breakdown_rejects_dimension_mismatch() {
+    let dim = 512;
+    let centroids = centroid_table(dim, 4, &vec![0.0; dim as usize * 4]);
+    let projection = identity_projection(dim as usize);
+    let encoded_query = encode_vector(&vec![0.0; dim as usize], &centroids, &projection).unwrap();
+    let record = TurboRecord512 {
+        doc_id: 1,
+        idx: [0; 128],
+        qjl: [0; 64],
+        gamma: 0.0,
+        _reserved: [0; 4],
+    };
+
+    let error = score_query_against_record_512_breakdown(
+        &[0.0; 256],
+        &encoded_query,
+        &record,
+        &centroids,
+        &projection,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("dimension mismatch"));
 }

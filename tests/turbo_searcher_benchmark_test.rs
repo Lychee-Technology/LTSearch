@@ -1,11 +1,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ltsearch::index::{
-    encode_vector, CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader,
-    META_RECORD_SIZE,
+    encode_vector, CentroidTable, KnownRecordLayout, MetaRecord, MmapIndex, ProjectionMatrix,
+    TurboHeader, TurboRecord512, TurboRecordSlice, META_RECORD_SIZE,
 };
 use ltsearch::query::TurboQuantSearcher;
+
+const DIM: usize = 512;
+
+struct FixtureDoc<'a> {
+    doc_id: u64,
+    corpus_type: u8,
+    text: &'a str,
+    embedding: Vec<f32>,
+}
 
 fn temp_dir(name: &str) -> PathBuf {
     let unique = std::time::SystemTime::now()
@@ -37,41 +47,54 @@ fn identity_projection(dim: usize) -> ProjectionMatrix {
     ProjectionMatrix::from_rows(rows)
 }
 
-fn write_benchmark_index(dir: &Path, doc_count: u64) {
-    let dim = 4;
-    let centroids = centroid_table(
-        dim,
-        4,
-        &[
-            -1.0, 0.0, 1.0, 2.0, -2.0, -1.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, -1.0, 0.0, 1.0, 3.0,
-        ],
-    );
-    let projection = identity_projection(dim as usize);
-    let header = TurboHeader::new(dim, doc_count);
+fn padded_embedding(seed: usize) -> Vec<f32> {
+    let mut embedding = vec![0.0; DIM];
+    for (index, value) in embedding.iter_mut().enumerate() {
+        *value = match index % 16 {
+            0..=3 => 1.2 + (seed % 5) as f32 * 0.02,
+            4..=7 => 0.5 - (seed % 7) as f32 * 0.01,
+            8..=11 => (index % 11) as f32 * 0.03,
+            _ => -0.25 + ((seed + index) % 9) as f32 * 0.005,
+        };
+    }
+    embedding
+}
+
+fn write_benchmark_index(dir: &Path, docs: &[FixtureDoc<'_>]) {
+    let mut centroid_values = Vec::with_capacity(DIM * 4);
+    for _ in 0..DIM {
+        centroid_values.extend_from_slice(&[-1.0, 0.0, 1.0, 2.0]);
+    }
+    let centroids = centroid_table(DIM as u32, 4, &centroid_values);
+    let projection = identity_projection(DIM);
+    let header = TurboHeader::new(DIM as u32, docs.len() as u64);
     let mut bin_data = header.to_bytes();
     let mut meta_data = Vec::new();
     let mut text_blob = Vec::new();
 
-    for doc_id in 0..doc_count {
-        let embedding = [1.0, 0.5, (doc_id % 7) as f32 * 0.1, -0.25];
-        let encoded = encode_vector(&embedding, &centroids, &projection).unwrap();
+    for doc in docs {
+        let encoded = encode_vector(&doc.embedding, &centroids, &projection).unwrap();
+        let record = TurboRecord512 {
+            doc_id: doc.doc_id,
+            idx: encoded.idx.clone().try_into().unwrap(),
+            qjl: encoded.qjl.clone().try_into().unwrap(),
+            gamma: encoded.gamma,
+            _reserved: [0; 4],
+        };
+        let record_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const TurboRecord512 as *const u8,
+                std::mem::size_of::<TurboRecord512>(),
+            )
+        };
+        bin_data.extend_from_slice(record_bytes);
 
-        let mut record = vec![0u8; header.record_stride()];
-        record[0..8].copy_from_slice(&(doc_id + 1).to_le_bytes());
-        let idx_offset = header.idx_offset();
-        record[idx_offset..idx_offset + encoded.idx.len()].copy_from_slice(&encoded.idx);
-        let qjl_offset = header.qjl_offset();
-        record[qjl_offset..qjl_offset + encoded.qjl.len()].copy_from_slice(&encoded.qjl);
-        let gamma_offset = header.gamma_offset();
-        record[gamma_offset..gamma_offset + 4].copy_from_slice(&encoded.gamma.to_le_bytes());
-        bin_data.extend_from_slice(&record);
-
-        let text = format!("document {doc_id}");
+        let text = doc.text;
         let text_offset = text_blob.len() as u64;
         text_blob.extend_from_slice(text.as_bytes());
         let meta = MetaRecord {
-            doc_id: doc_id + 1,
-            corpus_type: (doc_id % 3) as u8,
+            doc_id: doc.doc_id,
+            corpus_type: doc.corpus_type,
             _pad: [0; 3],
             text_offset,
             text_len: text.len() as u32,
@@ -91,14 +114,39 @@ fn write_benchmark_index(dir: &Path, doc_count: u64) {
 
 #[test]
 #[ignore = "benchmark-style smoke test"]
-fn turbo_searcher_benchmark_smoke_compiles() {
+fn turbo_searcher_benchmark_reports_typed_512d_search_latency() {
     let dir = temp_dir("smoke");
-    write_benchmark_index(&dir, 2_000);
+    let docs = (0..2_000)
+        .map(|doc_id| FixtureDoc {
+            doc_id: (doc_id + 1) as u64,
+            corpus_type: (doc_id % 3) as u8,
+            text: "benchmark document",
+            embedding: padded_embedding(doc_id),
+        })
+        .collect::<Vec<_>>();
+    write_benchmark_index(&dir, &docs);
 
     let index = Box::new(MmapIndex::load(&dir).unwrap());
+    assert_eq!(index.layout(), KnownRecordLayout::V1Dim512);
+    match index.records() {
+        TurboRecordSlice::V1Dim512(records) => assert_eq!(records.len(), docs.len()),
+    }
     let searcher = TurboQuantSearcher::new(Box::leak(index));
+    let query = padded_embedding(0);
+    let top_k = 10;
+    let start = Instant::now();
 
-    let results = searcher.search(&[1.0, 0.5, 0.0, -0.25], 10).unwrap();
+    let results = searcher.search(&query, top_k).unwrap();
+    let elapsed = start.elapsed();
+    println!(
+        "turbo_searcher benchmark dim={} docs={} top_k={} results={} elapsed_ms={:.3} elapsed_us={}",
+        DIM,
+        docs.len(),
+        top_k,
+        results.len(),
+        elapsed.as_secs_f64() * 1_000.0,
+        elapsed.as_micros()
+    );
 
-    assert_eq!(results.len(), 10);
+    assert_eq!(results.len(), top_k);
 }
