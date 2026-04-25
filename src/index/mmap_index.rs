@@ -315,7 +315,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::OnceLock;
 
-    use crate::index::{CentroidTable, ProjectionMatrix, TurboHeader, TurboRecord512, META_RECORD_SIZE};
+    use crate::index::{
+        CentroidTable, ProjectionMatrix, TurboHeader, TurboRecord512, META_RECORD_SIZE,
+    };
 
     use super::MmapIndex;
 
@@ -347,7 +349,11 @@ mod tests {
         };
         bin_data.extend_from_slice(record_bytes);
         fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
-        fs::write(dir.join("turbo_static_meta.bin"), vec![0u8; META_RECORD_SIZE]).unwrap();
+        fs::write(
+            dir.join("turbo_static_meta.bin"),
+            vec![0u8; META_RECORD_SIZE],
+        )
+        .unwrap();
         fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
         fs::write(
             dir.join("centroids.bin"),
@@ -378,8 +384,10 @@ mod tests {
         let dir = temp_dir("global-from-dir");
         write_test_index(&dir);
 
-        let first = MmapIndex::global_from_dir_for_tests(&dir, &TEST_INDEX).unwrap() as *const MmapIndex;
-        let second = MmapIndex::global_from_dir_for_tests(&dir, &TEST_INDEX).unwrap() as *const MmapIndex;
+        let first =
+            MmapIndex::global_from_dir_for_tests(&dir, &TEST_INDEX).unwrap() as *const MmapIndex;
+        let second =
+            MmapIndex::global_from_dir_for_tests(&dir, &TEST_INDEX).unwrap() as *const MmapIndex;
         assert_eq!(first, second);
     }
 }

@@ -140,7 +140,9 @@ fn turbo_searcher_returns_static_results_with_corpus_mapping_and_stable_tie_brea
 
     let searcher = load_searcher(&dir);
 
-    let results = searcher.search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 2).unwrap();
+    let results = searcher
+        .search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 2)
+        .unwrap();
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].doc_id, "10");
@@ -219,7 +221,9 @@ fn turbo_searcher_returns_best_top_k_without_leaking_lower_ranked_hits() {
 
     let searcher = load_searcher(&dir);
 
-    let results = searcher.search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 3).unwrap();
+    let results = searcher
+        .search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 3)
+        .unwrap();
 
     assert_eq!(results.len(), 3);
     assert_eq!(

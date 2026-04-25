@@ -39,7 +39,10 @@ impl fmt::Display for TurboHeaderError {
                 write!(f, "unsupported version: {version}")
             }
             Self::UnsupportedLayout { version, dim } => {
-                write!(f, "unsupported turbo record layout: version={version}, dim={dim}")
+                write!(
+                    f,
+                    "unsupported turbo record layout: version={version}, dim={dim}"
+                )
             }
         }
     }

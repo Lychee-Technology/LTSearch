@@ -3,8 +3,8 @@ use std::mem::{align_of, size_of};
 use std::path::PathBuf;
 
 use ltsearch::index::{
-    CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader, META_RECORD_SIZE,
-    TurboRecord512, TurboRecordSlice,
+    CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader, TurboRecord512,
+    TurboRecordSlice, META_RECORD_SIZE,
 };
 
 fn temp_dir(name: &str) -> PathBuf {

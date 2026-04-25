@@ -103,7 +103,14 @@ pub fn score_query_against_record_512(
     let qjl_score = projected_query
         .iter()
         .enumerate()
-        .map(|(dim, value)| value * if read_sign_bit(&record.qjl, dim) { 1.0 } else { -1.0 })
+        .map(|(dim, value)| {
+            value
+                * if read_sign_bit(&record.qjl, dim) {
+                    1.0
+                } else {
+                    -1.0
+                }
+        })
         .sum::<f32>();
 
     Ok(centroid_score + record.gamma * qjl_score)

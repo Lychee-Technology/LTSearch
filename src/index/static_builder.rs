@@ -135,20 +135,28 @@ impl<E> StaticIndexBuilder<E> {
             let doc_id = parse_doc_id(&chunk.doc_id)?;
             let record = TurboRecord512 {
                 doc_id,
-                idx: encoded.idx.clone().try_into().map_err(|_| IndexError::Operation {
-                    message: format!(
-                        "static chunk {} produced idx payload with unexpected length {}",
-                        chunk.doc_id,
-                        encoded.idx.len()
-                    ),
-                })?,
-                qjl: encoded.qjl.clone().try_into().map_err(|_| IndexError::Operation {
-                    message: format!(
-                        "static chunk {} produced qjl payload with unexpected length {}",
-                        chunk.doc_id,
-                        encoded.qjl.len()
-                    ),
-                })?,
+                idx: encoded
+                    .idx
+                    .clone()
+                    .try_into()
+                    .map_err(|_| IndexError::Operation {
+                        message: format!(
+                            "static chunk {} produced idx payload with unexpected length {}",
+                            chunk.doc_id,
+                            encoded.idx.len()
+                        ),
+                    })?,
+                qjl: encoded
+                    .qjl
+                    .clone()
+                    .try_into()
+                    .map_err(|_| IndexError::Operation {
+                        message: format!(
+                            "static chunk {} produced qjl payload with unexpected length {}",
+                            chunk.doc_id,
+                            encoded.qjl.len()
+                        ),
+                    })?,
                 gamma: encoded.gamma,
                 _reserved: [0; 4],
             };

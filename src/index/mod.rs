@@ -17,6 +17,5 @@ pub use record::{TurboRecord512, TurboRecordRef, TurboRecordSlice, TypedTurboRec
 pub use static_builder::{StaticChunk, StaticIndexBuildResult, StaticIndexBuilder};
 pub use static_source::{load_static_chunks_from_s3, StaticSourceConfig, TurboBuildConfig};
 pub use turbo_codec::{
-    encode_vector, score_query_against_record, score_query_against_record_512,
-    EncodedTurboVector,
+    encode_vector, score_query_against_record, score_query_against_record_512, EncodedTurboVector,
 };

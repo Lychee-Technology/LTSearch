@@ -162,14 +162,9 @@ fn score_query_against_typed_record_512_uses_centroid_dot_plus_gamma_weighted_si
         _reserved: [0; 4],
     };
 
-    let score = score_query_against_record_512(
-        &query,
-        &encoded_query,
-        &record,
-        &centroids,
-        &projection,
-    )
-    .unwrap();
+    let score =
+        score_query_against_record_512(&query, &encoded_query, &record, &centroids, &projection)
+            .unwrap();
 
     assert!(score.is_finite());
 }

@@ -4,9 +4,7 @@ use std::collections::BinaryHeap;
 use rayon::prelude::*;
 
 use crate::error::{SearchError, ValidationError};
-use crate::index::{
-    encode_vector, score_query_against_record_512, MmapIndex, TurboRecordSlice,
-};
+use crate::index::{encode_vector, score_query_against_record_512, MmapIndex, TurboRecordSlice};
 use crate::models::{CorpusType, SearchResult, SearchSource};
 
 const TOP_K_MAX: usize = 100;
