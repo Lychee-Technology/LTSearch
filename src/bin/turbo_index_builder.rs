@@ -64,7 +64,12 @@ async fn run(args: CliArgs) -> Result<String, String> {
     .map_err(|error| error.to_string())?;
     let embeddings = vec![None; chunks.len()];
     let result = StaticIndexBuilder::<()>::new()
-        .build(Path::new(&args.output_dir), &chunks, &embeddings, &generator)
+        .build(
+            Path::new(&args.output_dir),
+            &chunks,
+            &embeddings,
+            &generator,
+        )
         .map_err(|error| error.to_string())?;
 
     Ok(format!(
@@ -89,9 +94,7 @@ fn s3_client_from_env(config: &aws_config::SdkConfig) -> S3Client {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args(env::args()).map_err(std::io::Error::other)?;
     let runtime = tokio::runtime::Runtime::new()?;
-    let summary = runtime
-        .block_on(run(args))
-        .map_err(std::io::Error::other)?;
+    let summary = runtime.block_on(run(args)).map_err(std::io::Error::other)?;
     println!("{summary}");
     Ok(())
 }
@@ -117,8 +120,13 @@ mod tests {
 
     #[test]
     fn parse_args_rejects_missing_output_value() {
-        let error = parse_args(["turbo_index_builder", "--config", "/tmp/config.json", "--output"])
-            .unwrap_err();
+        let error = parse_args([
+            "turbo_index_builder",
+            "--config",
+            "/tmp/config.json",
+            "--output",
+        ])
+        .unwrap_err();
 
         assert!(error.contains("--output"));
     }
