@@ -186,6 +186,123 @@ fn turbo_searcher_rejects_query_embeddings_with_wrong_dimension() {
 }
 
 #[test]
+fn turbo_searcher_rejects_top_k_out_of_range() {
+    let dir = temp_dir("top-k-range");
+    write_test_index(
+        &dir,
+        512,
+        &[FixtureDoc {
+            doc_id: 1,
+            corpus_type: 0,
+            text: "legal one",
+            embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+        }],
+    );
+
+    let searcher = load_searcher(&dir);
+
+    for top_k in [0, 101] {
+        let error = searcher
+            .search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), top_k)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SearchError::Validation(ValidationError::RangeOutOfRange {
+                field: "top_k",
+                min: 1,
+                max: 100,
+            })
+        ));
+    }
+}
+
+#[test]
+fn turbo_searcher_allows_top_k_at_the_maximum_and_returns_all_available_docs() {
+    let dir = temp_dir("top-k-maximum-success");
+    write_test_index(
+        &dir,
+        512,
+        &[
+            FixtureDoc {
+                doc_id: 10,
+                corpus_type: 0,
+                text: "legal ten",
+                embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            },
+            FixtureDoc {
+                doc_id: 20,
+                corpus_type: 1,
+                text: "contract twenty",
+                embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
+            },
+            FixtureDoc {
+                doc_id: 30,
+                corpus_type: 2,
+                text: "rfc thirty",
+                embedding: padded_embedding(&[0.8, -0.8, 0.0, 0.8]),
+            },
+        ],
+    );
+
+    let searcher = load_searcher(&dir);
+    let results = searcher
+        .search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 100)
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.doc_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["10", "20", "30"]
+    );
+}
+
+#[test]
+fn turbo_searcher_returns_stable_single_document_results_and_scores() {
+    let dir = temp_dir("single-doc-stability");
+    let query = padded_embedding(&[1.2, -1.4, 0.3, 0.9]);
+    write_test_index(
+        &dir,
+        512,
+        &[FixtureDoc {
+            doc_id: 42,
+            corpus_type: 1,
+            text: "contract forty-two",
+            embedding: query.clone(),
+        }],
+    );
+
+    let searcher = load_searcher(&dir);
+
+    let first_results = searcher.search(&query, 1).unwrap();
+    let second_results = searcher.search(&query, 1).unwrap();
+
+    assert_eq!(first_results.len(), 1);
+    assert_eq!(second_results.len(), 1);
+
+    let first = &first_results[0];
+    let second = &second_results[0];
+
+    assert_eq!(first.doc_id, "42");
+    assert_eq!(first.text, "contract forty-two");
+    assert_eq!(first.source, SearchSource::Static);
+    assert_eq!(first.metadata, None);
+    assert_eq!(first.corpus_type, Some(CorpusType::Contract));
+    assert!(first.score.is_finite());
+    assert!(first.score > 0.0);
+
+    assert_eq!(second.doc_id, first.doc_id);
+    assert_eq!(second.text, first.text);
+    assert_eq!(second.source, first.source);
+    assert_eq!(second.metadata, first.metadata);
+    assert_eq!(second.corpus_type, first.corpus_type);
+    assert_eq!(second.score, first.score);
+}
+
+#[test]
 fn turbo_searcher_returns_best_top_k_without_leaking_lower_ranked_hits() {
     let dir = temp_dir("bounded-top-k");
     write_test_index(

@@ -10,6 +10,19 @@ pub struct EncodedTurboVector {
     pub gamma: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct TurboScoreBreakdown {
+    pub centroid_term: f32,
+    pub qjl_term: f32,
+    pub gamma_multiplier: f32,
+}
+
+impl TurboScoreBreakdown {
+    pub fn total(self) -> f32 {
+        self.centroid_term + self.gamma_multiplier * self.qjl_term
+    }
+}
+
 pub fn encode_vector(
     vector: &[f32],
     centroids: &CentroidTable,
@@ -92,6 +105,24 @@ pub fn score_query_against_record_512(
     centroids: &CentroidTable,
     projection: &ProjectionMatrix,
 ) -> Result<f32, AssetError> {
+    let breakdown = score_query_against_record_512_breakdown(
+        query,
+        encoded,
+        record,
+        centroids,
+        projection,
+    )?;
+
+    Ok(breakdown.total())
+}
+
+pub fn score_query_against_record_512_breakdown(
+    query: &[f32],
+    encoded: &EncodedTurboVector,
+    record: &TurboRecord512,
+    centroids: &CentroidTable,
+    projection: &ProjectionMatrix,
+) -> Result<TurboScoreBreakdown, AssetError> {
     validate_codec_inputs(query.len(), centroids, projection)?;
     validate_encoded_vector(encoded, query.len())?;
 
@@ -113,7 +144,11 @@ pub fn score_query_against_record_512(
         })
         .sum::<f32>();
 
-    Ok(centroid_score + record.gamma * qjl_score)
+    Ok(TurboScoreBreakdown {
+        centroid_term: centroid_score,
+        qjl_term: qjl_score,
+        gamma_multiplier: record.gamma,
+    })
 }
 
 fn validate_codec_inputs(
