@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use ltsearch::error::{SearchError, ValidationError};
 use ltsearch::index::{
     encode_vector, CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader,
-    META_RECORD_SIZE,
+    TurboRecord512, META_RECORD_SIZE,
 };
 use ltsearch::models::{CorpusType, SearchSource};
 use ltsearch::query::TurboQuantSearcher;
@@ -39,36 +39,26 @@ fn identity_projection(dim: usize) -> ProjectionMatrix {
     ProjectionMatrix::from_rows(rows)
 }
 
-fn record_bytes(header: &TurboHeader, doc_id: u64, idx: &[u8], qjl: &[u8], gamma: f32) -> Vec<u8> {
-    let mut record = vec![0u8; header.record_stride()];
-    record[0..8].copy_from_slice(&doc_id.to_le_bytes());
-
-    let idx_offset = header.idx_offset();
-    record[idx_offset..idx_offset + idx.len()].copy_from_slice(idx);
-
-    let qjl_offset = header.qjl_offset();
-    record[qjl_offset..qjl_offset + qjl.len()].copy_from_slice(qjl);
-
-    let gamma_offset = header.gamma_offset();
-    record[gamma_offset..gamma_offset + 4].copy_from_slice(&gamma.to_le_bytes());
-    record
+fn padded_embedding(prefix: &[f32]) -> Vec<f32> {
+    let mut embedding = vec![0.0; 512];
+    embedding[..prefix.len()].copy_from_slice(prefix);
+    embedding
 }
 
 struct FixtureDoc<'a> {
     doc_id: u64,
     corpus_type: u8,
     text: &'a str,
-    embedding: &'a [f32],
+    embedding: Vec<f32>,
 }
 
 fn write_test_index(dir: &Path, dim: u32, docs: &[FixtureDoc<'_>]) {
-    let centroids = centroid_table(
-        dim,
-        4,
-        &[
-            -1.0, 0.0, 1.0, 2.0, -2.0, -1.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, -1.0, 0.0, 1.0, 3.0,
-        ],
-    );
+    assert_eq!(dim, 512);
+    let mut centroid_values = Vec::with_capacity(dim as usize * 4);
+    for _ in 0..dim {
+        centroid_values.extend_from_slice(&[-1.0, 0.0, 1.0, 2.0]);
+    }
+    let centroids = centroid_table(dim, 4, &centroid_values);
     let projection = identity_projection(dim as usize);
     let header = TurboHeader::new(dim, docs.len() as u64);
 
@@ -77,14 +67,21 @@ fn write_test_index(dir: &Path, dim: u32, docs: &[FixtureDoc<'_>]) {
     let mut text_blob = Vec::new();
 
     for doc in docs {
-        let encoded = encode_vector(doc.embedding, &centroids, &projection).unwrap();
-        bin_data.extend_from_slice(&record_bytes(
-            &header,
-            doc.doc_id,
-            &encoded.idx,
-            &encoded.qjl,
-            encoded.gamma,
-        ));
+        let encoded = encode_vector(&doc.embedding, &centroids, &projection).unwrap();
+        let record = TurboRecord512 {
+            doc_id: doc.doc_id,
+            idx: encoded.idx.clone().try_into().unwrap(),
+            qjl: encoded.qjl.clone().try_into().unwrap(),
+            gamma: encoded.gamma,
+            _reserved: [0; 4],
+        };
+        let record_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const TurboRecord512 as *const u8,
+                std::mem::size_of::<TurboRecord512>(),
+            )
+        };
+        bin_data.extend_from_slice(record_bytes);
 
         let text_offset = text_blob.len() as u64;
         text_blob.extend_from_slice(doc.text.as_bytes());
@@ -118,32 +115,32 @@ fn turbo_searcher_returns_static_results_with_corpus_mapping_and_stable_tie_brea
     let dir = temp_dir("results-and-ties");
     write_test_index(
         &dir,
-        4,
+        512,
         &[
             FixtureDoc {
                 doc_id: 20,
                 corpus_type: 2,
                 text: "rfc twenty",
-                embedding: &[1.2, -1.4, 0.3, 0.9],
+                embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 10,
                 corpus_type: 0,
                 text: "legal ten",
-                embedding: &[1.2, -1.4, 0.3, 0.9],
+                embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 30,
                 corpus_type: 1,
                 text: "contract thirty",
-                embedding: &[0.0, 0.0, 0.0, 0.0],
+                embedding: padded_embedding(&[0.0, 0.0, 0.0, 0.0]),
             },
         ],
     );
 
     let searcher = load_searcher(&dir);
 
-    let results = searcher.search(&[1.2, -1.4, 0.3, 0.9], 2).unwrap();
+    let results = searcher.search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 2).unwrap();
 
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].doc_id, "10");
@@ -166,12 +163,12 @@ fn turbo_searcher_rejects_query_embeddings_with_wrong_dimension() {
     let dir = temp_dir("dimension-mismatch");
     write_test_index(
         &dir,
-        4,
+        512,
         &[FixtureDoc {
             doc_id: 1,
             corpus_type: 0,
             text: "legal one",
-            embedding: &[1.2, -1.4, 0.3, 0.9],
+            embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
         }],
     );
 
@@ -191,38 +188,38 @@ fn turbo_searcher_returns_best_top_k_without_leaking_lower_ranked_hits() {
     let dir = temp_dir("bounded-top-k");
     write_test_index(
         &dir,
-        4,
+        512,
         &[
             FixtureDoc {
                 doc_id: 5,
                 corpus_type: 0,
                 text: "best",
-                embedding: &[1.2, -1.4, 0.3, 0.9],
+                embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 4,
                 corpus_type: 1,
                 text: "second",
-                embedding: &[1.0, -1.0, 0.0, 1.0],
+                embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
             },
             FixtureDoc {
                 doc_id: 3,
                 corpus_type: 2,
                 text: "third",
-                embedding: &[0.8, -0.8, 0.0, 0.8],
+                embedding: padded_embedding(&[0.8, -0.8, 0.0, 0.8]),
             },
             FixtureDoc {
                 doc_id: 2,
                 corpus_type: 0,
                 text: "fourth",
-                embedding: &[0.0, 0.0, 0.0, 0.0],
+                embedding: padded_embedding(&[0.0, 0.0, 0.0, 0.0]),
             },
         ],
     );
 
     let searcher = load_searcher(&dir);
 
-    let results = searcher.search(&[1.2, -1.4, 0.3, 0.9], 3).unwrap();
+    let results = searcher.search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 3).unwrap();
 
     assert_eq!(results.len(), 3);
     assert_eq!(

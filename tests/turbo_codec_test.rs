@@ -1,5 +1,6 @@
 use ltsearch::index::{
-    encode_vector, score_query_against_record, CentroidTable, ProjectionMatrix, TurboHeader,
+    encode_vector, score_query_against_record, score_query_against_record_512, CentroidTable,
+    ProjectionMatrix, TurboHeader, TurboRecord512,
 };
 
 fn centroid_table(dim: u32, centroids_per_dim: u32, values: &[f32]) -> CentroidTable {
@@ -143,4 +144,32 @@ fn encode_vector_rejects_non_square_projection_layout() {
     let error = encode_vector(&[0.0; 4], &centroids, &projection).unwrap_err();
 
     assert!(error.to_string().contains("dimension mismatch"));
+}
+
+#[test]
+fn score_query_against_typed_record_512_uses_centroid_dot_plus_gamma_weighted_sign_dot() {
+    let dim = 512;
+    let centroids = centroid_table(dim, 4, &vec![0.0; dim as usize * 4]);
+    let projection = identity_projection(dim as usize);
+    let query = vec![0.0; dim as usize];
+    let encoded_query = encode_vector(&query, &centroids, &projection).unwrap();
+
+    let record = TurboRecord512 {
+        doc_id: 1,
+        idx: [0; 128],
+        qjl: [0; 64],
+        gamma: 0.0,
+        _reserved: [0; 4],
+    };
+
+    let score = score_query_against_record_512(
+        &query,
+        &encoded_query,
+        &record,
+        &centroids,
+        &projection,
+    )
+    .unwrap();
+
+    assert!(score.is_finite());
 }

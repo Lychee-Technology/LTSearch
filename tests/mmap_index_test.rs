@@ -1,8 +1,10 @@
 use std::fs;
+use std::mem::{align_of, size_of};
 use std::path::PathBuf;
 
 use ltsearch::index::{
     CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader, META_RECORD_SIZE,
+    TurboRecord512, TurboRecordSlice,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -23,15 +25,24 @@ fn write_test_index(
     texts: &[&str],
 ) {
     let header = TurboHeader::new(dim, records.len() as u64);
-    let stride = header.record_stride();
 
     let mut bin_data = header.to_bytes();
     for &(doc_id, gamma) in records {
-        let mut record_buf = vec![0u8; stride];
-        record_buf[0..8].copy_from_slice(&doc_id.to_le_bytes());
-        let gamma_off = header.gamma_offset();
-        record_buf[gamma_off..gamma_off + 4].copy_from_slice(&gamma.to_le_bytes());
-        bin_data.extend_from_slice(&record_buf);
+        assert_eq!(dim, 512);
+        let record = TurboRecord512 {
+            doc_id,
+            idx: [0; 128],
+            qjl: [0; 64],
+            gamma,
+            _reserved: [0; 4],
+        };
+        let record_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const TurboRecord512 as *const u8,
+                size_of::<TurboRecord512>(),
+            )
+        };
+        bin_data.extend_from_slice(record_bytes);
     }
     fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
 
@@ -60,6 +71,30 @@ fn write_test_index(
     }
     fs::write(dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
 
+    fs::write(
+        dir.join("centroids.bin"),
+        CentroidTable::generate(dim, 16, 7).to_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("projection.bin"),
+        ProjectionMatrix::generate(dim, dim, 11).to_bytes(),
+    )
+    .unwrap();
+}
+
+fn write_unknown_layout_index(dir: &std::path::Path, dim: u32, record_count: u64) {
+    let header = TurboHeader::new(dim, record_count);
+    let stride = header.record_stride();
+    let mut bin_data = header.to_bytes();
+    bin_data.resize(TurboHeader::SIZE + stride * record_count as usize, 0);
+    fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
+    fs::write(
+        dir.join("turbo_static_meta.bin"),
+        vec![0u8; META_RECORD_SIZE * record_count as usize],
+    )
+    .unwrap();
+    fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
         CentroidTable::generate(dim, 16, 7).to_bytes(),
@@ -158,11 +193,63 @@ fn mmap_index_rejects_mismatched_meta_count() {
 #[test]
 fn mmap_index_header_returns_correct_info() {
     let dir = temp_dir("header-info");
-    write_test_index(&dir, 384, &[(1, 0.0)], &[0], &["x"]);
+    write_test_index(&dir, 512, &[(1, 0.0)], &[0], &["x"]);
 
     let index = MmapIndex::load(&dir).unwrap();
-    assert_eq!(index.dim(), 384);
+    assert_eq!(index.dim(), 512);
     assert_eq!(index.record_count(), 1);
-    assert_eq!(index.record(0).idx().len(), 96);
-    assert_eq!(index.record(0).qjl().len(), 48);
+    assert_eq!(index.layout(), ltsearch::index::KnownRecordLayout::V1Dim512);
+}
+
+#[test]
+fn turbo_record_512_has_expected_aligned_layout() {
+    assert_eq!(size_of::<TurboRecord512>(), 208);
+    assert_eq!(align_of::<TurboRecord512>(), 8);
+
+    let record = TurboRecord512 {
+        doc_id: 7,
+        idx: [0; 128],
+        qjl: [0; 64],
+        gamma: 1.5,
+        _reserved: [0; 4],
+    };
+
+    assert_eq!(record.idx.len(), 128);
+    assert_eq!(record.qjl.len(), 64);
+    assert_eq!(record.doc_id, 7);
+}
+
+#[test]
+fn mmap_index_accepts_known_v1_dim_512_layout() {
+    let dir = temp_dir("known-layout-512");
+    write_test_index(&dir, 512, &[(1, 0.5)], &[0], &["hello"]);
+
+    let index = MmapIndex::load(&dir).unwrap();
+    assert_eq!(index.dim(), 512);
+    assert_eq!(index.record_count(), 1);
+}
+
+#[test]
+fn mmap_index_rejects_unknown_record_layout() {
+    let dir = temp_dir("unknown-layout");
+    write_unknown_layout_index(&dir, 384, 1);
+
+    let error = MmapIndex::load(&dir).unwrap_err();
+    assert!(error.to_string().contains("unsupported"));
+}
+
+#[test]
+fn mmap_index_exposes_typed_record_slice() {
+    let dir = temp_dir("typed-slice");
+    write_test_index(&dir, 512, &[(11, 0.25), (22, 0.75)], &[0, 1], &["a", "b"]);
+
+    let index = MmapIndex::load(&dir).unwrap();
+
+    match index.records() {
+        TurboRecordSlice::V1Dim512(records) => {
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].doc_id, 11);
+            assert!((records[1].gamma - 0.75).abs() < f32::EPSILON);
+        }
+    }
 }

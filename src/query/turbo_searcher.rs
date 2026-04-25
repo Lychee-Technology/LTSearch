@@ -4,7 +4,9 @@ use std::collections::BinaryHeap;
 use rayon::prelude::*;
 
 use crate::error::{SearchError, ValidationError};
-use crate::index::{encode_vector, score_query_against_record, MmapIndex};
+use crate::index::{
+    encode_vector, score_query_against_record_512, MmapIndex, TurboRecordSlice,
+};
 use crate::models::{CorpusType, SearchResult, SearchSource};
 
 const TOP_K_MAX: usize = 100;
@@ -36,52 +38,40 @@ impl TurboQuantSearcher {
             message: format!("failed to encode turbo query embedding: {source}"),
         })?;
 
-        let header = self.index.header();
-        let stride = header.record_stride();
-        let record_data = self.index.record_data();
+        let heap = match self.index.records() {
+            TurboRecordSlice::V1Dim512(records) => records
+                .par_iter()
+                .enumerate()
+                .try_fold(BinaryHeap::new, |mut heap, (record_index, record)| {
+                    let score = score_query_against_record_512(
+                        query_embedding,
+                        &encoded_query,
+                        record,
+                        self.index.centroids(),
+                        self.index.projection(),
+                    )
+                    .map_err(|source| SearchError::Execution {
+                        message: format!("failed to score turbo record {record_index}: {source}"),
+                    })?;
 
-        let heap = (0..self.index.record_count())
-            .into_par_iter()
-            .try_fold(BinaryHeap::new, |mut heap, record_index| {
-                let offset = record_index as usize * stride;
-                let record_bytes = &record_data[offset..offset + stride];
-                let score = score_query_against_record(
-                    query_embedding,
-                    &encoded_query,
-                    record_bytes,
-                    header,
-                    self.index.centroids(),
-                    self.index.projection(),
-                );
+                    let meta = self.index.meta(record_index as u64);
+                    let candidate = RankedResult {
+                        score,
+                        doc_id: meta.doc_id,
+                        text: self.index.text(record_index as u64).to_string(),
+                        corpus_type: CorpusType::from_id(meta.corpus_type),
+                    };
 
-                let score = match score {
-                    Ok(score) => score,
-                    Err(source) => {
-                        return Err(SearchError::Execution {
-                            message: format!(
-                                "failed to score turbo record {record_index}: {source}"
-                            ),
-                        });
+                    push_bounded(&mut heap, candidate, top_k);
+                    Ok::<_, SearchError>(heap)
+                })
+                .try_reduce(BinaryHeap::new, |mut left, right| {
+                    for candidate in right.into_sorted_vec() {
+                        push_bounded(&mut left, candidate, top_k);
                     }
-                };
-
-                let meta = self.index.meta(record_index);
-                let candidate = RankedResult {
-                    score,
-                    doc_id: meta.doc_id,
-                    text: self.index.text(record_index).to_string(),
-                    corpus_type: CorpusType::from_id(meta.corpus_type),
-                };
-
-                push_bounded(&mut heap, candidate, top_k);
-                Ok(heap)
-            })
-            .try_reduce(BinaryHeap::new, |mut left, right| {
-                for candidate in right.into_sorted_vec() {
-                    push_bounded(&mut left, candidate, top_k);
-                }
-                Ok(left)
-            })?;
+                    Ok::<_, SearchError>(left)
+                })?,
+        };
 
         let mut ranked = heap.into_vec();
         ranked.sort_by(compare_ranked_results);

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use super::record::TurboRecord512;
+
 pub const TURBO_MAGIC: [u8; 4] = *b"TQNT";
 const TURBO_VERSION: u32 = 1;
 
@@ -15,6 +17,12 @@ pub enum TurboHeaderError {
     InvalidMagic { actual: [u8; 4] },
     InvalidDim,
     UnsupportedVersion { version: u32 },
+    UnsupportedLayout { version: u32, dim: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownRecordLayout {
+    V1Dim512,
 }
 
 impl fmt::Display for TurboHeaderError {
@@ -30,6 +38,24 @@ impl fmt::Display for TurboHeaderError {
             Self::UnsupportedVersion { version } => {
                 write!(f, "unsupported version: {version}")
             }
+            Self::UnsupportedLayout { version, dim } => {
+                write!(f, "unsupported turbo record layout: version={version}, dim={dim}")
+            }
+        }
+    }
+}
+
+impl KnownRecordLayout {
+    pub fn from_header(header: &TurboHeader) -> Result<Self, TurboHeaderError> {
+        match (header.version(), header.dim()) {
+            (TURBO_VERSION, 512) => Ok(Self::V1Dim512),
+            (version, dim) => Err(TurboHeaderError::UnsupportedLayout { version, dim }),
+        }
+    }
+
+    pub fn record_size(&self) -> usize {
+        match self {
+            Self::V1Dim512 => std::mem::size_of::<TurboRecord512>(),
         }
     }
 }

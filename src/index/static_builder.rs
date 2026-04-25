@@ -10,12 +10,14 @@ use crate::error::IndexError;
 use crate::models::CorpusType;
 
 use super::{
-    encode_vector, CentroidTable, MetaRecord, ProjectionMatrix, TurboHeader, META_RECORD_SIZE,
+    encode_vector, CentroidTable, MetaRecord, ProjectionMatrix, TurboHeader, TurboRecord512,
+    META_RECORD_SIZE,
 };
 
 const CENTROIDS_PER_DIM: u32 = 4;
 const CENTROIDS_SEED: u64 = 7;
 const PROJECTION_SEED: u64 = 11;
+const SUPPORTED_TYPED_DIM: u32 = 512;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -91,6 +93,14 @@ impl<E> StaticIndexBuilder<E> {
             .ok_or_else(|| IndexError::Operation {
                 message: "static builder requires at least one chunk".into(),
             })?;
+        if embedding_dim != SUPPORTED_TYPED_DIM {
+            return Err(IndexError::Operation {
+                message: format!(
+                    "static builder only supports typed turbo layout for {}-dim embeddings, got {}",
+                    SUPPORTED_TYPED_DIM, embedding_dim
+                ),
+            });
+        }
 
         fs::create_dir_all(output_dir).map_err(|error| IndexError::Operation {
             message: format!(
@@ -122,16 +132,33 @@ impl<E> StaticIndexBuilder<E> {
                 }
             })?;
 
-            let mut record = vec![0u8; header.record_stride()];
             let doc_id = parse_doc_id(&chunk.doc_id)?;
-            record[0..8].copy_from_slice(&doc_id.to_le_bytes());
-            record[header.idx_offset()..header.idx_offset() + encoded.idx.len()]
-                .copy_from_slice(&encoded.idx);
-            record[header.qjl_offset()..header.qjl_offset() + encoded.qjl.len()]
-                .copy_from_slice(&encoded.qjl);
-            record[header.gamma_offset()..header.gamma_offset() + 4]
-                .copy_from_slice(&encoded.gamma.to_le_bytes());
-            turbo_static.extend_from_slice(&record);
+            let record = TurboRecord512 {
+                doc_id,
+                idx: encoded.idx.clone().try_into().map_err(|_| IndexError::Operation {
+                    message: format!(
+                        "static chunk {} produced idx payload with unexpected length {}",
+                        chunk.doc_id,
+                        encoded.idx.len()
+                    ),
+                })?,
+                qjl: encoded.qjl.clone().try_into().map_err(|_| IndexError::Operation {
+                    message: format!(
+                        "static chunk {} produced qjl payload with unexpected length {}",
+                        chunk.doc_id,
+                        encoded.qjl.len()
+                    ),
+                })?,
+                gamma: encoded.gamma,
+                _reserved: [0; 4],
+            };
+            let record_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    &record as *const TurboRecord512 as *const u8,
+                    std::mem::size_of::<TurboRecord512>(),
+                )
+            };
+            turbo_static.extend_from_slice(record_bytes);
 
             let text_offset = turbo_static_text.len() as u64;
             turbo_static_text.extend_from_slice(chunk.text.as_bytes());
