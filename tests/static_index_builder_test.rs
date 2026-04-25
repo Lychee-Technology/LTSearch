@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
-use ltsearch::index::{MmapIndex, StaticChunk, StaticIndexBuilder};
+use ltsearch::index::{MmapIndex, StaticChunk, StaticIndexBuilder, TurboHeader, TurboRecord512};
 use ltsearch::models::CorpusType;
 use serde_json::json;
 
@@ -60,7 +60,7 @@ fn temp_fixture_dir(test_name: &str) -> PathBuf {
 #[test]
 fn static_index_builder_generates_missing_embeddings_and_writes_loadable_artifacts() {
     let output = temp_fixture_dir("static-index-builder-build");
-    let generator = StubEmbeddingGenerator::from_pairs(vec![("beta body", vec![0.0, 1.0, 0.0])]);
+    let generator = StubEmbeddingGenerator::from_pairs(vec![("beta body", vec![0.0; 512])]);
     let builder = StaticIndexBuilder::new();
 
     let result = builder
@@ -80,14 +80,14 @@ fn static_index_builder_generates_missing_embeddings_and_writes_loadable_artifac
                     corpus_type: CorpusType::Rfc,
                 },
             ],
-            &[Some(vec![1.0, 0.0, 0.0]), None],
+            &[Some(vec![1.0; 512]), None],
             &generator,
         )
         .unwrap();
 
     assert_eq!(generator.calls(), vec!["beta body"]);
     assert_eq!(result.record_count, 2);
-    assert_eq!(result.embedding_dim, 3);
+    assert_eq!(result.embedding_dim, 512);
     assert!(output.join("centroids.bin").is_file());
     assert!(output.join("projection.bin").is_file());
     assert!(output.join("turbo_static.bin").is_file());
@@ -96,7 +96,7 @@ fn static_index_builder_generates_missing_embeddings_and_writes_loadable_artifac
 
     let index = MmapIndex::load(&output).unwrap();
     assert_eq!(index.record_count(), 2);
-    assert_eq!(index.dim(), 3);
+    assert_eq!(index.dim(), 512);
     assert_ne!(index.record(0).doc_id(), index.record(1).doc_id());
     assert_eq!(index.record(0).doc_id(), index.meta(0).doc_id);
     assert_eq!(index.record(1).doc_id(), index.meta(1).doc_id);
@@ -116,7 +116,7 @@ fn static_index_builder_is_deterministic_for_identical_inputs() {
         metadata: HashMap::new(),
         corpus_type: CorpusType::Contract,
     }];
-    let embeddings = vec![Some(vec![0.2, 0.4, 0.6])];
+    let embeddings = vec![Some(vec![0.2; 512])];
 
     StaticIndexBuilder::new()
         .build(
@@ -172,11 +172,36 @@ fn static_index_builder_hashes_string_doc_ids_stably_without_numeric_aliasing() 
                     corpus_type: CorpusType::Contract,
                 },
             ],
-            &[Some(vec![1.0, 0.0, 0.0]), Some(vec![0.0, 1.0, 0.0])],
+            &[Some(vec![1.0; 512]), Some(vec![0.0; 512])],
             &StubEmbeddingGenerator::from_pairs(vec![]),
         )
         .unwrap();
 
     let index = MmapIndex::load(&output).unwrap();
     assert_ne!(index.record(0).doc_id(), index.record(1).doc_id());
+}
+
+#[test]
+fn static_index_builder_writes_aligned_turbo_record_512_layout() {
+    let output = temp_fixture_dir("static-index-builder-aligned-layout");
+
+    StaticIndexBuilder::new()
+        .build(
+            &output,
+            &[StaticChunk {
+                doc_id: "1001".into(),
+                text: "alpha".into(),
+                metadata: HashMap::new(),
+                corpus_type: CorpusType::Legal,
+            }],
+            &[Some(vec![1.0; 512])],
+            &StubEmbeddingGenerator::from_pairs(vec![]),
+        )
+        .unwrap();
+
+    let bytes = fs::read(output.join("turbo_static.bin")).unwrap();
+    assert_eq!(
+        bytes.len(),
+        TurboHeader::SIZE + std::mem::size_of::<TurboRecord512>()
+    );
 }

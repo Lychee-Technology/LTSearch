@@ -1,4 +1,4 @@
-use super::{AssetError, CentroidTable, ProjectionMatrix, TurboHeader};
+use super::{AssetError, CentroidTable, ProjectionMatrix, TurboHeader, TurboRecord512};
 
 const IDX_BITS_PER_DIM: usize = 2;
 const EXPECTED_CENTROIDS_PER_DIM: usize = 1 << IDX_BITS_PER_DIM;
@@ -83,6 +83,37 @@ pub fn score_query_against_record(
         .sum::<f32>();
 
     Ok(centroid_score + gamma * qjl_score)
+}
+
+pub fn score_query_against_record_512(
+    query: &[f32],
+    encoded: &EncodedTurboVector,
+    record: &TurboRecord512,
+    centroids: &CentroidTable,
+    projection: &ProjectionMatrix,
+) -> Result<f32, AssetError> {
+    validate_codec_inputs(query.len(), centroids, projection)?;
+    validate_encoded_vector(encoded, query.len())?;
+
+    let centroid_score = (0..query.len())
+        .map(|dim| query[dim] * centroid_value(centroids, dim, read_idx(&record.idx, dim) as usize))
+        .sum::<f32>();
+
+    let projected_query = projection.project_checked(query)?;
+    let qjl_score = projected_query
+        .iter()
+        .enumerate()
+        .map(|(dim, value)| {
+            value
+                * if read_sign_bit(&record.qjl, dim) {
+                    1.0
+                } else {
+                    -1.0
+                }
+        })
+        .sum::<f32>();
+
+    Ok(centroid_score + record.gamma * qjl_score)
 }
 
 fn validate_codec_inputs(

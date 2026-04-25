@@ -1,17 +1,22 @@
 use std::fmt;
 use std::fs::File;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use memmap2::Mmap;
 
 use super::assets::{AssetError, CentroidTable, ProjectionMatrix};
-use super::header::{TurboHeader, TurboHeaderError};
+use super::header::{KnownRecordLayout, TurboHeader, TurboHeaderError};
 use super::meta::{MetaRecord, META_RECORD_SIZE};
-use super::record::TurboRecordRef;
+use super::record::{TurboRecord512, TurboRecordRef, TurboRecordSlice};
+
+const IMAGE_STATIC_DIR: &str = "/app/static";
+static MMAP_INDEX: OnceLock<Result<MmapIndex, String>> = OnceLock::new();
 
 #[derive(Debug)]
 pub struct MmapIndex {
     header: TurboHeader,
+    layout: KnownRecordLayout,
     bin_mmap: Mmap,
     meta_mmap: Mmap,
     text_mmap: Mmap,
@@ -108,8 +113,10 @@ impl MmapIndex {
         }
 
         let header = TurboHeader::from_bytes(&bin_mmap[..TurboHeader::SIZE])?;
+        let layout = KnownRecordLayout::from_header(&header)?;
 
-        let expected_bin_size = header.expected_file_size();
+        let expected_bin_size =
+            TurboHeader::SIZE as u64 + header.record_count() * layout.record_size() as u64;
         if bin_mmap.len() as u64 != expected_bin_size {
             return Err(MmapIndexError::FileSizeMismatch {
                 file: "turbo_static.bin",
@@ -173,6 +180,7 @@ impl MmapIndex {
 
         Ok(Self {
             header,
+            layout,
             bin_mmap,
             meta_mmap,
             text_mmap,
@@ -185,12 +193,29 @@ impl MmapIndex {
         self.header.dim()
     }
 
+    pub fn load_from_image() -> Result<Self, MmapIndexError> {
+        Self::load(Path::new(IMAGE_STATIC_DIR))
+    }
+
+    pub fn global_from_image() -> Result<&'static Self, MmapIndexError> {
+        Self::global_from_dir_for_tests(Path::new(IMAGE_STATIC_DIR), &MMAP_INDEX).map_err(
+            |message| MmapIndexError::Io {
+                path: IMAGE_STATIC_DIR.to_string(),
+                source: std::io::Error::other(message),
+            },
+        )
+    }
+
     pub fn record_count(&self) -> u64 {
         self.header.record_count()
     }
 
     pub fn header(&self) -> &TurboHeader {
         &self.header
+    }
+
+    pub fn layout(&self) -> KnownRecordLayout {
+        self.layout
     }
 
     pub fn centroids(&self) -> &CentroidTable {
@@ -208,9 +233,23 @@ impl MmapIndex {
             self.header.record_count()
         );
 
-        let stride = self.header.record_stride();
-        let offset = TurboHeader::SIZE + index as usize * stride;
-        TurboRecordRef::new(&self.bin_mmap[offset..offset + stride], &self.header)
+        match self.records() {
+            TurboRecordSlice::V1Dim512(records) => {
+                TurboRecordRef::from_turbo_record_512(&records[index as usize], &self.header)
+            }
+        }
+    }
+
+    pub fn records(&self) -> TurboRecordSlice<'_> {
+        match self.layout {
+            KnownRecordLayout::V1Dim512 => {
+                let bytes = &self.bin_mmap[TurboHeader::SIZE..];
+                let ptr = bytes.as_ptr() as *const TurboRecord512;
+                let len = self.header.record_count() as usize;
+                let records = unsafe { std::slice::from_raw_parts(ptr, len) };
+                TurboRecordSlice::V1Dim512(records)
+            }
+        }
     }
 
     pub fn meta(&self, index: u64) -> &MetaRecord {
@@ -236,6 +275,24 @@ impl MmapIndex {
     pub fn text_blob(&self) -> &[u8] {
         &self.text_mmap
     }
+
+    pub(crate) fn global_from_dir_for_tests<'a>(
+        dir: &Path,
+        cell: &'a OnceLock<Result<MmapIndex, String>>,
+    ) -> Result<&'a MmapIndex, String> {
+        let value = cell.get_or_init(|| Self::load(dir).map_err(|err| err.to_string()));
+        match value {
+            Ok(index) => Ok(index),
+            Err(error) => Err(error.clone()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl MmapIndex {
+    pub(crate) fn load_from_dir_for_tests(dir: &Path) -> Result<Self, MmapIndexError> {
+        Self::load(dir)
+    }
 }
 
 fn mmap_file(path: &Path) -> Result<Mmap, MmapIndexError> {
@@ -249,5 +306,88 @@ fn mmap_file(path: &Path) -> Result<Mmap, MmapIndexError> {
             path: path.display().to_string(),
             source,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+
+    use crate::index::{
+        CentroidTable, ProjectionMatrix, TurboHeader, TurboRecord512, META_RECORD_SIZE,
+    };
+
+    use super::MmapIndex;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ltsearch-mmap-index-unit-{name}-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_test_index(dir: &Path) {
+        let header = TurboHeader::new(512, 1);
+        let mut bin_data = header.to_bytes();
+        let record = TurboRecord512 {
+            doc_id: 1,
+            idx: [0; 128],
+            qjl: [0; 64],
+            gamma: 0.5,
+            _reserved: [0; 4],
+        };
+        let record_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const TurboRecord512 as *const u8,
+                std::mem::size_of::<TurboRecord512>(),
+            )
+        };
+        bin_data.extend_from_slice(record_bytes);
+        fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
+        fs::write(
+            dir.join("turbo_static_meta.bin"),
+            vec![0u8; META_RECORD_SIZE],
+        )
+        .unwrap();
+        fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
+        fs::write(
+            dir.join("centroids.bin"),
+            CentroidTable::generate(512, 16, 7).to_bytes(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("projection.bin"),
+            ProjectionMatrix::generate(512, 512, 11).to_bytes(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn load_from_image_dir_returns_index() {
+        let dir = temp_dir("load-from-dir");
+        write_test_index(&dir);
+
+        let index = MmapIndex::load_from_dir_for_tests(&dir).unwrap();
+        assert_eq!(index.record_count(), 1);
+        assert_eq!(index.dim(), 512);
+    }
+
+    #[test]
+    fn global_from_dir_returns_same_instance() {
+        static TEST_INDEX: OnceLock<Result<MmapIndex, String>> = OnceLock::new();
+
+        let dir = temp_dir("global-from-dir");
+        write_test_index(&dir);
+
+        let first =
+            MmapIndex::global_from_dir_for_tests(&dir, &TEST_INDEX).unwrap() as *const MmapIndex;
+        let second =
+            MmapIndex::global_from_dir_for_tests(&dir, &TEST_INDEX).unwrap() as *const MmapIndex;
+        assert_eq!(first, second);
     }
 }
