@@ -34,7 +34,7 @@ fn meta_record_roundtrip_through_bytes() {
 
 #[test]
 fn meta_records_from_contiguous_buffer() {
-    let records = vec![
+    let records = [
         MetaRecord {
             doc_id: 1,
             corpus_type: 0,
