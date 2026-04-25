@@ -159,7 +159,7 @@ fn synthetic_vector(rng: &mut ChaCha8Rng, topic: usize, doc_variant: Option<usiz
                 1.10
             }
         } else if let Some(doc_variant) = doc_variant {
-            if (doc_variant + dim + topic) % 11 == 0 {
+            if (doc_variant + dim + topic).is_multiple_of(11) {
                 -0.12
             } else {
                 -1.08
