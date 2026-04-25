@@ -365,6 +365,7 @@ mod tests {
             top_k: 1,
             filters: None,
             include_metadata: false,
+            corpus_weights: None,
         }
     }
 }

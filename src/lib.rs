@@ -5,6 +5,7 @@ pub mod build_lambda;
 pub mod config;
 pub mod embedding;
 pub mod error;
+pub mod index;
 pub mod indexing;
 pub mod models;
 pub mod query;

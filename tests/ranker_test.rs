@@ -9,6 +9,7 @@ fn sample_result(doc_id: &str, score: f32, source: SearchSource) -> SearchResult
         text: format!("text for {doc_id}"),
         metadata: None,
         source,
+        corpus_type: None,
     }
 }
 
@@ -121,6 +122,7 @@ fn fuse_preserves_metadata_from_duplicate_result_when_available() {
             json!("rust"),
         )])),
         source: SearchSource::Keyword,
+        corpus_type: None,
     }];
 
     let fused = ranker.fuse(vector_results, keyword_results);
@@ -144,6 +146,7 @@ fn fuse_merges_metadata_maps_from_duplicate_results() {
             ("shared".into(), json!("vector")),
         ])),
         source: SearchSource::Vector,
+        corpus_type: None,
     }];
     let keyword_results = vec![SearchResult {
         doc_id: "doc-1".into(),
@@ -154,6 +157,7 @@ fn fuse_merges_metadata_maps_from_duplicate_results() {
             ("shared".into(), json!("keyword")),
         ])),
         source: SearchSource::Keyword,
+        corpus_type: None,
     }];
 
     let fused = ranker.fuse(vector_results, keyword_results);

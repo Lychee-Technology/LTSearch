@@ -306,6 +306,7 @@ fn query_flow_hybrid_retrieval_returns_correct_version_and_results() {
         top_k: 2,
         filters: None,
         include_metadata: false,
+        corpus_weights: None,
     };
 
     let response = router.search(&request).expect("search should succeed");
@@ -366,6 +367,7 @@ fn query_flow_keyword_only_fallback_when_vector_search_unavailable() {
         top_k: 2,
         filters: None,
         include_metadata: false,
+        corpus_weights: None,
     };
 
     let response = router

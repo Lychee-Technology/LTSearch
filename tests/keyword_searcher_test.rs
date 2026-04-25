@@ -349,6 +349,7 @@ fn keyword_searcher_search_request_rejects_unsupported_filters() {
                 FilterValue::StringEquals("acme".into()),
             )])),
             include_metadata: false,
+            corpus_weights: None,
         })
         .unwrap_err();
 
@@ -374,6 +375,7 @@ fn keyword_searcher_search_request_rejects_include_metadata() {
             top_k: 1,
             filters: None,
             include_metadata: true,
+            corpus_weights: None,
         })
         .unwrap_err();
 
@@ -399,6 +401,7 @@ fn keyword_searcher_search_request_delegates_to_basic_search() {
             top_k: 1,
             filters: None,
             include_metadata: false,
+            corpus_weights: None,
         })
         .unwrap();
 

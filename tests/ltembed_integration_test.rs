@@ -168,6 +168,7 @@ fn ltembed_end_to_end_build_and_hybrid_query_flow() {
             top_k: 3,
             filters: None,
             include_metadata: true,
+            corpus_weights: None,
         })
         .expect("expected LTEmbed end-to-end search to succeed");
 

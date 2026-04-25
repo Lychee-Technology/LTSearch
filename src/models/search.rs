@@ -20,8 +20,11 @@ pub enum FilterValue {
 pub struct SearchRequest {
     pub query: String,
     pub top_k: usize,
+    #[serde(default)]
     pub filters: Option<HashMap<String, FilterValue>>,
     pub include_metadata: bool,
+    #[serde(default)]
+    pub corpus_weights: Option<CorpusWeights>,
 }
 
 impl SearchRequest {
@@ -50,6 +53,9 @@ impl SearchRequest {
                 value.validate()?;
             }
         }
+        if let Some(weights) = &self.corpus_weights {
+            weights.validate()?;
+        }
 
         Ok(())
     }
@@ -61,6 +67,50 @@ pub enum SearchSource {
     Vector,
     Keyword,
     Hybrid,
+    Static,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorpusType {
+    Legal,
+    Contract,
+    Rfc,
+    Other(u8),
+}
+
+impl CorpusType {
+    pub fn from_id(id: u8) -> Self {
+        match id {
+            0 => Self::Legal,
+            1 => Self::Contract,
+            2 => Self::Rfc,
+            other => Self::Other(other),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CorpusWeights {
+    pub static_bias: f32,
+    pub dynamic_bias: f32,
+}
+
+impl CorpusWeights {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.static_bias < 0.0 || self.static_bias > 1.0 {
+            return Err(ValidationError::InvalidValue {
+                field: "corpus_weights.static_bias",
+            });
+        }
+        if self.dynamic_bias < 0.0 || self.dynamic_bias > 1.0 {
+            return Err(ValidationError::InvalidValue {
+                field: "corpus_weights.dynamic_bias",
+            });
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +120,8 @@ pub struct SearchResult {
     pub text: String,
     pub metadata: Option<HashMap<String, Value>>,
     pub source: SearchSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corpus_type: Option<CorpusType>,
 }
 
 impl SearchResult {

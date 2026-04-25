@@ -193,6 +193,7 @@ fn valid_search_request() -> SearchRequest {
         top_k: 3,
         filters: None,
         include_metadata: false,
+        corpus_weights: None,
     }
 }
 
@@ -379,6 +380,7 @@ fn query_lambda_bootstrap_builds_fixed_embedding_handler_and_delegates_to_real_r
             top_k: 2,
             filters: None,
             include_metadata: false,
+            corpus_weights: None,
         },
     )
     .expect("expected bootstrapped handler to search local fixtures");
@@ -473,6 +475,7 @@ fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() 
             top_k: 2,
             filters: None,
             include_metadata: false,
+            corpus_weights: None,
         },
     )
     .expect("expected LTEmbed bootstrapped handler to search local fixtures");
@@ -620,6 +623,7 @@ fn query_lambda_bootstrap_for_version_pins_served_manifest_after_head_changes() 
             top_k: 3,
             filters: None,
             include_metadata: false,
+            corpus_weights: None,
         },
     )
     .expect("expected pinned handler to continue serving the bootstrapped manifest version");
