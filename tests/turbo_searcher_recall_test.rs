@@ -6,7 +6,7 @@ use ltsearch::index::{
     encode_vector, CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader,
     TurboRecord512, META_RECORD_SIZE,
 };
-use ltsearch::query::TurboQuantSearcher;
+use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
