@@ -6,7 +6,7 @@ use ltsearch::index::{
     encode_vector, CentroidTable, KnownRecordLayout, MetaRecord, MmapIndex, ProjectionMatrix,
     TurboHeader, TurboRecord512, TurboRecordSlice, META_RECORD_SIZE,
 };
-use ltsearch::query::TurboQuantSearcher;
+use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
 
 const DIM: usize = 512;
 

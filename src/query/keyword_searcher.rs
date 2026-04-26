@@ -8,7 +8,7 @@ use tantivy::schema::{TantivyDocument, Value as _};
 use tantivy::{DocAddress, Index, ReloadPolicy};
 
 use crate::error::{SearchError, ValidationError};
-use crate::models::{SearchRequest, SearchResult, SearchSource, ShardManifest};
+use crate::models::{ChunkSource, SearchRequest, SearchResult, SearchSource, ShardManifest};
 use crate::storage::{ActiveManifest, ManifestStore};
 
 const DOC_ID_FIELD: &str = "doc_id";
@@ -313,6 +313,7 @@ fn build_search_result(
         text: text.to_string(),
         metadata,
         source: SearchSource::Keyword,
+        chunk_source: ChunkSource::Dynamic,
         corpus_type: None,
     })
 }

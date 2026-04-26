@@ -16,11 +16,60 @@ pub enum FilterValue {
     NumberEquals(f64),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkSource {
+    Static,
+    #[default]
+    Dynamic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorpusType {
+    Legal,
+    Contract,
+    Rfc,
+    Other(u8),
+}
+
+impl CorpusType {
+    pub fn from_id(id: u8) -> Self {
+        match id {
+            0 => CorpusType::Legal,
+            1 => CorpusType::Contract,
+            2 => CorpusType::Rfc,
+            other => CorpusType::Other(other),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CorpusWeights {
+    pub static_bias: f32,
+    pub dynamic_bias: f32,
+}
+
+impl CorpusWeights {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if !(0.0..=1.0).contains(&self.static_bias) {
+            return Err(ValidationError::InvalidValue {
+                field: "static_bias",
+            });
+        }
+        if !(0.0..=1.0).contains(&self.dynamic_bias) {
+            return Err(ValidationError::InvalidValue {
+                field: "dynamic_bias",
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
     pub top_k: usize,
-    #[serde(default)]
     pub filters: Option<HashMap<String, FilterValue>>,
     pub include_metadata: bool,
     #[serde(default)]
@@ -53,9 +102,6 @@ impl SearchRequest {
                 value.validate()?;
             }
         }
-        if let Some(weights) = &self.corpus_weights {
-            weights.validate()?;
-        }
 
         Ok(())
     }
@@ -70,49 +116,6 @@ pub enum SearchSource {
     Static,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CorpusType {
-    Legal,
-    Contract,
-    Rfc,
-    Other(u8),
-}
-
-impl CorpusType {
-    pub fn from_id(id: u8) -> Self {
-        match id {
-            0 => Self::Legal,
-            1 => Self::Contract,
-            2 => Self::Rfc,
-            other => Self::Other(other),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CorpusWeights {
-    pub static_bias: f32,
-    pub dynamic_bias: f32,
-}
-
-impl CorpusWeights {
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.static_bias < 0.0 || self.static_bias > 1.0 {
-            return Err(ValidationError::InvalidValue {
-                field: "corpus_weights.static_bias",
-            });
-        }
-        if self.dynamic_bias < 0.0 || self.dynamic_bias > 1.0 {
-            return Err(ValidationError::InvalidValue {
-                field: "corpus_weights.dynamic_bias",
-            });
-        }
-
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchResult {
     pub doc_id: String,
@@ -120,6 +123,8 @@ pub struct SearchResult {
     pub text: String,
     pub metadata: Option<HashMap<String, Value>>,
     pub source: SearchSource,
+    #[serde(default)]
+    pub chunk_source: ChunkSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corpus_type: Option<CorpusType>,
 }
@@ -199,4 +204,51 @@ fn validate_filter_field_name(field: &str) -> Result<(), ValidationError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod turbo_model_tests {
+    use super::*;
+
+    #[test]
+    fn chunk_source_serializes() {
+        let s = serde_json::to_string(&ChunkSource::Static).unwrap();
+        assert_eq!(s, "\"static\"");
+        let d = serde_json::to_string(&ChunkSource::Dynamic).unwrap();
+        assert_eq!(d, "\"dynamic\"");
+    }
+
+    #[test]
+    fn corpus_type_roundtrip() {
+        let t = CorpusType::Legal;
+        let json = serde_json::to_string(&t).unwrap();
+        let back: CorpusType = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn search_request_corpus_weights_optional() {
+        let req = SearchRequest {
+            query: "test".into(),
+            top_k: 5,
+            filters: None,
+            include_metadata: false,
+            corpus_weights: None,
+        };
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn search_result_with_static_source() {
+        let r = SearchResult {
+            doc_id: "abc".into(),
+            score: 0.9,
+            text: "hello".into(),
+            metadata: None,
+            source: SearchSource::Vector,
+            chunk_source: ChunkSource::Static,
+            corpus_type: Some(CorpusType::Legal),
+        };
+        assert!(r.validate().is_ok());
+    }
 }

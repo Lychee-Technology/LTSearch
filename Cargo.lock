@@ -4307,6 +4307,7 @@ dependencies = [
 name = "ltsearch"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arrow-array",
  "arrow-schema",
  "async-trait",
@@ -4325,6 +4326,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tantivy",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "uuid",

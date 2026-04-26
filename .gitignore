@@ -6,3 +6,6 @@
 .sam-local-deps/
 target/
 .claude/
+
+# TurboQuant binary index files (generated artifacts)
+static/*.bin

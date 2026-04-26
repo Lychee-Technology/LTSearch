@@ -6,7 +6,7 @@ pub struct ModuleBoundary;
 
 pub use index::{CacheStats, Document, IndexCache, IndexManifest, ShardManifest};
 pub use search::{
-    CorpusType, CorpusWeights, FilterValue, SearchRequest, SearchResponse, SearchResult,
-    SearchSource,
+    ChunkSource, CorpusType, CorpusWeights, FilterValue, SearchRequest, SearchResponse,
+    SearchResult, SearchSource,
 };
 pub use write::{DeleteResponse, HealthStatus, IngestResponse, WalOperation, WalRecord};
