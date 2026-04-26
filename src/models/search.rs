@@ -30,7 +30,18 @@ pub enum CorpusType {
     Legal,
     Contract,
     Rfc,
-    Other,
+    Other(u8),
+}
+
+impl CorpusType {
+    pub fn from_id(id: u8) -> Self {
+        match id {
+            0 => CorpusType::Legal,
+            1 => CorpusType::Contract,
+            2 => CorpusType::Rfc,
+            other => CorpusType::Other(other),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +97,7 @@ pub enum SearchSource {
     Vector,
     Keyword,
     Hybrid,
+    Static,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

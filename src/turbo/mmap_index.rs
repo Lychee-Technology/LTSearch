@@ -74,7 +74,7 @@ impl MmapIndex {
             0 => CorpusType::Legal,
             1 => CorpusType::Contract,
             2 => CorpusType::Rfc,
-            _ => CorpusType::Other,
+            other => CorpusType::Other(other),
         }
     }
 }
@@ -224,7 +224,7 @@ mod tests {
             (0, CorpusType::Legal),
             (1, CorpusType::Contract),
             (2, CorpusType::Rfc),
-            (99, CorpusType::Other),
+            (99, CorpusType::Other(99)),
         ];
         for (byte, expected) in cases {
             let m = MetaRecord {
