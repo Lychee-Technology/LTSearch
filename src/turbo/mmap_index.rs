@@ -145,7 +145,6 @@ fn load_projection(path: &Path) -> anyhow::Result<ProjectionMatrix> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem;
     use tempfile::TempDir;
 
     fn write_records(dir: &Path, records: &[TurboRecord]) {
