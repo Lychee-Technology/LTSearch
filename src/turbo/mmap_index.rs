@@ -159,10 +159,7 @@ mod tests {
 
     fn write_meta(dir: &Path, meta: &[MetaRecord]) {
         let bytes = unsafe {
-            slice::from_raw_parts(
-                meta.as_ptr() as *const u8,
-                std::mem::size_of_val(meta),
-            )
+            slice::from_raw_parts(meta.as_ptr() as *const u8, std::mem::size_of_val(meta))
         };
         fs::write(dir.join("turbo_static_meta.bin"), bytes).unwrap();
     }
