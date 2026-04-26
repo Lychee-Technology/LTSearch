@@ -50,6 +50,22 @@ pub struct CorpusWeights {
     pub dynamic_bias: f32,
 }
 
+impl CorpusWeights {
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if !(0.0..=1.0).contains(&self.static_bias) {
+            return Err(ValidationError::InvalidValue {
+                field: "static_bias",
+            });
+        }
+        if !(0.0..=1.0).contains(&self.dynamic_bias) {
+            return Err(ValidationError::InvalidValue {
+                field: "dynamic_bias",
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub query: String,

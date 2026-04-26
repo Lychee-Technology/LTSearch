@@ -7,7 +7,7 @@ use ltsearch::index::{
     TurboRecord512, META_RECORD_SIZE,
 };
 use ltsearch::models::{CorpusType, SearchSource};
-use ltsearch::query::TurboQuantSearcher;
+use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
 
 fn temp_dir(name: &str) -> PathBuf {
     let unique = std::time::SystemTime::now()

@@ -19,6 +19,7 @@ fn search_result_with_corpus_type_serializes() {
         text: "legal text".into(),
         metadata: None,
         source: SearchSource::Static,
+        chunk_source: ltsearch::models::ChunkSource::Static,
         corpus_type: Some(CorpusType::Legal),
     };
 
@@ -135,6 +136,7 @@ fn static_search_result_validates_like_any_other() {
         text: "static text".into(),
         metadata: None,
         source: SearchSource::Static,
+        chunk_source: ltsearch::models::ChunkSource::Static,
         corpus_type: Some(CorpusType::Legal),
     };
     assert!(result.validate().is_ok());
