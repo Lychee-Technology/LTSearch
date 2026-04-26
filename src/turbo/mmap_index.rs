@@ -152,7 +152,7 @@ mod tests {
         let bytes = unsafe {
             slice::from_raw_parts(
                 records.as_ptr() as *const u8,
-                records.len() * mem::size_of::<TurboRecord>(),
+                std::mem::size_of_val(records),
             )
         };
         fs::write(dir.join("turbo_static.bin"), bytes).unwrap();
@@ -162,7 +162,7 @@ mod tests {
         let bytes = unsafe {
             slice::from_raw_parts(
                 meta.as_ptr() as *const u8,
-                meta.len() * mem::size_of::<MetaRecord>(),
+                std::mem::size_of_val(meta),
             )
         };
         fs::write(dir.join("turbo_static_meta.bin"), bytes).unwrap();
