@@ -6,6 +6,10 @@ use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use ltsearch::error::{SearchError, ValidationError};
+use ltsearch::index::{
+    encode_vector, CentroidTable, MetaRecord, ProjectionMatrix, TurboHeader, TurboRecord512,
+    META_RECORD_SIZE,
+};
 use ltsearch::models::{SearchRequest, SearchResponse};
 use ltsearch::query_lambda::{
     bootstrap_query_handler_for_version_from_env, bootstrap_query_handler_from_env,
@@ -187,6 +191,95 @@ fn sample_manifest_json_with_dim(version_id: u64, embedding_dim: usize) -> Strin
     )
 }
 
+fn centroid_table(dim: u32, centroids_per_dim: u32, values: &[f32]) -> CentroidTable {
+    let mut bytes = Vec::with_capacity(8 + values.len() * 4);
+    bytes.extend_from_slice(&dim.to_le_bytes());
+    bytes.extend_from_slice(&centroids_per_dim.to_le_bytes());
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    CentroidTable::from_bytes(&bytes).unwrap()
+}
+
+fn identity_projection(dim: usize) -> ProjectionMatrix {
+    let mut rows = Vec::with_capacity(dim);
+    for row_index in 0..dim {
+        let mut row = vec![0.0; dim];
+        row[row_index] = 1.0;
+        rows.push(row);
+    }
+    ProjectionMatrix::from_rows(rows)
+}
+
+fn padded_embedding(prefix: &[f32]) -> Vec<f32> {
+    let mut embedding = vec![0.0; 512];
+    embedding[..prefix.len()].copy_from_slice(prefix);
+    embedding
+}
+
+struct StaticFixtureDoc<'a> {
+    doc_id: u64,
+    corpus_type: u8,
+    text: &'a str,
+    embedding: Vec<f32>,
+}
+
+fn write_static_fixture(root: &Path, docs: &[StaticFixtureDoc<'_>]) {
+    let static_dir = root.join("static");
+    fs::create_dir_all(&static_dir).unwrap();
+
+    let dim = 512;
+    let mut centroid_values = Vec::with_capacity(dim as usize * 4);
+    for _ in 0..dim {
+        centroid_values.extend_from_slice(&[-1.0, 0.0, 1.0, 2.0]);
+    }
+    let centroids = centroid_table(dim, 4, &centroid_values);
+    let projection = identity_projection(dim as usize);
+    let header = TurboHeader::new(dim, docs.len() as u64);
+
+    let mut bin_data = header.to_bytes();
+    let mut meta_data = Vec::new();
+    let mut text_blob = Vec::new();
+
+    for doc in docs {
+        let encoded = encode_vector(&doc.embedding, &centroids, &projection).unwrap();
+        let record = TurboRecord512 {
+            doc_id: doc.doc_id,
+            idx: encoded.idx.clone().try_into().unwrap(),
+            qjl: encoded.qjl.clone().try_into().unwrap(),
+            gamma: encoded.gamma,
+            _reserved: [0; 4],
+        };
+        let record_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const TurboRecord512 as *const u8,
+                std::mem::size_of::<TurboRecord512>(),
+            )
+        };
+        bin_data.extend_from_slice(record_bytes);
+
+        let text_offset = text_blob.len() as u64;
+        text_blob.extend_from_slice(doc.text.as_bytes());
+        let meta = MetaRecord {
+            doc_id: doc.doc_id,
+            corpus_type: doc.corpus_type,
+            _pad: [0; 3],
+            text_offset,
+            text_len: doc.text.len() as u32,
+        };
+        let meta_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(&meta as *const MetaRecord as *const u8, META_RECORD_SIZE)
+        };
+        meta_data.extend_from_slice(meta_bytes);
+    }
+
+    fs::write(static_dir.join("turbo_static.bin"), &bin_data).unwrap();
+    fs::write(static_dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
+    fs::write(static_dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(static_dir.join("centroids.bin"), centroids.to_bytes()).unwrap();
+    fs::write(static_dir.join("projection.bin"), projection.to_bytes()).unwrap();
+}
+
 fn valid_search_request() -> SearchRequest {
     SearchRequest {
         query: "rust search".into(),
@@ -216,8 +309,10 @@ fn repeated_embedding(dim: usize, value: f32) -> Vec<serde_json::Value> {
 
 fn success_handler(_request: SearchRequest) -> Result<SearchResponse, SearchError> {
     Ok(SearchResponse {
-        results: vec![],
-        total_count: 0,
+        static_chunks: vec![],
+        static_count: 0,
+        dynamic_chunks: vec![],
+        dynamic_count: 0,
         latency_ms: 12,
         index_version: 7,
     })
@@ -241,6 +336,8 @@ fn query_lambda_returns_plain_search_response_on_success() {
 
     let body = serde_json::to_value(&response).unwrap();
     assert_eq!(body["index_version"], 7);
+    assert_eq!(body["static_count"], 0);
+    assert_eq!(body["dynamic_count"], 0);
     assert!(body.get("error_type").is_none());
 }
 
@@ -386,13 +483,79 @@ fn query_lambda_bootstrap_builds_fixed_embedding_handler_and_delegates_to_real_r
     .expect("expected bootstrapped handler to search local fixtures");
 
     assert_eq!(response.index_version, 7);
-    assert_eq!(response.total_count, 2);
-    assert_eq!(response.results.len(), 2);
-    assert_eq!(response.results[0].doc_id, "doc-1");
+    assert_eq!(response.static_count, 0);
+    assert_eq!(response.dynamic_count, 2);
+    assert_eq!(response.dynamic_chunks.len(), 2);
+    assert_eq!(response.dynamic_chunks[0].doc_id, "doc-1");
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .any(|result| result.doc_id == "doc-2"));
+}
+
+#[test]
+fn query_lambda_bootstrap_loads_turbo_static_searcher_when_static_artifacts_exist() {
+    let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
+    let root = temp_fixture_dir("query-lambda-bootstrap-static-router");
+    write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(7));
+    write_fixture(
+        &root,
+        &version_manifest_key(7),
+        &sample_manifest_json_with_dim(7, 512),
+    );
+    write_index(
+        &root,
+        "index/v7/shard_0",
+        &[("doc-1", "rust hybrid search"), ("doc-2", "rust keyword")],
+    );
+    write_lance_fixture_with_dim(
+        &root,
+        "lance/v7/shard_0",
+        &[
+            json!({"doc_id":"doc-1","text":"rust hybrid search","embedding": padded_embedding(&[1.2, -1.4, 0.3, 0.9])}),
+            json!({"doc_id":"doc-2","text":"rust keyword","embedding": padded_embedding(&[1.0, -1.0, 0.2, 0.7])}),
+        ],
+        512,
+    );
+    write_static_fixture(
+        &root,
+        &[StaticFixtureDoc {
+            doc_id: 10,
+            corpus_type: 0,
+            text: "static legal ten",
+            embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+        }],
+    );
+
+    std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "fixed");
+    std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
+    std::env::set_var(
+        "LTSEARCH_QUERY_FIXED_EMBEDDING",
+        padded_embedding(&[1.2, -1.4, 0.3, 0.9])
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+
+    let handler = bootstrap_query_handler_from_env()
+        .expect("expected bootstrap to construct a router with static retrieval");
+    let response = handle_search_request(
+        handler,
+        SearchRequest {
+            query: "rust".into(),
+            top_k: 2,
+            filters: None,
+            include_metadata: false,
+            corpus_weights: None,
+        },
+    )
+    .expect("expected bootstrapped handler to search static and dynamic fixtures");
+
+    assert_eq!(response.index_version, 7);
+    assert_eq!(response.static_count, 1);
+    assert_eq!(response.static_chunks.len(), 1);
+    assert_eq!(response.static_chunks[0].doc_id, "10");
 }
 
 #[test]
@@ -481,8 +644,9 @@ fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() 
     .expect("expected LTEmbed bootstrapped handler to search local fixtures");
 
     assert_eq!(response.index_version, 7);
-    assert_eq!(response.total_count, 2);
-    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.static_count, 0);
+    assert_eq!(response.dynamic_count, 2);
+    assert_eq!(response.dynamic_chunks.len(), 2);
 }
 
 #[cfg(feature = "ltembed")]
@@ -629,18 +793,19 @@ fn query_lambda_bootstrap_for_version_pins_served_manifest_after_head_changes() 
     .expect("expected pinned handler to continue serving the bootstrapped manifest version");
 
     assert_eq!(response.index_version, 7);
-    assert_eq!(response.total_count, 2);
-    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.static_count, 0);
+    assert_eq!(response.dynamic_count, 2);
+    assert_eq!(response.dynamic_chunks.len(), 2);
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .any(|result| result.doc_id == "doc-1"));
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .any(|result| result.doc_id == "doc-2"));
     assert!(!response
-        .results
+        .dynamic_chunks
         .iter()
         .any(|result| result.doc_id == "doc-3"));
 }

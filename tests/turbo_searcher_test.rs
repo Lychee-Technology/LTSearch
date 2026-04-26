@@ -7,7 +7,32 @@ use ltsearch::index::{
     TurboRecord512, META_RECORD_SIZE,
 };
 use ltsearch::models::{CorpusType, SearchSource};
+use ltsearch::models::{IndexManifest, ShardManifest};
 use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
+use ltsearch::storage::{ActiveManifest, ManifestHead};
+
+fn stub_manifest() -> ActiveManifest {
+    ActiveManifest {
+        head: ManifestHead {
+            version_id: 1,
+            manifest_path: "m.json".into(),
+            updated_at: 0,
+        },
+        manifest: IndexManifest {
+            version_id: 1,
+            created_at: 0,
+            embedding_dim: 512,
+            document_count: 0,
+            num_shards: 0,
+            shards: vec![ShardManifest {
+                shard_id: 0,
+                document_count: 0,
+                lance_path: String::new(),
+                tantivy_path: String::new(),
+            }],
+        },
+    }
+}
 
 fn temp_dir(name: &str) -> PathBuf {
     let unique = std::time::SystemTime::now()
@@ -141,7 +166,11 @@ fn turbo_searcher_returns_static_results_with_corpus_mapping_and_stable_tie_brea
     let searcher = load_searcher(&dir);
 
     let results = searcher
-        .search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 2)
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            2,
+        )
         .unwrap();
 
     assert_eq!(results.len(), 2);
@@ -175,7 +204,9 @@ fn turbo_searcher_rejects_query_embeddings_with_wrong_dimension() {
     );
 
     let searcher = load_searcher(&dir);
-    let error = searcher.search(&[1.0, 0.0, 0.0], 1).unwrap_err();
+    let error = searcher
+        .search(&stub_manifest(), &[1.0, 0.0, 0.0], 1)
+        .unwrap_err();
 
     assert!(matches!(
         error,
@@ -203,7 +234,11 @@ fn turbo_searcher_rejects_top_k_out_of_range() {
 
     for top_k in [0, 101] {
         let error = searcher
-            .search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), top_k)
+            .search(
+                &stub_manifest(),
+                &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+                top_k,
+            )
             .unwrap_err();
 
         assert!(matches!(
@@ -247,7 +282,11 @@ fn turbo_searcher_allows_top_k_at_the_maximum_and_returns_all_available_docs() {
 
     let searcher = load_searcher(&dir);
     let results = searcher
-        .search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 100)
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            100,
+        )
         .unwrap();
 
     assert_eq!(results.len(), 3);
@@ -277,8 +316,8 @@ fn turbo_searcher_returns_stable_single_document_results_and_scores() {
 
     let searcher = load_searcher(&dir);
 
-    let first_results = searcher.search(&query, 1).unwrap();
-    let second_results = searcher.search(&query, 1).unwrap();
+    let first_results = searcher.search(&stub_manifest(), &query, 1).unwrap();
+    let second_results = searcher.search(&stub_manifest(), &query, 1).unwrap();
 
     assert_eq!(first_results.len(), 1);
     assert_eq!(second_results.len(), 1);
@@ -339,7 +378,11 @@ fn turbo_searcher_returns_best_top_k_without_leaking_lower_ranked_hits() {
     let searcher = load_searcher(&dir);
 
     let results = searcher
-        .search(&padded_embedding(&[1.2, -1.4, 0.3, 0.9]), 3)
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            3,
+        )
         .unwrap();
 
     assert_eq!(results.len(), 3);

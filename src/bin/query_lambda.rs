@@ -132,10 +132,15 @@ async fn sync_query_artifacts_from_s3_if_configured() -> Result<(), String> {
     let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let client = s3_client_from_env(&config);
 
-    sync_prefix(&client, &bucket, "index/", &artifact_root).await?;
-    sync_prefix(&client, &bucket, "lance/", &artifact_root).await?;
+    for prefix in synced_artifact_prefixes() {
+        sync_prefix(&client, &bucket, prefix, &artifact_root).await?;
+    }
 
     Ok(())
+}
+
+fn synced_artifact_prefixes() -> Vec<&'static str> {
+    vec!["index/", "lance/", "static/"]
 }
 
 async fn sync_prefix(
@@ -239,8 +244,10 @@ mod tests {
                 bootstrap_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(Arc::new(Box::new(move |_request| {
                     Ok(SearchResponse {
-                        results: vec![],
-                        total_count: 0,
+                        static_chunks: vec![],
+                        static_count: 0,
+                        dynamic_chunks: vec![],
+                        dynamic_count: 0,
                         latency_ms: 1,
                         index_version: version,
                     })
@@ -266,8 +273,10 @@ mod tests {
                 bootstrap_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(Arc::new(Box::new(move |_request| {
                     Ok(SearchResponse {
-                        results: vec![],
-                        total_count: 0,
+                        static_chunks: vec![],
+                        static_count: 0,
+                        dynamic_chunks: vec![],
+                        dynamic_count: 0,
                         latency_ms: 1,
                         index_version: version,
                     })
@@ -320,8 +329,10 @@ mod tests {
 
                 Ok(Arc::new(Box::new(move |_request| {
                     Ok(SearchResponse {
-                        results: vec![],
-                        total_count: 0,
+                        static_chunks: vec![],
+                        static_count: 0,
+                        dynamic_chunks: vec![],
+                        dynamic_count: 0,
                         latency_ms: 1,
                         index_version: version,
                     })
@@ -357,6 +368,14 @@ mod tests {
                 }
             },
         }
+    }
+
+    #[test]
+    fn synced_artifact_prefixes_include_static_artifacts() {
+        assert_eq!(
+            synced_artifact_prefixes(),
+            vec!["index/", "lance/", "static/"]
+        );
     }
 
     fn valid_search_request_for_cache_test() -> SearchRequest {

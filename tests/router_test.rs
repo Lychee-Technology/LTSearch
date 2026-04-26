@@ -15,7 +15,8 @@ use ltsearch::models::{
     ShardManifest,
 };
 use ltsearch::query::{
-    KeywordRetriever, KeywordSearcher, QueryRouter, VectorRetriever, VectorSearcher, WarningSink,
+    KeywordRetriever, KeywordSearcher, QueryRouter, StaticRetriever, VectorRetriever,
+    VectorSearcher, WarningSink,
 };
 use ltsearch::storage::{
     version_manifest_key, ActiveManifest, LocalManifestStore, ManifestHead, ManifestStore,
@@ -463,6 +464,73 @@ struct StubVectorRetriever {
     expected_top_ks: Arc<Mutex<Vec<usize>>>,
 }
 
+#[derive(Clone)]
+struct StubStaticRetriever {
+    results_by_top_k: Arc<HashMap<usize, Vec<SearchResult>>>,
+    delay: Duration,
+    recorder: SearchRecorder,
+    start: Arc<Instant>,
+    expected_version: u64,
+    expected_top_ks: Arc<Mutex<Vec<usize>>>,
+}
+
+impl StubStaticRetriever {
+    fn new(
+        results: Vec<SearchResult>,
+        delay: Duration,
+        start: Arc<Instant>,
+        expected_version: u64,
+        expected_top_k: usize,
+    ) -> Self {
+        Self::with_results_by_top_k(
+            HashMap::from([(expected_top_k, results)]),
+            delay,
+            start,
+            expected_version,
+            vec![expected_top_k],
+        )
+    }
+
+    fn with_results_by_top_k(
+        results_by_top_k: HashMap<usize, Vec<SearchResult>>,
+        delay: Duration,
+        start: Arc<Instant>,
+        expected_version: u64,
+        expected_top_ks: Vec<usize>,
+    ) -> Self {
+        Self {
+            results_by_top_k: Arc::new(results_by_top_k),
+            delay,
+            recorder: SearchRecorder::default(),
+            start,
+            expected_version,
+            expected_top_ks: Arc::new(Mutex::new(expected_top_ks)),
+        }
+    }
+}
+
+impl StaticRetriever for StubStaticRetriever {
+    fn search(
+        &self,
+        active_manifest: &ActiveManifest,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        assert_eq!(active_manifest.head.version_id, self.expected_version);
+        assert_eq!(active_manifest.manifest.embedding_dim, 3);
+        assert_eq!(query_embedding, [0.1, 0.2, 0.3]);
+        let expected_top_k = self.expected_top_ks.lock().unwrap().remove(0);
+        assert_eq!(top_k, expected_top_k);
+        self.recorder.record_start(self.start.elapsed());
+        std::thread::sleep(self.delay);
+        Ok(self
+            .results_by_top_k
+            .get(&top_k)
+            .cloned()
+            .unwrap_or_default())
+    }
+}
+
 impl StubVectorRetriever {
     fn new(
         results: Vec<SearchResult>,
@@ -567,17 +635,18 @@ fn router_fuses_hybrid_results_and_runs_retrievers_in_parallel() {
     let response = router.search(&sample_request()).unwrap();
 
     assert_eq!(response.index_version, 42);
-    assert_eq!(response.total_count, 3);
+    assert_eq!(response.static_count, 0);
+    assert_eq!(response.dynamic_count, 3);
     assert_eq!(
         response
-            .results
+            .dynamic_chunks
             .iter()
             .map(|result| result.doc_id.as_str())
             .collect::<Vec<_>>(),
         vec!["doc-2", "doc-1", "doc-3"]
     );
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .all(|result| result.source == SearchSource::Hybrid));
     assert_eq!(keyword.recorder.calls(), 1);
@@ -595,6 +664,98 @@ fn router_fuses_hybrid_results_and_runs_retrievers_in_parallel() {
 }
 
 #[test]
+fn router_returns_grouped_static_and_dynamic_results() {
+    let start = Arc::new(Instant::now());
+    let static_retriever = StubStaticRetriever::new(
+        vec![sample_result("doc-static", 0.95, SearchSource::Static)],
+        Duration::from_millis(0),
+        start.clone(),
+        42,
+        9,
+    );
+    let keyword = StubKeywordRetriever::new(
+        vec![sample_result("doc-2", 8.0, SearchSource::Keyword)],
+        Duration::from_millis(0),
+        start.clone(),
+        42,
+        9,
+    );
+    let vector = StubVectorRetriever::new(
+        vec![sample_result("doc-1", 0.9, SearchSource::Vector)],
+        Duration::from_millis(0),
+        start,
+        42,
+        9,
+    );
+    let router = QueryRouter::new(
+        StubManifestStore::new(42),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        keyword,
+        vector,
+    )
+    .with_static_retriever(static_retriever);
+
+    let response = router.search(&sample_request()).unwrap();
+
+    assert_eq!(response.static_count, 1);
+    assert_eq!(response.dynamic_count, 2);
+    assert_eq!(response.static_chunks[0].source, SearchSource::Static);
+    assert_eq!(response.static_chunks[0].doc_id, "doc-static");
+    assert!(response
+        .dynamic_chunks
+        .iter()
+        .all(|result| result.source == SearchSource::Hybrid));
+}
+
+#[test]
+fn router_uses_three_x_top_k_for_static_and_dynamic_retrievers() {
+    let start = Arc::new(Instant::now());
+    let request = SearchRequest {
+        query: "rust search".into(),
+        top_k: 2,
+        filters: None,
+        include_metadata: false,
+        corpus_weights: None,
+    };
+    let static_retriever = StubStaticRetriever::new(
+        vec![sample_result("doc-static", 0.95, SearchSource::Static)],
+        Duration::from_millis(0),
+        start.clone(),
+        7,
+        6,
+    );
+    let keyword = StubKeywordRetriever::new(
+        vec![sample_result("doc-2", 8.0, SearchSource::Keyword)],
+        Duration::from_millis(0),
+        start.clone(),
+        7,
+        6,
+    );
+    let vector = StubVectorRetriever::new(
+        vec![sample_result("doc-1", 0.9, SearchSource::Vector)],
+        Duration::from_millis(0),
+        start,
+        7,
+        6,
+    );
+    let router = QueryRouter::new(
+        StubManifestStore::new(7),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        keyword.clone(),
+        vector.clone(),
+    )
+    .with_static_retriever(static_retriever.clone());
+
+    let response = router.search(&request).unwrap();
+
+    assert_eq!(response.static_count, 1);
+    assert_eq!(response.dynamic_count, 2);
+    assert_eq!(static_retriever.recorder.calls(), 1);
+    assert_eq!(keyword.recorder.calls(), 1);
+    assert_eq!(vector.recorder.calls(), 1);
+}
+
+#[test]
 fn router_falls_back_to_keyword_only_when_embedding_generation_fails() {
     let start = Arc::new(Instant::now());
     let manifest_store = StubManifestStore::new(7);
@@ -606,7 +767,7 @@ fn router_falls_back_to_keyword_only_when_embedding_generation_fails() {
         Duration::from_millis(0),
         start.clone(),
         7,
-        3,
+        9,
     );
     let vector = StubVectorRetriever::new(
         vec![sample_result("doc-10", 0.9, SearchSource::Vector)],
@@ -620,9 +781,10 @@ fn router_falls_back_to_keyword_only_when_embedding_generation_fails() {
     let response = router.search(&sample_request()).unwrap();
 
     assert_eq!(response.index_version, 7);
-    assert_eq!(response.total_count, 1);
-    assert_eq!(response.results[0].doc_id, "doc-9");
-    assert_eq!(response.results[0].source, SearchSource::Keyword);
+    assert_eq!(response.static_count, 0);
+    assert_eq!(response.dynamic_count, 1);
+    assert_eq!(response.dynamic_chunks[0].doc_id, "doc-9");
+    assert_eq!(response.dynamic_chunks[0].source, SearchSource::Keyword);
     assert_eq!(keyword.recorder.calls(), 1);
     assert_eq!(vector.recorder.calls(), 0);
     assert_eq!(load_active_manifest_calls.load(Ordering::SeqCst), 1);
@@ -651,15 +813,15 @@ fn router_warns_with_request_details_after_final_embedding_retry_failure() {
             Duration::from_millis(0),
             start.clone(),
             17,
-            3,
+            9,
         ),
-        StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 17, 3),
+        StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 17, 9),
     )
     .with_warning_sink(warning_sink.clone());
 
     let response = router.search(&sample_request()).unwrap();
 
-    assert_eq!(response.results[0].doc_id, "doc-9");
+    assert_eq!(response.dynamic_chunks[0].doc_id, "doc-9");
     let messages = warning_sink.messages();
     assert_eq!(messages.len(), 1);
     assert!(messages[0].contains("embedding generation failed after 2 attempts"));
@@ -705,7 +867,7 @@ fn router_retries_embedding_generation_before_keyword_only_fallback() {
     assert_eq!(keyword.recorder.calls(), 1);
     assert_eq!(vector.recorder.calls(), 1);
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .all(|result| result.source == SearchSource::Hybrid));
 }
@@ -717,8 +879,8 @@ fn router_rejects_invalid_requests_before_touching_dependencies() {
     let load_head_calls = manifest_store.load_head_calls.clone();
     let generator = StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]);
     let generator_calls = generator.calls.clone();
-    let keyword = StubKeywordRetriever::new(vec![], Duration::from_millis(0), start.clone(), 9, 3);
-    let vector = StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 9, 3);
+    let keyword = StubKeywordRetriever::new(vec![], Duration::from_millis(0), start.clone(), 9, 9);
+    let vector = StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 9, 9);
     let router = QueryRouter::new(manifest_store, generator, keyword.clone(), vector.clone());
     let request = SearchRequest {
         query: String::new(),
@@ -776,8 +938,8 @@ fn router_uses_concrete_retrievers_without_forwarding_router_only_request_fields
     let response = router.search(&request).unwrap();
 
     assert_eq!(response.index_version, 7);
-    assert_eq!(response.results.len(), 2);
-    assert_eq!(response.total_count, 2);
+    assert_eq!(response.dynamic_chunks.len(), 2);
+    assert_eq!(response.dynamic_count, 2);
 }
 
 #[test]
@@ -819,11 +981,11 @@ fn router_applies_non_empty_filters_with_concrete_retrievers_using_local_metadat
     let response = router.search(&request).unwrap();
 
     assert_eq!(response.index_version, 7);
-    assert_eq!(response.results.len(), 1);
-    assert_eq!(response.total_count, 1);
-    assert_eq!(response.results[0].doc_id, "doc-1");
+    assert_eq!(response.dynamic_chunks.len(), 1);
+    assert_eq!(response.dynamic_count, 1);
+    assert_eq!(response.dynamic_chunks[0].doc_id, "doc-1");
     assert_eq!(
-        response.results[0].metadata.as_ref().unwrap()["lang"],
+        response.dynamic_chunks[0].metadata.as_ref().unwrap()["lang"],
         json!("rust")
     );
 }
@@ -902,10 +1064,10 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
 
     let response = router.search(&request).unwrap();
 
-    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.dynamic_chunks.len(), 2);
     assert_eq!(
         response
-            .results
+            .dynamic_chunks
             .iter()
             .map(|result| result.doc_id.as_str())
             .collect::<Vec<_>>(),
@@ -1023,7 +1185,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
 
     let response = router.search(&request).unwrap();
 
-    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.dynamic_chunks.len(), 2);
     assert_eq!(keyword.recorder.calls(), 2);
     assert_eq!(vector.recorder.calls(), 2);
 }
@@ -1100,8 +1262,8 @@ fn router_can_return_match_found_beyond_initial_top_k_window() {
 
     let response = router.search(&request).unwrap();
 
-    assert_eq!(response.results.len(), 1);
-    assert_eq!(response.results[0].doc_id, "doc-2");
+    assert_eq!(response.dynamic_chunks.len(), 1);
+    assert_eq!(response.dynamic_chunks[0].doc_id, "doc-2");
 }
 
 #[test]
@@ -1163,11 +1325,11 @@ fn router_applies_non_empty_filters_with_keyword_only_fallback_using_concrete_me
 
     let response = router.search(&request).unwrap();
 
-    assert_eq!(response.results.len(), 1);
-    assert_eq!(response.total_count, 1);
-    assert_eq!(response.results[0].doc_id, "doc-1");
+    assert_eq!(response.dynamic_chunks.len(), 1);
+    assert_eq!(response.dynamic_count, 1);
+    assert_eq!(response.dynamic_chunks[0].doc_id, "doc-1");
     assert_eq!(
-        response.results[0].metadata.as_ref().unwrap()["lang"],
+        response.dynamic_chunks[0].metadata.as_ref().unwrap()["lang"],
         json!("rust")
     );
 }
@@ -1242,11 +1404,11 @@ fn router_applies_exact_match_filters_before_returning_results() {
 
     let response = router.search(&request).unwrap();
 
-    assert_eq!(response.total_count, 1);
-    assert_eq!(response.results.len(), 1);
-    assert_eq!(response.results[0].doc_id, "doc-1");
+    assert_eq!(response.dynamic_count, 1);
+    assert_eq!(response.dynamic_chunks.len(), 1);
+    assert_eq!(response.dynamic_chunks[0].doc_id, "doc-1");
     assert_eq!(
-        response.results[0].metadata.as_ref().unwrap()["lang"],
+        response.dynamic_chunks[0].metadata.as_ref().unwrap()["lang"],
         json!("rust")
     );
 }

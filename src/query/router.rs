@@ -7,7 +7,6 @@ use crate::models::{SearchRequest, SearchResponse, SearchResult};
 use crate::storage::{ActiveManifest, ManifestStore};
 
 use super::filter::{apply_filters, strip_metadata};
-use super::turbo_searcher::{NoopStaticRetriever, StaticRetriever};
 use super::{HybridRanker, KeywordSearcher, VectorSearcher};
 
 const EMBEDDING_GENERATION_MAX_ATTEMPTS: usize = 2;
@@ -40,6 +39,49 @@ pub trait VectorRetriever: Send + Sync {
         query_embedding: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchResult>, SearchError>;
+}
+
+pub trait StaticRetriever: Send + Sync {
+    fn search(
+        &self,
+        active_manifest: &ActiveManifest,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError>;
+}
+
+impl<T> StaticRetriever for Box<T>
+where
+    T: StaticRetriever + ?Sized,
+{
+    fn search(
+        &self,
+        active_manifest: &ActiveManifest,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        (**self).search(active_manifest, query_embedding, top_k)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NoopStaticRetriever;
+
+impl StaticRetriever for NoopStaticRetriever {
+    fn search(
+        &self,
+        _active_manifest: &ActiveManifest,
+        _query_embedding: &[f32],
+        _top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        Ok(vec![])
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GroupedSearchResults {
+    static_chunks: Vec<SearchResult>,
+    dynamic_chunks: Vec<SearchResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,16 +179,22 @@ where
             self.search_single_pass(request, &active_manifest, &query_embedding)?
         };
 
-        let mut results = apply_filters(results, request.filters.as_ref());
-        results.truncate(request.top_k);
+        let mut static_chunks = apply_filters(results.static_chunks, request.filters.as_ref());
+        let mut dynamic_chunks = apply_filters(results.dynamic_chunks, request.filters.as_ref());
+        static_chunks.truncate(request.top_k);
+        dynamic_chunks.truncate(request.top_k);
         if !request.include_metadata {
-            results = strip_metadata(results);
+            static_chunks = strip_metadata(static_chunks);
+            dynamic_chunks = strip_metadata(dynamic_chunks);
         }
-        let total_count = results.len();
+        let static_count = static_chunks.len();
+        let dynamic_count = dynamic_chunks.len();
 
         let response = SearchResponse {
-            results,
-            total_count,
+            static_chunks,
+            static_count,
+            dynamic_chunks,
+            dynamic_count,
             latency_ms: started_at.elapsed().as_millis() as u64,
             index_version,
         };
@@ -160,20 +208,27 @@ where
         request: &SearchRequest,
         active_manifest: &ActiveManifest,
         query_embedding: &Result<Vec<f32>, crate::embedding::EmbeddingError>,
-    ) -> Result<Vec<SearchResult>, SearchError> {
+    ) -> Result<GroupedSearchResults, SearchError> {
         match query_embedding {
-            Ok(query_embedding) => self.search_hybrid(
+            Ok(query_embedding) => self.search_grouped(
                 active_manifest,
                 &request.query,
                 query_embedding.as_slice(),
-                request.top_k,
+                retrieval_window(request.top_k),
             ),
             Err(error) => {
                 self.warning_sink.warn(format!(
                     "embedding generation failed after {EMBEDDING_GENERATION_MAX_ATTEMPTS} attempts; falling back to keyword-only retrieval: query={}, top_k={}, error={}",
                     request.query, request.top_k, error
                 ));
-                self.search_keyword_only(active_manifest, &request.query, request.top_k)
+                Ok(GroupedSearchResults {
+                    static_chunks: vec![],
+                    dynamic_chunks: self.search_keyword_only(
+                        active_manifest,
+                        &request.query,
+                        retrieval_window(request.top_k),
+                    )?,
+                })
             }
         }
     }
@@ -183,17 +238,17 @@ where
         request: &SearchRequest,
         active_manifest: &ActiveManifest,
         query_embedding: &Result<Vec<f32>, crate::embedding::EmbeddingError>,
-    ) -> Result<Vec<SearchResult>, SearchError> {
+    ) -> Result<GroupedSearchResults, SearchError> {
         let mut retrieval_top_k = request.top_k.max(1);
         let mut warned_on_fallback = false;
 
         loop {
             let results = match query_embedding {
-                Ok(query_embedding) => self.search_hybrid(
+                Ok(query_embedding) => self.search_grouped(
                     active_manifest,
                     &request.query,
                     query_embedding.as_slice(),
-                    retrieval_top_k,
+                    retrieval_window(retrieval_top_k),
                 )?,
                 Err(error) => {
                     if !warned_on_fallback {
@@ -203,12 +258,20 @@ where
                         ));
                         warned_on_fallback = true;
                     }
-                    self.search_keyword_only(active_manifest, &request.query, retrieval_top_k)?
+                    GroupedSearchResults {
+                        static_chunks: vec![],
+                        dynamic_chunks: self.search_keyword_only(
+                            active_manifest,
+                            &request.query,
+                            retrieval_window(retrieval_top_k),
+                        )?,
+                    }
                 }
             };
 
-            let filtered_count = apply_filters(results.clone(), request.filters.as_ref()).len();
-            if filtered_count >= request.top_k || retrieval_top_k >= SEARCH_WINDOW_MAX {
+            let filtered_dynamic =
+                apply_filters(results.dynamic_chunks.clone(), request.filters.as_ref()).len();
+            if filtered_dynamic >= request.top_k || retrieval_top_k >= SEARCH_WINDOW_MAX {
                 return Ok(results);
             }
 
@@ -220,50 +283,54 @@ where
         }
     }
 
-    fn search_hybrid(
+    fn search_grouped(
         &self,
         active_manifest: &ActiveManifest,
         query: &str,
         query_embedding: &[f32],
         top_k: usize,
-    ) -> Result<Vec<SearchResult>, SearchError> {
-        let retrieval_top_k = (top_k * 3).min(SEARCH_WINDOW_MAX);
-
+    ) -> Result<GroupedSearchResults, SearchError> {
         let (static_results, keyword_results, vector_results) = thread::scope(|scope| {
             let static_handle = scope.spawn(|| {
                 self.static_retriever
-                    .search(query_embedding, retrieval_top_k)
+                    .search(active_manifest, query_embedding, top_k)
             });
-            let keyword_handle = scope.spawn(|| {
-                self.keyword_retriever
-                    .search(active_manifest, query, retrieval_top_k)
-            });
+            let keyword_handle =
+                scope.spawn(|| self.keyword_retriever.search(active_manifest, query, top_k));
             let vector_handle = scope.spawn(|| {
                 self.vector_retriever
-                    .search(active_manifest, query_embedding, retrieval_top_k)
+                    .search(active_manifest, query_embedding, top_k)
             });
 
-            let static_results = static_handle.join().map_err(|p| SearchError::Execution {
-                message: panic_payload_message("static retrieval", p),
-            })?;
-            let keyword_results = keyword_handle.join().map_err(|p| SearchError::Execution {
-                message: panic_payload_message("keyword retrieval", p),
-            })?;
-            let vector_results = vector_handle.join().map_err(|p| SearchError::Execution {
-                message: panic_payload_message("vector retrieval", p),
-            })?;
+            let static_results =
+                static_handle
+                    .join()
+                    .map_err(|payload| SearchError::Execution {
+                        message: panic_payload_message("static retrieval", payload),
+                    })?;
+            let keyword_results =
+                keyword_handle
+                    .join()
+                    .map_err(|payload| SearchError::Execution {
+                        message: panic_payload_message("keyword retrieval", payload),
+                    })?;
+            let vector_results =
+                vector_handle
+                    .join()
+                    .map_err(|payload| SearchError::Execution {
+                        message: panic_payload_message("vector retrieval", payload),
+                    })?;
 
             Ok::<_, SearchError>((static_results?, keyword_results?, vector_results?))
         })?;
-
         validate_results(&static_results)?;
         validate_results(&keyword_results)?;
         validate_results(&vector_results)?;
 
-        // RRF fuses dynamic (vector+keyword) results; static results appended as-is.
-        let mut dynamic_results = self.ranker.fuse(vector_results, keyword_results);
-        dynamic_results.extend(static_results);
-        Ok(dynamic_results)
+        Ok(GroupedSearchResults {
+            static_chunks: static_results,
+            dynamic_chunks: self.ranker.fuse(vector_results, keyword_results),
+        })
     }
 
     fn search_keyword_only(
@@ -326,6 +393,10 @@ fn validate_results(results: &[SearchResult]) -> Result<(), SearchError> {
     }
 
     Ok(())
+}
+
+fn retrieval_window(top_k: usize) -> usize {
+    top_k.max(1).saturating_mul(3).min(SEARCH_WINDOW_MAX)
 }
 
 impl<M> KeywordRetriever for KeywordSearcher<M>
