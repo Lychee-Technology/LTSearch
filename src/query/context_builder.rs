@@ -44,12 +44,8 @@ impl ContextBuilder {
 
 fn weight_instruction(weights: Option<&CorpusWeights>) -> &'static str {
     match weights {
-        Some(w) if w.static_bias > 0.7 => {
-            "如法规/合同与用户数据冲突，以法规/合同为准。"
-        }
-        Some(w) if w.dynamic_bias > 0.7 => {
-            "优先参考用户数据，不足时补充引用法规/合同。"
-        }
+        Some(w) if w.static_bias > 0.7 => "如法规/合同与用户数据冲突，以法规/合同为准。",
+        Some(w) if w.dynamic_bias > 0.7 => "优先参考用户数据，不足时补充引用法规/合同。",
         _ => "综合两类来源回答，不偏向任何一方。",
     }
 }

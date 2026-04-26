@@ -4,8 +4,8 @@
 #[repr(C, packed)]
 pub struct TurboRecord {
     pub doc_id: u64,
-    pub idx: [u8; 96],   // 384 dims × 2 bits packed
-    pub qjl: [u8; 48],   // 384 dims × 1 bit packed
+    pub idx: [u8; 96], // 384 dims × 2 bits packed
+    pub qjl: [u8; 48], // 384 dims × 1 bit packed
     pub gamma: f32,
 }
 
@@ -15,7 +15,7 @@ pub struct TurboRecord {
 #[repr(C, packed)]
 pub struct MetaRecord {
     pub doc_id: u64,
-    pub corpus_type: u8,  // 0=Legal, 1=Contract, 2=RFC, 3=Other
+    pub corpus_type: u8, // 0=Legal, 1=Contract, 2=RFC, 3=Other
     pub _pad: [u8; 3],
     pub text_offset: u64,
     pub text_len: u32,
@@ -24,12 +24,12 @@ pub struct MetaRecord {
 /// Per-dimension MSE quantization centroids.
 /// centroids[dim] = [c0, c1, c2, c3] for 2-bit (4 levels).
 pub struct Centroids {
-    pub values: Vec<[f32; 4]>,  // len == num_dims (384)
+    pub values: Vec<[f32; 4]>, // len == num_dims (384)
 }
 
 /// QJL projection matrix S, stored row-major.
 pub struct ProjectionMatrix {
-    pub values: Vec<f32>,  // len == rows * cols
+    pub values: Vec<f32>, // len == rows * cols
     pub rows: usize,
     pub cols: usize,
 }

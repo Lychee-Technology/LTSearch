@@ -82,7 +82,12 @@ pub fn compress(
         set_sign(&mut qjl, j, proj >= 0.0);
     }
 
-    TurboRecord { doc_id, idx, qjl, gamma }
+    TurboRecord {
+        doc_id,
+        idx,
+        qjl,
+        gamma,
+    }
 }
 
 #[cfg(test)]
@@ -95,7 +100,11 @@ mod tests {
         for i in 0..dims {
             values[i * dims + i] = 1.0;
         }
-        ProjectionMatrix { values, rows: dims, cols: dims }
+        ProjectionMatrix {
+            values,
+            rows: dims,
+            cols: dims,
+        }
     }
 
     #[test]

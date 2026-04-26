@@ -64,8 +64,7 @@ impl MmapIndex {
     pub fn text_of(&self, m: &MetaRecord) -> &str {
         let start = m.text_offset as usize;
         let end = start + m.text_len as usize;
-        std::str::from_utf8(&self.text_blob[start..end])
-            .unwrap_or("[invalid utf8]")
+        std::str::from_utf8(&self.text_blob[start..end]).unwrap_or("[invalid utf8]")
     }
 
     /// Map MetaRecord corpus_type byte to the CorpusType enum.
@@ -80,8 +79,8 @@ impl MmapIndex {
 }
 
 fn open_mmap(path: &Path) -> anyhow::Result<Mmap> {
-    let file = fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("failed to open {:?}: {}", path, e))?;
+    let file =
+        fs::File::open(path).map_err(|e| anyhow::anyhow!("failed to open {:?}: {}", path, e))?;
     // Safety: caller must ensure the file is not modified while mapped.
     let mmap = unsafe { Mmap::map(&file) }
         .map_err(|e| anyhow::anyhow!("failed to mmap {:?}: {}", path, e))?;
@@ -107,8 +106,7 @@ unsafe fn extend_lifetime<T: ?Sized>(r: &T) -> &'static T {
 }
 
 fn load_centroids(path: &Path) -> anyhow::Result<Centroids> {
-    let bytes = fs::read(path)
-        .map_err(|e| anyhow::anyhow!("failed to read {:?}: {}", path, e))?;
+    let bytes = fs::read(path).map_err(|e| anyhow::anyhow!("failed to read {:?}: {}", path, e))?;
     // File format: flat f32 values, 4 per dimension, little-endian.
     assert!(bytes.len() % (4 * 4) == 0, "centroids.bin size mismatch");
     let values: Vec<[f32; 4]> = bytes
@@ -125,8 +123,7 @@ fn load_centroids(path: &Path) -> anyhow::Result<Centroids> {
 }
 
 fn load_projection(path: &Path) -> anyhow::Result<ProjectionMatrix> {
-    let bytes = fs::read(path)
-        .map_err(|e| anyhow::anyhow!("failed to read {:?}: {}", path, e))?;
+    let bytes = fs::read(path).map_err(|e| anyhow::anyhow!("failed to read {:?}: {}", path, e))?;
     // File format: header [rows: u32 LE, cols: u32 LE] then flat f32 LE values.
     anyhow::ensure!(bytes.len() >= 8, "projection.bin too small");
     let rows = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;

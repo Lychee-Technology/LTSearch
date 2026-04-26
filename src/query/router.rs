@@ -231,7 +231,8 @@ where
 
         let (static_results, keyword_results, vector_results) = thread::scope(|scope| {
             let static_handle = scope.spawn(|| {
-                self.static_retriever.search(query_embedding, retrieval_top_k)
+                self.static_retriever
+                    .search(query_embedding, retrieval_top_k)
             });
             let keyword_handle = scope.spawn(|| {
                 self.keyword_retriever
@@ -242,21 +243,15 @@ where
                     .search(active_manifest, query_embedding, retrieval_top_k)
             });
 
-            let static_results = static_handle
-                .join()
-                .map_err(|p| SearchError::Execution {
-                    message: panic_payload_message("static retrieval", p),
-                })?;
-            let keyword_results = keyword_handle
-                .join()
-                .map_err(|p| SearchError::Execution {
-                    message: panic_payload_message("keyword retrieval", p),
-                })?;
-            let vector_results = vector_handle
-                .join()
-                .map_err(|p| SearchError::Execution {
-                    message: panic_payload_message("vector retrieval", p),
-                })?;
+            let static_results = static_handle.join().map_err(|p| SearchError::Execution {
+                message: panic_payload_message("static retrieval", p),
+            })?;
+            let keyword_results = keyword_handle.join().map_err(|p| SearchError::Execution {
+                message: panic_payload_message("keyword retrieval", p),
+            })?;
+            let vector_results = vector_handle.join().map_err(|p| SearchError::Execution {
+                message: panic_payload_message("vector retrieval", p),
+            })?;
 
             Ok::<_, SearchError>((static_results?, keyword_results?, vector_results?))
         })?;

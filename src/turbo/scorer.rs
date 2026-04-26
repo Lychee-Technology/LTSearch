@@ -13,7 +13,11 @@ pub fn get_idx(idx: &[u8; 96], dim: usize) -> usize {
 pub fn get_sign(qjl: &[u8; 48], dim: usize) -> f32 {
     let byte = qjl[dim / 8];
     let bit = (byte >> (7 - dim % 8)) & 1;
-    if bit == 1 { 1.0 } else { -1.0 }
+    if bit == 1 {
+        1.0
+    } else {
+        -1.0
+    }
 }
 
 /// Reconstruct x̃_mse from stored indices and centroids.
@@ -88,7 +92,7 @@ mod tests {
     #[test]
     fn get_sign_set_bit() {
         let mut qjl = [0u8; 48];
-        qjl[0] = 0b1000_0000;  // dim 0 bit = 1
+        qjl[0] = 0b1000_0000; // dim 0 bit = 1
         assert_eq!(get_sign(&qjl, 0), 1.0);
         assert_eq!(get_sign(&qjl, 1), -1.0);
     }
@@ -127,7 +131,7 @@ mod tests {
         };
         let record = TurboRecord {
             doc_id: 1,
-            idx: [0b01_01_01_01; 96],  // all dims → centroid[1] = 1.0
+            idx: [0b01_01_01_01; 96], // all dims → centroid[1] = 1.0
             qjl: [0u8; 48],
             gamma: 0.0,
         };
