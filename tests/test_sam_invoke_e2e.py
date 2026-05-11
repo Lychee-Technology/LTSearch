@@ -168,6 +168,14 @@ class SamInvokeE2ETest(unittest.TestCase):
         ltembed_gate = content.index("LTSEARCH_E2E_LTEMBED")
         self.assertGreater(ltembed_gate, fixed_end)
 
+    def test_query_assertions_match_split_response_contract(self) -> None:
+        content = INVOKE_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("dynamic_count", content)
+        self.assertIn("dynamic_chunks", content)
+        self.assertNotIn("total_count", content)
+        self.assertNotIn("response['results']", content)
+
 
 if __name__ == "__main__":
     unittest.main()

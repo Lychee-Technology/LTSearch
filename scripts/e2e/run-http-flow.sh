@@ -64,10 +64,10 @@ python3 - <<'PY' "$QUERY_RESPONSE_JSON"
 import json, sys
 response = json.load(open(sys.argv[1]))
 assert response['index_version'] == 1, response
-assert response['total_count'] >= 1, response
-doc_ids = [item['doc_id'] for item in response['results']]
+assert response['dynamic_count'] >= 1, response
+doc_ids = [item['doc_id'] for item in response['dynamic_chunks']]
 assert 'doc-rust-hybrid' in doc_ids, response
-print(f"query OK — index_version={response['index_version']}, total_count={response['total_count']}, doc_ids={doc_ids[:3]}...")
+print(f"query OK — index_version={response['index_version']}, dynamic_count={response['dynamic_count']}, doc_ids={doc_ids[:3]}...")
 PY
 
 echo "HTTP flow complete." >&2
