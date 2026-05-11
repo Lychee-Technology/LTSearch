@@ -1,4 +1,5 @@
 use std::env;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,8 +11,12 @@ use crate::embedding::{
 #[cfg(feature = "ltembed")]
 use crate::embedding::{ltembed_config_from_env, LTEmbedEmbeddingGenerator};
 use crate::error::SearchError;
+use crate::index::MmapIndex;
 use crate::models::{SearchRequest, SearchResponse};
-use crate::query::{KeywordSearcher, QueryRouter, VectorSearcher};
+use crate::query::{
+    KeywordSearcher, NoopStaticRetriever, QueryRouter, StaticRetriever, TurboQuantSearcher,
+    VectorSearcher,
+};
 use crate::storage::{
     ActiveManifest, LocalManifestStore, ManifestHead, ManifestStore, ManifestStoreError,
 };
@@ -150,6 +155,13 @@ fn bootstrap_query_embedding_handler(
         VectorSearcher::new(manifest_store, &artifact_root),
     );
 
+    let static_retriever: Box<dyn StaticRetriever> = match try_load_static_searcher(&artifact_root)?
+    {
+        Some(static_searcher) => Box::new(static_searcher),
+        None => Box::new(NoopStaticRetriever),
+    };
+    let router = router.with_static_retriever(static_retriever);
+
     Ok(Box::new(move |request| router.search(&request)))
 }
 
@@ -168,6 +180,24 @@ fn bootstrap_error(message: impl Into<String>) -> QueryLambdaError {
         error_type: "execution_error".into(),
         message: format!("query lambda bootstrap failed: {}", message.into()),
     }
+}
+
+fn try_load_static_searcher(
+    artifact_root: &Path,
+) -> Result<Option<TurboQuantSearcher>, QueryLambdaError> {
+    let static_dir = artifact_root.join("static");
+    if !static_dir.exists() {
+        return Ok(None);
+    }
+
+    let index = MmapIndex::load(&static_dir).map_err(|error| {
+        bootstrap_error(format!(
+            "failed to load TurboQuant static index from {}: {error}",
+            static_dir.display()
+        ))
+    })?;
+
+    Ok(Some(TurboQuantSearcher::new(Box::leak(Box::new(index)))))
 }
 
 #[derive(Debug, Clone)]

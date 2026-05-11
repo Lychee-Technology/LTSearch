@@ -6,9 +6,34 @@ use ltsearch::index::{
     encode_vector, CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader,
     TurboRecord512, META_RECORD_SIZE,
 };
+use ltsearch::models::{IndexManifest, ShardManifest};
 use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
+use ltsearch::storage::{ActiveManifest, ManifestHead};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+
+fn stub_manifest() -> ActiveManifest {
+    ActiveManifest {
+        head: ManifestHead {
+            version_id: 1,
+            manifest_path: "m.json".into(),
+            updated_at: 0,
+        },
+        manifest: IndexManifest {
+            version_id: 1,
+            created_at: 0,
+            embedding_dim: 512,
+            document_count: 0,
+            num_shards: 0,
+            shards: vec![ShardManifest {
+                shard_id: 0,
+                document_count: 0,
+                lance_path: String::new(),
+                tantivy_path: String::new(),
+            }],
+        },
+    }
+}
 
 const DIM: usize = 512;
 const TOP_K: usize = 10;
@@ -282,7 +307,7 @@ fn recall_report(
         .map(|(index, query)| {
             let exact = exact_top_k_doc_ids(documents, query, top_k);
             let turbo_doc_ids = searcher
-                .search(query, top_k)
+                .search(&stub_manifest(), query, top_k)
                 .unwrap()
                 .into_iter()
                 .map(|result| result.doc_id.parse::<usize>().unwrap())

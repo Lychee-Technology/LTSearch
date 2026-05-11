@@ -144,25 +144,45 @@ impl SearchResult {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchResponse {
-    pub results: Vec<SearchResult>,
-    pub total_count: usize,
+    pub static_chunks: Vec<SearchResult>,
+    pub static_count: usize,
+    pub dynamic_chunks: Vec<SearchResult>,
+    pub dynamic_count: usize,
     pub latency_ms: u64,
     pub index_version: u64,
 }
 
 impl SearchResponse {
     pub fn validate(&self, requested_top_k: usize) -> Result<(), ValidationError> {
-        if self.results.len() > self.total_count {
+        if self.static_chunks.len() > self.static_count {
             return Err(ValidationError::Mismatch {
-                field: "results",
-                expected: "results.len() <= total_count",
+                field: "static_chunks",
+                expected: "static_chunks.len() <= static_count",
             });
         }
-        if self.results.len() > requested_top_k {
+        if self.dynamic_chunks.len() > self.dynamic_count {
             return Err(ValidationError::Mismatch {
-                field: "results",
-                expected: "results.len() <= requested_top_k",
+                field: "dynamic_chunks",
+                expected: "dynamic_chunks.len() <= dynamic_count",
             });
+        }
+        if self.static_chunks.len() > requested_top_k {
+            return Err(ValidationError::Mismatch {
+                field: "static_chunks",
+                expected: "static_chunks.len() <= requested_top_k",
+            });
+        }
+        if self.dynamic_chunks.len() > requested_top_k {
+            return Err(ValidationError::Mismatch {
+                field: "dynamic_chunks",
+                expected: "dynamic_chunks.len() <= requested_top_k",
+            });
+        }
+        for result in &self.static_chunks {
+            result.validate()?;
+        }
+        for result in &self.dynamic_chunks {
+            result.validate()?;
         }
 
         Ok(())

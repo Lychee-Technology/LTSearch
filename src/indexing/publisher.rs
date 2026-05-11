@@ -114,6 +114,12 @@ where
                 .await?;
         }
 
+        if let Some(static_source) = static_artifact_source(&self.artifact_root)? {
+            self.storage
+                .upload_directory("static", &static_source)
+                .await?;
+        }
+
         self.storage
             .upload_file(&manifest_key, &manifest_source)
             .await?;
@@ -360,6 +366,24 @@ fn validate_updated_at(updated_at: i64) -> Result<(), PublishError> {
     }
 
     Ok(())
+}
+
+fn static_artifact_source(artifact_root: &Path) -> Result<Option<PathBuf>, PublishError> {
+    let static_dir = artifact_root.join("static");
+    if !static_dir.exists() {
+        return Ok(None);
+    }
+
+    let canonical = static_dir
+        .canonicalize()
+        .map_err(|source| PublishError::Operation {
+            message: format!(
+                "failed to canonicalize static artifact directory {}: {source}",
+                static_dir.display()
+            ),
+        })?;
+    validate_directory_tree_within_root(artifact_root, &canonical)?;
+    Ok(Some(canonical))
 }
 
 fn validate_manifest_file_matches_request(

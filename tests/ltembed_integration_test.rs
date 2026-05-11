@@ -174,21 +174,21 @@ fn ltembed_end_to_end_build_and_hybrid_query_flow() {
 
     assert_eq!(response.index_version, 9);
     assert_eq!(built.manifest.embedding_dim, 384);
-    assert!(!response.results.is_empty());
+    assert!(!response.dynamic_chunks.is_empty());
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .any(|result| result.doc_id == "doc-rust-hybrid"));
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .any(|result| result.doc_id == "doc-rust-keyword"));
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .all(|result| result.metadata.is_some()));
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .all(|result| !result.doc_id.is_empty()));
 

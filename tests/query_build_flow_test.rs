@@ -187,19 +187,22 @@ fn build_to_hybrid_query_flow_returns_built_version_and_unique_results() {
         .unwrap();
 
     assert_eq!(response.index_version, 14);
-    assert_eq!(response.results.len(), 2);
-    assert_eq!(response.total_count, 2);
-    assert_ne!(response.results[0].doc_id, response.results[1].doc_id);
+    assert_eq!(response.dynamic_chunks.len(), 2);
+    assert_eq!(response.dynamic_count, 2);
+    assert_ne!(
+        response.dynamic_chunks[0].doc_id,
+        response.dynamic_chunks[1].doc_id
+    );
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .any(|result| result.doc_id == "doc-rust-hybrid"));
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .any(|result| result.doc_id == "doc-rust-keyword"));
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .all(|result| result.metadata.is_some()));
 }
@@ -245,12 +248,12 @@ fn build_to_query_flow_falls_back_to_keyword_only_when_query_embedding_fails() {
         .unwrap();
 
     assert_eq!(response.index_version, 14);
-    assert!(!response.results.is_empty());
+    assert!(!response.dynamic_chunks.is_empty());
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .all(|result| result.doc_id.starts_with("doc-rust")));
-    assert!(response.results.iter().all(|result| {
+    assert!(response.dynamic_chunks.iter().all(|result| {
         result
             .metadata
             .as_ref()

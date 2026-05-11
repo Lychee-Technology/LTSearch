@@ -97,8 +97,10 @@ fn search_models_round_trip_through_serde() {
     assert!(result.validate().is_ok());
 
     let response = SearchResponse {
-        results: vec![result],
-        total_count: 1,
+        static_chunks: vec![result.clone()],
+        static_count: 1,
+        dynamic_chunks: vec![result],
+        dynamic_count: 1,
         latency_ms: 12,
         index_version: 7,
     };
@@ -107,25 +109,36 @@ fn search_models_round_trip_through_serde() {
     let encoded = serde_json::to_string(&response).unwrap();
     let decoded: SearchResponse = serde_json::from_str(&encoded).unwrap();
 
-    assert_eq!(decoded.total_count, 1);
+    assert_eq!(decoded.static_count, 1);
+    assert_eq!(decoded.dynamic_count, 1);
     assert_eq!(decoded.index_version, 7);
-    assert_eq!(decoded.results[0].source, SearchSource::Hybrid);
+    assert_eq!(decoded.dynamic_chunks[0].source, SearchSource::Hybrid);
     assert_eq!(
-        decoded.results[0].metadata.as_ref().unwrap()["lang"],
+        decoded.dynamic_chunks[0].metadata.as_ref().unwrap()["lang"],
         json!("en")
     );
 
     let too_many_results = SearchResponse {
-        results: vec![decoded.results[0].clone(), decoded.results[0].clone()],
-        total_count: 1,
+        static_chunks: vec![
+            decoded.static_chunks[0].clone(),
+            decoded.static_chunks[0].clone(),
+        ],
+        static_count: 1,
+        dynamic_chunks: vec![decoded.dynamic_chunks[0].clone()],
+        dynamic_count: 1,
         latency_ms: 1,
         index_version: 7,
     };
     assert!(too_many_results.validate(10).is_err());
 
     let exceeds_requested_top_k = SearchResponse {
-        results: vec![decoded.results[0].clone(), decoded.results[0].clone()],
-        total_count: 2,
+        static_chunks: vec![],
+        static_count: 0,
+        dynamic_chunks: vec![
+            decoded.dynamic_chunks[0].clone(),
+            decoded.dynamic_chunks[0].clone(),
+        ],
+        dynamic_count: 2,
         latency_ms: 1,
         index_version: 7,
     };

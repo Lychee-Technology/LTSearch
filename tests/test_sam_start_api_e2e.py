@@ -66,6 +66,14 @@ class SamStartApiE2ETest(unittest.TestCase):
         self.assertIn("write_request.json", content)
         self.assertIn("query_request.json", content)
 
+    def test_http_flow_query_assertions_match_split_response_contract(self) -> None:
+        content = HTTP_FLOW_SCRIPT_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("dynamic_count", content)
+        self.assertIn("dynamic_chunks", content)
+        self.assertNotIn("total_count", content)
+        self.assertNotIn("response['results']", content)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,7 +6,32 @@ use ltsearch::index::{
     encode_vector, CentroidTable, KnownRecordLayout, MetaRecord, MmapIndex, ProjectionMatrix,
     TurboHeader, TurboRecord512, TurboRecordSlice, META_RECORD_SIZE,
 };
+use ltsearch::models::{IndexManifest, ShardManifest};
 use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
+use ltsearch::storage::{ActiveManifest, ManifestHead};
+
+fn stub_manifest() -> ActiveManifest {
+    ActiveManifest {
+        head: ManifestHead {
+            version_id: 1,
+            manifest_path: "m.json".into(),
+            updated_at: 0,
+        },
+        manifest: IndexManifest {
+            version_id: 1,
+            created_at: 0,
+            embedding_dim: 512,
+            document_count: 0,
+            num_shards: 0,
+            shards: vec![ShardManifest {
+                shard_id: 0,
+                document_count: 0,
+                lance_path: String::new(),
+                tantivy_path: String::new(),
+            }],
+        },
+    }
+}
 
 const DIM: usize = 512;
 
@@ -136,7 +161,7 @@ fn turbo_searcher_benchmark_reports_typed_512d_search_latency() {
     let top_k = 10;
     let start = Instant::now();
 
-    let results = searcher.search(&query, top_k).unwrap();
+    let results = searcher.search(&stub_manifest(), &query, top_k).unwrap();
     let elapsed = start.elapsed();
     println!(
         "turbo_searcher benchmark dim={} docs={} top_k={} results={} elapsed_ms={:.3} elapsed_us={}",

@@ -78,6 +78,25 @@ impl PublishStorage for RecordingPublishStorage {
         }
 
         self.seed_directory(key);
+        for entry in fs::read_dir(source).map_err(|source_error| PublishError::Operation {
+            message: format!("failed to read {}: {source_error}", source.display()),
+        })? {
+            let entry = entry.map_err(|source_error| PublishError::Operation {
+                message: format!("failed to iterate {}: {source_error}", source.display()),
+            })?;
+            let path = entry.path();
+            let child_key = format!("{key}/{}", entry.file_name().to_string_lossy());
+            let file_type = entry
+                .file_type()
+                .map_err(|source_error| PublishError::Operation {
+                    message: format!("failed to inspect {}: {source_error}", path.display()),
+                })?;
+            if file_type.is_dir() {
+                self.upload_directory(&child_key, &path).await?;
+            } else if file_type.is_file() {
+                self.upload_file(&child_key, &path).await?;
+            }
+        }
         Ok(())
     }
 
@@ -164,6 +183,15 @@ fn create_source_build(root: &Path, manifest: &IndexManifest) {
     );
 }
 
+fn create_static_source_build(root: &Path) {
+    fs::create_dir_all(root.join("static")).unwrap();
+    write_fixture(root, "static/turbo_static.bin", b"turbo");
+    write_fixture(root, "static/turbo_static_meta.bin", b"meta");
+    write_fixture(root, "static/turbo_static_text.bin", b"text");
+    write_fixture(root, "static/centroids.bin", b"centroids");
+    write_fixture(root, "static/projection.bin", b"projection");
+}
+
 fn sample_manifest(version_id: u64) -> IndexManifest {
     IndexManifest {
         version_id,
@@ -239,6 +267,44 @@ async fn publisher_uploads_artifacts_and_manifest_before_updating_head() {
             "{required} should happen before _head update"
         );
     }
+}
+
+#[tokio::test]
+async fn publisher_uploads_static_artifacts_before_updating_head() {
+    let build_root = temp_fixture_dir("publisher-static-upload-order");
+    let manifest = sample_manifest(9);
+    create_source_build(&build_root, &manifest);
+    create_static_source_build(&build_root);
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(8, 1_700_000_000_100));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    publisher
+        .publish(&PublishRequest {
+            manifest,
+            expected_current_version: Some(8),
+            updated_at: 1_700_000_000_500,
+        })
+        .await
+        .unwrap();
+
+    let calls = storage.calls();
+    assert!(calls.iter().any(|call| call == "upload_directory:static"));
+    assert!(calls
+        .iter()
+        .any(|call| call == "upload_file:static/turbo_static.bin"));
+    assert!(calls
+        .iter()
+        .any(|call| call == "upload_file:static/centroids.bin"));
+    assert_eq!(
+        storage.file_bytes("static/turbo_static.bin").unwrap(),
+        b"turbo"
+    );
+    assert_eq!(
+        storage.file_bytes("static/centroids.bin").unwrap(),
+        b"centroids"
+    );
 }
 
 #[tokio::test]

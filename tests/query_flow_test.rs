@@ -314,15 +314,19 @@ fn query_flow_hybrid_retrieval_returns_correct_version_and_results() {
     // Assert: response.index_version == 1
     assert_eq!(response.index_version, 1);
 
-    // Assert: response.results.len() == 2
-    assert_eq!(response.results.len(), 2);
+    // Assert: response.dynamic_chunks.len() == 2
+    assert_eq!(response.dynamic_chunks.len(), 2);
 
     // Assert: all doc_ids are unique
-    let unique_ids: HashSet<&str> = response.results.iter().map(|r| r.doc_id.as_str()).collect();
-    assert_eq!(unique_ids.len(), response.results.len());
+    let unique_ids: HashSet<&str> = response
+        .dynamic_chunks
+        .iter()
+        .map(|r| r.doc_id.as_str())
+        .collect();
+    assert_eq!(unique_ids.len(), response.dynamic_chunks.len());
 
-    // Assert: total_count reflects available results
-    assert_eq!(response.total_count, response.results.len());
+    // Assert: dynamic_count reflects available results
+    assert_eq!(response.dynamic_count, response.dynamic_chunks.len());
 }
 
 #[test]
@@ -379,25 +383,29 @@ fn query_flow_keyword_only_fallback_when_vector_search_unavailable() {
 
     // Assert: results came back (keyword search should find "rust" in doc-1 and doc-2)
     assert!(
-        !response.results.is_empty(),
+        !response.dynamic_chunks.is_empty(),
         "keyword fallback should return results"
     );
-    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.dynamic_chunks.len(), 2);
 
     // Assert: all doc_ids are unique
-    let unique_ids: HashSet<&str> = response.results.iter().map(|r| r.doc_id.as_str()).collect();
-    assert_eq!(unique_ids.len(), response.results.len());
+    let unique_ids: HashSet<&str> = response
+        .dynamic_chunks
+        .iter()
+        .map(|r| r.doc_id.as_str())
+        .collect();
+    assert_eq!(unique_ids.len(), response.dynamic_chunks.len());
 
-    // Assert: total_count matches results length
-    assert_eq!(response.total_count, response.results.len());
+    // Assert: dynamic_count matches results length
+    assert_eq!(response.dynamic_count, response.dynamic_chunks.len());
 
     // Assert: results are from keyword search (the "rust" docs)
     assert!(
-        response.results.iter().any(|r| r.doc_id == "doc-1"),
+        response.dynamic_chunks.iter().any(|r| r.doc_id == "doc-1"),
         "doc-1 should be in keyword results"
     );
     assert!(
-        response.results.iter().any(|r| r.doc_id == "doc-2"),
+        response.dynamic_chunks.iter().any(|r| r.doc_id == "doc-2"),
         "doc-2 should be in keyword results"
     );
 }

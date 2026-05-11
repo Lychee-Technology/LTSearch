@@ -223,13 +223,13 @@ fn router_hybrid_searches_over_builder_generated_artifacts() {
         .unwrap();
 
     assert_eq!(response.index_version, built.manifest.version_id);
-    assert!(!response.results.is_empty());
+    assert!(!response.dynamic_chunks.is_empty());
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .any(|result| result.doc_id == "doc-hybrid"));
     assert!(response
-        .results
+        .dynamic_chunks
         .iter()
         .all(|result| result.metadata.is_some()));
 }
