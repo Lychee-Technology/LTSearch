@@ -93,6 +93,7 @@ fn search_models_round_trip_through_serde() {
         source: SearchSource::Hybrid,
         chunk_source: ChunkSource::Dynamic,
         corpus_type: None,
+        citation: None,
     };
     assert!(result.validate().is_ok());
 

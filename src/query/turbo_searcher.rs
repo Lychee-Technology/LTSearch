@@ -90,6 +90,7 @@ impl StaticRetriever for TurboQuantSearcher {
                 source: SearchSource::Static,
                 chunk_source: ChunkSource::Static,
                 corpus_type: Some(candidate.corpus_type),
+                citation: None,
             })
             .collect())
     }

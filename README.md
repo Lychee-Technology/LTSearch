@@ -79,6 +79,7 @@ cargo build --bin query_lambda
 | `LTSEARCH_QUERY_LTEMBED_CONFIG_PATH` | Path to `config.json` |
 | `LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH` | Path to `tokenizer.json` |
 | `LTSEARCH_QUERY_LTEMBED_POOLING` | Pooling strategy (e.g. `mean`) |
+| `LTSEARCH_QUERY_STATIC_DIR` | Optional: parent dir for static TurboQuant index (`static/` subdir). Default: `LTSEARCH_QUERY_ARTIFACT_ROOT`. Set to `/app` when using Docker image. |
 
 ### write_lambda
 
@@ -113,6 +114,29 @@ cargo build --bin index_builder_lambda
 | `LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH` | Path to `tokenizer.json` |
 | `LTSEARCH_BUILD_LTEMBED_POOLING` | Pooling strategy (e.g. `mean`) |
 
+### turbo_index_builder
+
+Offline static index builder for TurboQuant (laws, contracts, RFCs). Writes compressed binary index files for bundling into the query Lambda Docker image.
+
+```bash
+cargo build --bin turbo_index_builder
+```
+
+| Env Var | Description |
+|---------|-------------|
+| `LTSEARCH_BUILD_EMBEDDING_PROVIDER` | Embedding provider: `fixed` or `ltembed` (default: `fixed`) |
+| `LTSEARCH_BUILD_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
+| `LTSEARCH_BUILD_EMBEDDING_DIM` | Embedding dimension |
+| `LTSEARCH_BUILD_LTEMBED_MODEL_PATH` | Path to `model.safetensors` (provider=`ltembed`) |
+| `LTSEARCH_BUILD_LTEMBED_CONFIG_PATH` | Path to `config.json` |
+| `LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH` | Path to `tokenizer.json` |
+| `LTSEARCH_BUILD_LTEMBED_POOLING` | Pooling strategy (e.g. `mean`) |
+
+Usage:
+```bash
+turbo_index_builder --config turbo_config.json --output /path/to/static/
+```
+
 ## Local E2E Workflow
 
 The SAM Local E2E scripts run the full write → build → query pipeline against a local Moto-backed AWS environment without deploying to real AWS.
@@ -128,9 +152,9 @@ The SAM Local E2E scripts run the full write → build → query pipeline agains
 | Mode | Description | When to use |
 |------|-------------|-------------|
 | `fixed` (default) | Deterministic 3-dim stub vector, no model required | CI, quick local iteration |
-| `ltembed` | Real `intfloat/multilingual-e5-small` model, 384-dim | Testing real semantic search locally |
+| `ltembed` | Real `jinaai/jina-embeddings-v5-text-nano` model, 512-dim | Testing real semantic search locally |
 
-The `ltembed` mode downloads `model.safetensors` (~471 MB), `config.json`, and `tokenizer.json` from HuggingFace automatically during `docker build`. No manual file setup is required.
+The `ltembed` mode downloads `model.safetensors`, `config.json`, and `tokenizer.json` from HuggingFace automatically during `docker build`. No manual file setup is required.
 
 ### SAM invoke E2E (CI-compatible)
 

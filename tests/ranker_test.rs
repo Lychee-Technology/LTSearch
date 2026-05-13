@@ -1,4 +1,4 @@
-use ltsearch::models::{SearchResult, SearchSource};
+use ltsearch::models::{ChunkSource, SearchResult, SearchSource};
 use ltsearch::query::HybridRanker;
 use serde_json::json;
 
@@ -9,8 +9,9 @@ fn sample_result(doc_id: &str, score: f32, source: SearchSource) -> SearchResult
         text: format!("text for {doc_id}"),
         metadata: None,
         source,
-        chunk_source: ltsearch::models::ChunkSource::Dynamic,
+        chunk_source: ChunkSource::Dynamic,
         corpus_type: None,
+        citation: None,
     }
 }
 
@@ -125,6 +126,7 @@ fn fuse_preserves_metadata_from_duplicate_result_when_available() {
         source: SearchSource::Keyword,
         chunk_source: ltsearch::models::ChunkSource::Dynamic,
         corpus_type: None,
+        citation: None,
     }];
 
     let fused = ranker.fuse(vector_results, keyword_results);
@@ -150,6 +152,7 @@ fn fuse_merges_metadata_maps_from_duplicate_results() {
         source: SearchSource::Vector,
         chunk_source: ltsearch::models::ChunkSource::Dynamic,
         corpus_type: None,
+        citation: None,
     }];
     let keyword_results = vec![SearchResult {
         doc_id: "doc-1".into(),
@@ -162,6 +165,7 @@ fn fuse_merges_metadata_maps_from_duplicate_results() {
         source: SearchSource::Keyword,
         chunk_source: ltsearch::models::ChunkSource::Dynamic,
         corpus_type: None,
+        citation: None,
     }];
 
     let fused = ranker.fuse(vector_results, keyword_results);

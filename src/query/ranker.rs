@@ -70,6 +70,9 @@ impl HybridRanker {
 
 fn merge_result_payload(existing: &mut SearchResult, incoming: SearchResult) {
     merge_metadata(&mut existing.metadata, incoming.metadata);
+    if existing.citation.is_none() {
+        existing.citation = incoming.citation;
+    }
 }
 
 fn merge_metadata(

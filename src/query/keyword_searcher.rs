@@ -8,7 +8,9 @@ use tantivy::schema::{TantivyDocument, Value as _};
 use tantivy::{DocAddress, Index, ReloadPolicy};
 
 use crate::error::{SearchError, ValidationError};
-use crate::models::{ChunkSource, SearchRequest, SearchResult, SearchSource, ShardManifest};
+use crate::models::{
+    ChunkSource, Citation, SearchRequest, SearchResult, SearchSource, ShardManifest,
+};
 use crate::storage::{ActiveManifest, ManifestStore};
 
 const DOC_ID_FIELD: &str = "doc_id";
@@ -306,6 +308,7 @@ fn build_search_result(
             message: format!("matched document is missing {TEXT_FIELD}"),
         })?;
     let metadata = load_metadata(&document, metadata_field)?;
+    let citation = metadata.as_ref().and_then(Citation::from_metadata);
 
     Ok(SearchResult {
         doc_id: doc_id.to_string(),
@@ -315,6 +318,7 @@ fn build_search_result(
         source: SearchSource::Keyword,
         chunk_source: ChunkSource::Dynamic,
         corpus_type: None,
+        citation,
     })
 }
 

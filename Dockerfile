@@ -17,4 +17,6 @@ COPY --from=builder /build/target/release/query_lambda /var/task/bootstrap
 # after running turbo_index_builder.
 COPY static/ /app/static/
 
+ENV LTSEARCH_QUERY_STATIC_DIR=/app
+
 CMD ["bootstrap"]
