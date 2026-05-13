@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::error::{SearchError, ValidationError};
 use crate::models::{
-    CacheStats, ChunkSource, SearchRequest, SearchResult, SearchSource, ShardManifest,
+    CacheStats, ChunkSource, Citation, SearchRequest, SearchResult, SearchSource, ShardManifest,
 };
 use crate::storage::{ActiveManifest, ManifestStore};
 
@@ -538,6 +538,7 @@ fn decode_lancedb_batches(
             let score =
                 lancedb_distance_to_score(distance_value(distances.as_ref(), index, shard_path)?)?;
             let metadata = parse_metadata_json(metadata.value(index), shard_path)?;
+            let citation = metadata.as_ref().and_then(Citation::from_metadata);
             let result = SearchResult {
                 doc_id: doc_ids.value(index).to_string(),
                 score,
@@ -546,6 +547,7 @@ fn decode_lancedb_batches(
                 source: SearchSource::Vector,
                 chunk_source: ChunkSource::Dynamic,
                 corpus_type: None,
+                citation,
             };
 
             result.validate()?;

@@ -117,6 +117,38 @@ pub enum SearchSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Citation {
+    pub resource_id: String,
+    pub source_type: String,
+    pub source_ref: String,
+    pub title: Option<String>,
+    pub url: Option<String>,
+}
+
+impl Citation {
+    pub fn from_metadata(metadata: &HashMap<String, Value>) -> Option<Self> {
+        let resource_id = metadata.get("resource_id")?.as_str()?.to_string();
+        let source_type = metadata.get("source_type")?.as_str()?.to_string();
+        let source_ref = metadata.get("source_ref")?.as_str()?.to_string();
+        let title = metadata
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let url = metadata
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        Some(Self {
+            resource_id,
+            source_type,
+            source_ref,
+            title,
+            url,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchResult {
     pub doc_id: String,
     pub score: f32,
@@ -127,6 +159,8 @@ pub struct SearchResult {
     pub chunk_source: ChunkSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corpus_type: Option<CorpusType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub citation: Option<Citation>,
 }
 
 impl SearchResult {
@@ -268,6 +302,7 @@ mod turbo_model_tests {
             source: SearchSource::Vector,
             chunk_source: ChunkSource::Static,
             corpus_type: Some(CorpusType::Legal),
+            citation: None,
         };
         assert!(r.validate().is_ok());
     }

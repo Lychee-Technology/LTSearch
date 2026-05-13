@@ -241,6 +241,7 @@ fn sample_result(doc_id: &str, score: f32, source: SearchSource) -> SearchResult
         source,
         chunk_source: ChunkSource::Dynamic,
         corpus_type: None,
+        citation: None,
     }
 }
 
@@ -664,6 +665,61 @@ fn router_fuses_hybrid_results_and_runs_retrievers_in_parallel() {
 }
 
 #[test]
+fn router_runs_static_keyword_vector_in_three_way_parallel() {
+    let start = Arc::new(Instant::now());
+    let static_retriever = StubStaticRetriever::new(
+        vec![sample_result("doc-static", 0.95, SearchSource::Static)],
+        Duration::from_millis(200),
+        start.clone(),
+        42,
+        9,
+    );
+    let keyword = StubKeywordRetriever::new(
+        vec![sample_result("doc-2", 8.0, SearchSource::Keyword)],
+        Duration::from_millis(200),
+        start.clone(),
+        42,
+        9,
+    );
+    let vector = StubVectorRetriever::new(
+        vec![sample_result("doc-1", 0.9, SearchSource::Vector)],
+        Duration::from_millis(200),
+        start.clone(),
+        42,
+        9,
+    );
+    let router = QueryRouter::new(
+        StubManifestStore::new(42),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        keyword.clone(),
+        vector.clone(),
+    )
+    .with_static_retriever(static_retriever.clone());
+
+    let response = router.search(&sample_request()).unwrap();
+
+    assert_eq!(response.static_count, 1);
+    assert_eq!(response.dynamic_count, 2);
+    assert_eq!(keyword.recorder.calls(), 1);
+    assert_eq!(vector.recorder.calls(), 1);
+    assert_eq!(static_retriever.recorder.calls(), 1);
+
+    let started: Vec<Duration> = [
+        static_retriever.recorder.starts()[0],
+        keyword.recorder.starts()[0],
+        vector.recorder.starts()[0],
+    ]
+    .into();
+    let earliest = started.iter().min().unwrap();
+    let latest = started.iter().max().unwrap();
+    assert!(
+        *latest - *earliest < Duration::from_millis(80),
+        "expected static/keyword/vector retrieval to start in parallel, spread was {:?}",
+        *latest - *earliest
+    );
+}
+
+#[test]
 fn router_returns_grouped_static_and_dynamic_results() {
     let start = Arc::new(Instant::now());
     let static_retriever = StubStaticRetriever::new(
@@ -1008,6 +1064,7 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
                     source: SearchSource::Keyword,
                     chunk_source: ChunkSource::Dynamic,
                     corpus_type: None,
+                    citation: None,
                 },
                 SearchResult {
                     doc_id: "doc-2".into(),
@@ -1017,6 +1074,7 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
                     source: SearchSource::Keyword,
                     chunk_source: ChunkSource::Dynamic,
                     corpus_type: None,
+                    citation: None,
                 },
             ],
             Duration::from_millis(0),
@@ -1034,6 +1092,7 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
                     source: SearchSource::Vector,
                     chunk_source: ChunkSource::Dynamic,
                     corpus_type: None,
+                    citation: None,
                 },
                 SearchResult {
                     doc_id: "doc-4".into(),
@@ -1043,6 +1102,7 @@ fn router_overfetches_for_filtered_queries_before_applying_filters() {
                     source: SearchSource::Vector,
                     chunk_source: ChunkSource::Dynamic,
                     corpus_type: None,
+                    citation: None,
                 },
             ],
             Duration::from_millis(0),
@@ -1092,6 +1152,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                     source: SearchSource::Keyword,
                     chunk_source: ChunkSource::Dynamic,
                     corpus_type: None,
+                    citation: None,
                 }],
             ),
             (
@@ -1105,6 +1166,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                         source: SearchSource::Keyword,
                         chunk_source: ChunkSource::Dynamic,
                         corpus_type: None,
+                        citation: None,
                     },
                     SearchResult {
                         doc_id: "doc-2".into(),
@@ -1114,6 +1176,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                         source: SearchSource::Keyword,
                         chunk_source: ChunkSource::Dynamic,
                         corpus_type: None,
+                        citation: None,
                     },
                 ],
             ),
@@ -1135,6 +1198,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                     source: SearchSource::Vector,
                     chunk_source: ChunkSource::Dynamic,
                     corpus_type: None,
+                    citation: None,
                 }],
             ),
             (
@@ -1148,6 +1212,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                         source: SearchSource::Vector,
                         chunk_source: ChunkSource::Dynamic,
                         corpus_type: None,
+                        citation: None,
                     },
                     SearchResult {
                         doc_id: "doc-4".into(),
@@ -1157,6 +1222,7 @@ fn router_retries_filtered_queries_with_larger_retrieval_limit_until_top_k_is_sa
                         source: SearchSource::Vector,
                         chunk_source: ChunkSource::Dynamic,
                         corpus_type: None,
+                        citation: None,
                     },
                 ],
             ),
@@ -1210,6 +1276,7 @@ fn router_can_return_match_found_beyond_initial_top_k_window() {
                         source: SearchSource::Keyword,
                         chunk_source: ChunkSource::Dynamic,
                         corpus_type: None,
+                        citation: None,
                     }],
                 ),
                 (
@@ -1223,6 +1290,7 @@ fn router_can_return_match_found_beyond_initial_top_k_window() {
                             source: SearchSource::Keyword,
                             chunk_source: ChunkSource::Dynamic,
                             corpus_type: None,
+                            citation: None,
                         },
                         SearchResult {
                             doc_id: "doc-2".into(),
@@ -1232,6 +1300,7 @@ fn router_can_return_match_found_beyond_initial_top_k_window() {
                             source: SearchSource::Keyword,
                             chunk_source: ChunkSource::Dynamic,
                             corpus_type: None,
+                            citation: None,
                         },
                     ],
                 ),
@@ -1353,6 +1422,7 @@ fn router_applies_exact_match_filters_before_returning_results() {
             source: SearchSource::Keyword,
             chunk_source: ChunkSource::Dynamic,
             corpus_type: None,
+            citation: None,
         }],
         Duration::from_millis(0),
         start.clone(),
@@ -1372,6 +1442,7 @@ fn router_applies_exact_match_filters_before_returning_results() {
                 source: SearchSource::Vector,
                 chunk_source: ChunkSource::Dynamic,
                 corpus_type: None,
+                citation: None,
             },
             SearchResult {
                 doc_id: "doc-3".into(),
@@ -1384,6 +1455,7 @@ fn router_applies_exact_match_filters_before_returning_results() {
                 source: SearchSource::Vector,
                 chunk_source: ChunkSource::Dynamic,
                 corpus_type: None,
+                citation: None,
             },
         ],
         Duration::from_millis(0),
@@ -1446,6 +1518,7 @@ fn router_rejects_invalid_retriever_results_before_ranking() {
                 source: SearchSource::Keyword,
                 chunk_source: ChunkSource::Dynamic,
                 corpus_type: None,
+                citation: None,
             }],
             Duration::from_millis(0),
             start.clone(),

@@ -73,6 +73,7 @@ mod tests {
             source: SearchSource::Vector,
             chunk_source,
             corpus_type: ct,
+            citation: None,
         }
     }
 

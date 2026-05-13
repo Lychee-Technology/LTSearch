@@ -1,9 +1,14 @@
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 
 use aws_sdk_s3::Client as S3Client;
-use ltsearch::embedding::fixed_generator_from_env;
+use ltsearch::embedding::{
+    fixed_generator_from_env, provider_from_env_or_default, EmbeddingGenerator, EmbeddingProvider,
+};
+#[cfg(feature = "ltembed")]
+use ltsearch::embedding::{ltembed_config_from_env, LTEmbedEmbeddingGenerator};
 use ltsearch::index::{load_static_chunks_from_s3, StaticIndexBuilder, TurboBuildConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,12 +62,22 @@ async fn run(args: CliArgs) -> Result<String, String> {
     let chunks = load_static_chunks_from_s3(&s3, &config.sources)
         .await
         .map_err(|error| error.to_string())?;
-    let generator = fixed_generator_from_env(
-        "LTSEARCH_BUILD_FIXED_EMBEDDING",
-        Some("LTSEARCH_BUILD_EMBEDDING_DIM"),
+
+    let provider = provider_from_env_or_default(
+        "LTSEARCH_BUILD_EMBEDDING_PROVIDER",
+        EmbeddingProvider::Fixed,
     )
     .map_err(|error| error.to_string())?;
+    let generator = build_embedding_generator(provider)?;
+
+    let chunk_count = chunks.len();
+    eprintln!(
+        "static index builder: loading {} chunks with {:?} provider",
+        chunk_count, provider
+    );
+
     let embeddings = vec![None; chunks.len()];
+    let started = Instant::now();
     let result = StaticIndexBuilder::<()>::new()
         .build(
             Path::new(&args.output_dir),
@@ -72,10 +87,55 @@ async fn run(args: CliArgs) -> Result<String, String> {
         )
         .map_err(|error| error.to_string())?;
 
+    let elapsed = started.elapsed();
+    let dir = Path::new(&args.output_dir);
+    let mut total_size: u64 = 0;
+    for file_name in [
+        "centroids.bin",
+        "projection.bin",
+        "turbo_static.bin",
+        "turbo_static_meta.bin",
+        "turbo_static_text.bin",
+    ] {
+        let path = dir.join(file_name);
+        if let Ok(meta) = fs::metadata(&path) {
+            let size = meta.len();
+            total_size += size;
+            eprintln!("  {file_name}: {} bytes", size);
+        }
+    }
+
     Ok(format!(
-        "built {} static records to {} (dim={})",
-        result.record_count, args.output_dir, result.embedding_dim
+        "built {} static records (dim={}) in {:?}, total {} bytes",
+        result.record_count, result.embedding_dim, elapsed, total_size
     ))
+}
+
+fn build_embedding_generator(
+    provider: EmbeddingProvider,
+) -> Result<Box<dyn EmbeddingGenerator>, String> {
+    match provider {
+        EmbeddingProvider::Fixed => fixed_generator_from_env(
+            "LTSEARCH_BUILD_FIXED_EMBEDDING",
+            Some("LTSEARCH_BUILD_EMBEDDING_DIM"),
+        )
+        .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
+        .map_err(|error| error.to_string()),
+        #[cfg(feature = "ltembed")]
+        EmbeddingProvider::LTEmbed => ltembed_config_from_env(
+            "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
+            "LTSEARCH_BUILD_LTEMBED_CONFIG_PATH",
+            "LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH",
+            "LTSEARCH_BUILD_LTEMBED_POOLING",
+            "LTSEARCH_BUILD_LTEMBED_PREFIX",
+        )
+        .map_err(|error| error.to_string())
+        .and_then(|config| {
+            LTEmbedEmbeddingGenerator::from_config(&config)
+                .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
+                .map_err(|error| error.to_string())
+        }),
+    }
 }
 
 fn s3_client_from_env(config: &aws_config::SdkConfig) -> S3Client {

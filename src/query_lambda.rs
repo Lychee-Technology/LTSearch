@@ -185,7 +185,11 @@ fn bootstrap_error(message: impl Into<String>) -> QueryLambdaError {
 fn try_load_static_searcher(
     artifact_root: &Path,
 ) -> Result<Option<TurboQuantSearcher>, QueryLambdaError> {
-    let static_dir = artifact_root.join("static");
+    let static_dir = env::var("LTSEARCH_QUERY_STATIC_DIR")
+        .map(PathBuf::from)
+        .ok();
+    let static_dir = static_dir.as_deref().unwrap_or(artifact_root);
+    let static_dir = static_dir.join("static");
     if !static_dir.exists() {
         return Ok(None);
     }

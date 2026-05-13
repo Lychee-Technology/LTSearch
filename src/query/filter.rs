@@ -22,6 +22,7 @@ pub fn apply_filters(
 pub fn strip_metadata(mut results: Vec<SearchResult>) -> Vec<SearchResult> {
     for result in &mut results {
         result.metadata = None;
+        result.citation = None;
     }
 
     results

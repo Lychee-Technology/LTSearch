@@ -21,6 +21,7 @@ fn search_result_with_corpus_type_serializes() {
         source: SearchSource::Static,
         chunk_source: ltsearch::models::ChunkSource::Static,
         corpus_type: Some(CorpusType::Legal),
+        citation: None,
     };
 
     let json = serde_json::to_value(&result).unwrap();
@@ -138,6 +139,7 @@ fn static_search_result_validates_like_any_other() {
         source: SearchSource::Static,
         chunk_source: ltsearch::models::ChunkSource::Static,
         corpus_type: Some(CorpusType::Legal),
+        citation: None,
     };
     assert!(result.validate().is_ok());
 
