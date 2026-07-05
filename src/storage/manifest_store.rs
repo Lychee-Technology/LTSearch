@@ -2,21 +2,12 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use thiserror::Error;
 
 use crate::models::IndexManifest;
 
-use super::s3_paths::{version_manifest_key, INDEX_HEAD_KEY};
-
-const MIN_PLAUSIBLE_EPOCH_MILLIS: i64 = 1_000_000_000_000;
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ManifestHead {
-    pub version_id: u64,
-    pub manifest_path: String,
-    pub updated_at: i64,
-}
+use super::head::{HeadError, ManifestHead};
+use super::s3_paths::INDEX_HEAD_KEY;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveManifest {
@@ -76,32 +67,14 @@ impl ManifestStore for LocalManifestStore {
     fn load_head(&self) -> Result<ManifestHead, ManifestStoreError> {
         let path = self.head_path();
         let contents = read_to_string(&path, true)?;
-        let head: ManifestHead =
-            serde_json::from_str(&contents).map_err(|source| ManifestStoreError::InvalidHead {
-                message: source.to_string(),
-            })?;
-
-        if head.version_id == 0 {
-            return Err(ManifestStoreError::InvalidHead {
-                message: "version_id must be positive".into(),
-            });
-        }
-        if head.updated_at < MIN_PLAUSIBLE_EPOCH_MILLIS {
-            return Err(ManifestStoreError::InvalidHead {
-                message: "updated_at must be a plausible epoch millis value".into(),
-            });
-        }
-
-        let expected_manifest_path = version_manifest_key(head.version_id);
-        if head.manifest_path != expected_manifest_path {
-            return Err(ManifestStoreError::InvalidHead {
-                message: format!(
-                    "manifest_path must match version_id; expected {expected_manifest_path}"
-                ),
-            });
-        }
-
-        Ok(head)
+        ManifestHead::from_json(contents.as_bytes()).map_err(|error| {
+            ManifestStoreError::InvalidHead {
+                message: match error {
+                    HeadError::Parse { message } => message,
+                    other => other.to_string(),
+                },
+            }
+        })
     }
 
     fn load_active_manifest(&self) -> Result<ActiveManifest, ManifestStoreError> {

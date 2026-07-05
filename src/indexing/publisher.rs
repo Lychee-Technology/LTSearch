@@ -2,11 +2,11 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 
 use crate::error::{PublishError, ValidationError};
 use crate::models::IndexManifest;
-use crate::storage::{version_manifest_key, ManifestHead, INDEX_HEAD_KEY};
+use crate::storage::head::MIN_PLAUSIBLE_EPOCH_MILLIS;
+use crate::storage::{version_manifest_key, HeadError, ManifestHead, INDEX_HEAD_KEY};
 
 #[derive(Debug)]
 struct PreparedDirectoryUpload {
@@ -34,15 +34,26 @@ pub struct PublishResult {
     pub previous_version_id: Option<u64>,
 }
 
+/// An object read from publish storage together with the version tag
+/// (S3 ETag) that a subsequent conditional write must present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedObject {
+    pub bytes: Vec<u8>,
+    pub etag: String,
+}
+
 #[async_trait]
 pub trait PublishStorage: Clone + Send + Sync + 'static {
     async fn upload_directory(&self, key: &str, source: &Path) -> Result<(), PublishError>;
     async fn upload_file(&self, key: &str, source: &Path) -> Result<(), PublishError>;
-    async fn read(&self, key: &str) -> Result<Option<Vec<u8>>, PublishError>;
+    async fn read(&self, key: &str) -> Result<Option<VersionedObject>, PublishError>;
+    /// Atomically writes `new_value` if the object's current version tag
+    /// matches `expected_etag` (`None` = the object must not exist yet).
+    /// Returns `Ok(false)` when the precondition fails.
     async fn compare_and_swap(
         &self,
         key: &str,
-        expected: Option<&[u8]>,
+        expected_etag: Option<&str>,
         new_value: &[u8],
     ) -> Result<bool, PublishError>;
 }
@@ -68,8 +79,11 @@ where
         request.manifest.validate()?;
         validate_updated_at(request.updated_at)?;
 
-        let current_head_bytes = self.storage.read(INDEX_HEAD_KEY).await?;
-        let current_head = current_head_bytes.as_deref().map(parse_head).transpose()?;
+        let current_head_object = self.storage.read(INDEX_HEAD_KEY).await?;
+        let current_head = current_head_object
+            .as_ref()
+            .map(|object| parse_head(&object.bytes))
+            .transpose()?;
 
         validate_publish_version(request.manifest.version_id)?;
 
@@ -124,33 +138,21 @@ where
             .upload_file(&manifest_key, &manifest_source)
             .await?;
 
-        let new_head = HeadDocument {
-            version_id: request.manifest.version_id,
-            manifest_path: manifest_key,
-            updated_at: request.updated_at,
-        };
-        let new_head_bytes =
-            serde_json::to_vec_pretty(&new_head).map_err(|source| PublishError::Operation {
-                message: format!("failed to serialize manifest head: {source}"),
-            })?;
+        let new_head = ManifestHead::new(request.manifest.version_id, request.updated_at);
+        let new_head_bytes = new_head.to_json_pretty();
 
         let swapped = self
             .storage
             .compare_and_swap(
                 INDEX_HEAD_KEY,
-                current_head_bytes.as_deref(),
+                current_head_object
+                    .as_ref()
+                    .map(|object| object.etag.as_str()),
                 &new_head_bytes,
             )
             .await?;
         if !swapped {
-            let observed = self
-                .storage
-                .read(INDEX_HEAD_KEY)
-                .await?
-                .as_deref()
-                .map(parse_head)
-                .transpose()?
-                .map(|head| head.version_id);
+            let observed = self.observed_head_version().await?;
             return Err(PublishError::Operation {
                 message: format!(
                     "publish conflict: active version changed during _head update (expected {:?}, observed {:?})",
@@ -169,8 +171,11 @@ where
         validate_publish_version(request.target_version_id)?;
         validate_updated_at(request.updated_at)?;
 
-        let current_head_bytes = self.storage.read(INDEX_HEAD_KEY).await?;
-        let current_head = current_head_bytes.as_deref().map(parse_head).transpose()?;
+        let current_head_object = self.storage.read(INDEX_HEAD_KEY).await?;
+        let current_head = current_head_object
+            .as_ref()
+            .map(|object| parse_head(&object.bytes))
+            .transpose()?;
 
         if current_head.as_ref().map(|head| head.version_id) != request.expected_current_version {
             return Err(PublishError::Operation {
@@ -183,46 +188,35 @@ where
         }
 
         let target_manifest_key = version_manifest_key(request.target_version_id);
-        let target_manifest_bytes =
-            self.storage
-                .read(&target_manifest_key)
-                .await?
-                .ok_or_else(|| PublishError::Operation {
-                    message: format!("rollback target manifest missing: {target_manifest_key}"),
-                })?;
+        let target_manifest_bytes = self
+            .storage
+            .read(&target_manifest_key)
+            .await?
+            .map(|object| object.bytes)
+            .ok_or_else(|| PublishError::Operation {
+                message: format!("rollback target manifest missing: {target_manifest_key}"),
+            })?;
         validate_stored_manifest(
             &target_manifest_key,
             &target_manifest_bytes,
             request.target_version_id,
         )?;
 
-        let new_head = HeadDocument {
-            version_id: request.target_version_id,
-            manifest_path: target_manifest_key,
-            updated_at: request.updated_at,
-        };
-        let new_head_bytes =
-            serde_json::to_vec_pretty(&new_head).map_err(|source| PublishError::Operation {
-                message: format!("failed to serialize manifest head: {source}"),
-            })?;
+        let new_head = ManifestHead::new(request.target_version_id, request.updated_at);
+        let new_head_bytes = new_head.to_json_pretty();
 
         let swapped = self
             .storage
             .compare_and_swap(
                 INDEX_HEAD_KEY,
-                current_head_bytes.as_deref(),
+                current_head_object
+                    .as_ref()
+                    .map(|object| object.etag.as_str()),
                 &new_head_bytes,
             )
             .await?;
         if !swapped {
-            let observed = self
-                .storage
-                .read(INDEX_HEAD_KEY)
-                .await?
-                .as_deref()
-                .map(parse_head)
-                .transpose()?
-                .map(|head| head.version_id);
+            let observed = self.observed_head_version().await?;
             return Err(PublishError::Operation {
                 message: format!(
                     "rollback conflict: active version changed during _head update (expected {:?}, observed {:?})",
@@ -236,36 +230,40 @@ where
             previous_version_id: current_head.map(|head| head.version_id),
         })
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct HeadDocument {
-    version_id: u64,
-    manifest_path: String,
-    updated_at: i64,
+    async fn observed_head_version(&self) -> Result<Option<u64>, PublishError> {
+        Ok(self
+            .storage
+            .read(INDEX_HEAD_KEY)
+            .await?
+            .map(|object| parse_head(&object.bytes))
+            .transpose()?
+            .map(|head| head.version_id))
+    }
 }
 
 fn parse_head(bytes: &[u8]) -> Result<ManifestHead, PublishError> {
-    let head = serde_json::from_slice::<ManifestHead>(bytes).map_err(|source| {
-        PublishError::Operation {
-            message: format!("failed to parse current manifest head: {source}"),
+    ManifestHead::from_json(bytes).map_err(|error| match error {
+        HeadError::Parse { message } => PublishError::Operation {
+            message: format!("failed to parse current manifest head: {message}"),
+        },
+        HeadError::VersionMustBePositive => {
+            PublishError::Validation(ValidationError::InvalidValue {
+                field: "version_id",
+            })
         }
-    })?;
-
-    if head.version_id == 0 {
-        return Err(PublishError::Validation(ValidationError::InvalidValue {
-            field: "version_id",
-        }));
-    }
-    validate_updated_at(head.updated_at)?;
-    if head.manifest_path != version_manifest_key(head.version_id) {
-        return Err(PublishError::Validation(ValidationError::Mismatch {
-            field: "manifest_path",
-            expected: "version_manifest_key(version_id)",
-        }));
-    }
-
-    Ok(head)
+        HeadError::ImplausibleUpdatedAt => {
+            PublishError::Validation(ValidationError::InvalidValue {
+                field: "updated_at",
+            })
+        }
+        HeadError::ManifestPathMismatch { .. } => {
+            PublishError::Validation(ValidationError::Mismatch {
+                field: "manifest_path",
+                expected: "version_manifest_key(version_id)",
+            })
+        }
+    })
 }
 
 fn s3_key(value: &str) -> Result<String, PublishError> {
@@ -359,7 +357,7 @@ fn validate_relative_storage_key(key: &str) -> Result<(), PublishError> {
 }
 
 fn validate_updated_at(updated_at: i64) -> Result<(), PublishError> {
-    if updated_at < 1_000_000_000_000 {
+    if updated_at < MIN_PLAUSIBLE_EPOCH_MILLIS {
         return Err(PublishError::Validation(ValidationError::InvalidValue {
             field: "updated_at",
         }));
