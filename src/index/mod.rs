@@ -7,8 +7,6 @@ pub mod static_builder;
 pub mod static_source;
 pub mod turbo_codec;
 
-pub struct ModuleBoundary;
-
 pub use assets::{AssetError, CentroidTable, ProjectionMatrix};
 pub use header::{KnownRecordLayout, TurboHeader, TURBO_MAGIC};
 pub use meta::{CorpusTypeId, MetaRecord, META_RECORD_SIZE};

@@ -1,8 +1,6 @@
 pub mod manifest_store;
 pub mod s3_paths;
 
-pub struct ModuleBoundary;
-
 pub use manifest_store::{
     ActiveManifest, LocalManifestStore, ManifestHead, ManifestStore, ManifestStoreError,
 };

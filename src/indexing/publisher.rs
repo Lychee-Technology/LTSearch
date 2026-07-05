@@ -515,17 +515,3 @@ fn validate_directory_tree_within_root(
 
     Ok(())
 }
-
-#[allow(dead_code)]
-fn ensure_file_exists(path: &Path) -> Result<(), PublishError> {
-    let metadata = fs::metadata(path).map_err(|source| PublishError::Operation {
-        message: format!("missing publish source {}: {source}", path.display()),
-    })?;
-    if !metadata.is_file() {
-        return Err(PublishError::Operation {
-            message: format!("publish source is not a file: {}", path.display()),
-        });
-    }
-
-    Ok(())
-}

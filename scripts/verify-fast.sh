@@ -18,7 +18,6 @@ test_targets=(
   router_test
   vector_searcher_test
   wal_test
-  workspace_bootstrap_test
   write_api_test
   write_lambda_test
 )

@@ -6,8 +6,6 @@ pub mod router;
 pub mod turbo_searcher;
 pub mod vector_searcher;
 
-pub struct ModuleBoundary;
-
 pub use context_builder::ContextBuilder;
 pub use keyword_searcher::KeywordSearcher;
 pub use ranker::HybridRanker;

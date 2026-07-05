@@ -1,7 +1,5 @@
 use thiserror::Error;
 
-pub struct ModuleBoundary;
-
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ValidationError {
     #[error("{field} is required")]
