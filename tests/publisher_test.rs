@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use ltsearch::error::PublishError;
 use ltsearch::indexing::{
-    IndexPublisher, PublishRequest, PublishStorage, RollbackRequest, VersionedObject,
+    IndexPublisher, PublishRequest, PublishStorage, RollbackRequest, UploadMode, VersionedObject,
 };
 use ltsearch::models::{IndexManifest, ShardManifest};
 use ltsearch::storage::{version_manifest_key, INDEX_HEAD_KEY};
@@ -82,7 +82,12 @@ impl RecordingPublishStorage {
 
 #[async_trait]
 impl PublishStorage for RecordingPublishStorage {
-    async fn upload_directory(&self, key: &str, source: &Path) -> Result<(), PublishError> {
+    async fn upload_directory(
+        &self,
+        key: &str,
+        source: &Path,
+        mode: UploadMode,
+    ) -> Result<(), PublishError> {
         self.calls
             .lock()
             .unwrap()
@@ -109,19 +114,32 @@ impl PublishStorage for RecordingPublishStorage {
                     message: format!("failed to inspect {}: {source_error}", path.display()),
                 })?;
             if file_type.is_dir() {
-                self.upload_directory(&child_key, &path).await?;
+                self.upload_directory(&child_key, &path, mode).await?;
             } else if file_type.is_file() {
-                self.upload_file(&child_key, &path).await?;
+                self.upload_file(&child_key, &path, mode).await?;
             }
         }
         Ok(())
     }
 
-    async fn upload_file(&self, key: &str, source: &Path) -> Result<(), PublishError> {
+    async fn upload_file(
+        &self,
+        key: &str,
+        source: &Path,
+        mode: UploadMode,
+    ) -> Result<(), PublishError> {
         self.calls
             .lock()
             .unwrap()
             .push(format!("upload_file:{key}"));
+
+        if mode == UploadMode::CreateOnly && self.file_bytes(key).is_some() {
+            return Err(PublishError::Operation {
+                message: format!(
+                    "refusing to overwrite existing version artifact {key}: version artifacts are immutable"
+                ),
+            });
+        }
 
         let bytes = fs::read(source).map_err(|source_error| PublishError::Operation {
             message: format!("failed to read {}: {source_error}", source.display()),
@@ -357,6 +375,61 @@ async fn publisher_conditionally_updates_head_with_current_head_contents() {
     assert_eq!(
         storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
         head_json(9, 1_700_000_000_500)
+    );
+}
+
+#[tokio::test]
+async fn publisher_publishes_incrementally_without_expected_current_version() {
+    let build_root = temp_fixture_dir("publisher-incremental-none");
+    let manifest = sample_manifest(9);
+    create_source_build(&build_root, &manifest);
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(8, 1_700_000_000_100));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let published = publisher
+        .publish(&PublishRequest {
+            manifest,
+            expected_current_version: None,
+            updated_at: 1_700_000_000_500,
+        })
+        .await
+        .expect("publish without an expected current version must succeed over an existing head");
+
+    assert_eq!(published.activated_version_id, 9);
+    assert_eq!(published.previous_version_id, Some(8));
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(9, 1_700_000_000_500)
+    );
+}
+
+#[tokio::test]
+async fn publisher_rejects_non_monotonic_version_id() {
+    let build_root = temp_fixture_dir("publisher-non-monotonic");
+    let manifest = sample_manifest(8);
+    create_source_build(&build_root, &manifest);
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(8, 1_700_000_000_100));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let error = publisher
+        .publish(&PublishRequest {
+            manifest,
+            expected_current_version: None,
+            updated_at: 1_700_000_000_500,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("must be greater than active version"));
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(8, 1_700_000_000_100)
     );
 }
 

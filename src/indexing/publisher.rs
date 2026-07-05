@@ -17,6 +17,10 @@ struct PreparedDirectoryUpload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishRequest {
     pub manifest: IndexManifest,
+    /// `Some(v)`: fail unless the active version is exactly `v` (explicit
+    /// optimistic check). `None`: publish on top of whatever is active —
+    /// the ETag CAS still guards the pointer swap, and the new version must
+    /// be greater than the active one.
     pub expected_current_version: Option<u64>,
     pub updated_at: i64,
 }
@@ -24,6 +28,9 @@ pub struct PublishRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackRequest {
     pub target_version_id: u64,
+    /// Rollback callers must know what they are rolling back from:
+    /// `Some(v)` requires the active version to be exactly `v`; `None`
+    /// requires that no head exists.
     pub expected_current_version: Option<u64>,
     pub updated_at: i64,
 }
@@ -42,10 +49,33 @@ pub struct VersionedObject {
     pub etag: String,
 }
 
+/// How an upload treats an already-existing object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadMode {
+    /// The object must not already exist (S3 `If-None-Match: *`).
+    /// Version-scoped artifacts are immutable: a concurrent builder that
+    /// lost the version race fails here instead of overwriting the
+    /// activated version's objects. A retry of a partially-uploaded
+    /// version must therefore use a fresh version_id.
+    CreateOnly,
+    /// Unconditional overwrite, for rolling assets such as `static/`.
+    Overwrite,
+}
+
 #[async_trait]
 pub trait PublishStorage: Clone + Send + Sync + 'static {
-    async fn upload_directory(&self, key: &str, source: &Path) -> Result<(), PublishError>;
-    async fn upload_file(&self, key: &str, source: &Path) -> Result<(), PublishError>;
+    async fn upload_directory(
+        &self,
+        key: &str,
+        source: &Path,
+        mode: UploadMode,
+    ) -> Result<(), PublishError>;
+    async fn upload_file(
+        &self,
+        key: &str,
+        source: &Path,
+        mode: UploadMode,
+    ) -> Result<(), PublishError>;
     async fn read(&self, key: &str) -> Result<Option<VersionedObject>, PublishError>;
     /// Atomically writes `new_value` if the object's current version tag
     /// matches `expected_etag` (`None` = the object must not exist yet).
@@ -87,14 +117,27 @@ where
 
         validate_publish_version(request.manifest.version_id)?;
 
-        if current_head.as_ref().map(|head| head.version_id) != request.expected_current_version {
-            return Err(PublishError::Operation {
-                message: format!(
-                    "publish conflict: expected current version {:?}, found {:?}",
-                    request.expected_current_version,
-                    current_head.as_ref().map(|head| head.version_id)
-                ),
-            });
+        if let Some(expected) = request.expected_current_version {
+            if current_head.as_ref().map(|head| head.version_id) != Some(expected) {
+                return Err(PublishError::Operation {
+                    message: format!(
+                        "publish conflict: expected current version {:?}, found {:?}",
+                        request.expected_current_version,
+                        current_head.as_ref().map(|head| head.version_id)
+                    ),
+                });
+            }
+        }
+
+        if let Some(head) = &current_head {
+            if request.manifest.version_id <= head.version_id {
+                return Err(PublishError::Operation {
+                    message: format!(
+                        "publish conflict: version_id {} must be greater than active version {}",
+                        request.manifest.version_id, head.version_id
+                    ),
+                });
+            }
         }
 
         let manifest_key = version_manifest_key(request.manifest.version_id);
@@ -124,18 +167,18 @@ where
 
         for upload in &directory_uploads {
             self.storage
-                .upload_directory(&upload.key, &upload.source)
+                .upload_directory(&upload.key, &upload.source, UploadMode::CreateOnly)
                 .await?;
         }
 
         if let Some(static_source) = static_artifact_source(&self.artifact_root)? {
             self.storage
-                .upload_directory("static", &static_source)
+                .upload_directory("static", &static_source, UploadMode::Overwrite)
                 .await?;
         }
 
         self.storage
-            .upload_file(&manifest_key, &manifest_source)
+            .upload_file(&manifest_key, &manifest_source, UploadMode::CreateOnly)
             .await?;
 
         let new_head = ManifestHead::new(request.manifest.version_id, request.updated_at);

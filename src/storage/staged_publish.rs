@@ -65,6 +65,80 @@ impl StagedDir {
         remove_dir_all_if_exists(&self.root)
     }
 
+    /// Replaces `destination` with the staged directory as a whole: the old
+    /// directory (if any) is renamed aside as a backup, the staged directory
+    /// renamed into place, then the backup removed. If moving the staged
+    /// directory fails, the backup is restored, so the previous contents are
+    /// never left partially deleted. The staging directory must live on the
+    /// same filesystem as `destination` (create it under the same parent).
+    pub(crate) fn commit_replace_dir(self, destination: &Path) -> Result<(), IndexError> {
+        let parent = destination.parent().ok_or_else(|| IndexError::Operation {
+            message: format!("path {} has no parent", destination.display()),
+        })?;
+        let name = destination
+            .file_name()
+            .ok_or_else(|| IndexError::Operation {
+                message: format!("path {} has no file name", destination.display()),
+            })?
+            .to_string_lossy()
+            .into_owned();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|source| IndexError::Operation {
+                message: format!("failed to calculate backup timestamp: {source}"),
+            })?
+            .as_nanos();
+        let backup = parent.join(format!(".{name}-backup-{}-{nonce}", std::process::id()));
+
+        let had_previous = destination.exists();
+        if had_previous {
+            if let Err(error) = fs::rename(destination, &backup) {
+                let wrapped = IndexError::Operation {
+                    message: format!(
+                        "failed to move previous directory {} aside: {error}",
+                        destination.display()
+                    ),
+                };
+                return Err(append_cleanup_failure(
+                    wrapped,
+                    remove_dir_all_if_exists(&self.root),
+                ));
+            }
+        }
+
+        if let Err(error) = fs::rename(&self.root, destination) {
+            let wrapped = IndexError::Operation {
+                message: format!(
+                    "failed to publish staged artifact from {} to {}: {error}",
+                    self.root.display(),
+                    destination.display()
+                ),
+            };
+            let mut cleanups = Vec::new();
+            if had_previous {
+                cleanups.push(fs::rename(&backup, destination).map_err(|restore_error| {
+                    IndexError::Operation {
+                        message: format!(
+                            "failed to restore previous directory {}: {restore_error}",
+                            destination.display()
+                        ),
+                    }
+                }));
+            }
+            cleanups.push(remove_dir_all_if_exists(&self.root));
+            return Err(append_cleanup_failure(
+                wrapped,
+                combine_cleanup_results(cleanups),
+            ));
+        }
+
+        if had_previous {
+            remove_dir_all_if_exists(&backup)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Discards the staging directory without publishing anything.
     pub(crate) fn abort(self) -> Result<(), IndexError> {
         remove_dir_all_if_exists(&self.root)

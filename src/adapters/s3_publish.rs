@@ -7,7 +7,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 
 use crate::error::PublishError;
-use crate::indexing::{PublishStorage, VersionedObject};
+use crate::indexing::{PublishStorage, UploadMode, VersionedObject};
 
 #[derive(Clone)]
 pub struct AwsPublishStorage {
@@ -34,7 +34,12 @@ impl AwsPublishStorage {
 
 #[async_trait]
 impl PublishStorage for AwsPublishStorage {
-    async fn upload_directory(&self, key: &str, source: &Path) -> Result<(), PublishError> {
+    async fn upload_directory(
+        &self,
+        key: &str,
+        source: &Path,
+        mode: UploadMode,
+    ) -> Result<(), PublishError> {
         if !source.is_dir() {
             return Err(PublishError::Operation {
                 message: format!("missing source directory {}", source.display()),
@@ -52,32 +57,48 @@ impl PublishStorage for AwsPublishStorage {
             let child_key = format!("{key}/{name}");
 
             if path.is_dir() {
-                self.upload_directory(&child_key, &path).await?;
+                self.upload_directory(&child_key, &path, mode).await?;
             } else {
-                self.upload_file(&child_key, &path).await?;
+                self.upload_file(&child_key, &path, mode).await?;
             }
         }
 
         Ok(())
     }
 
-    async fn upload_file(&self, key: &str, source: &Path) -> Result<(), PublishError> {
+    async fn upload_file(
+        &self,
+        key: &str,
+        source: &Path,
+        mode: UploadMode,
+    ) -> Result<(), PublishError> {
         let bytes = fs::read(source).map_err(|error| PublishError::Operation {
             message: format!("failed to read {}: {error}", source.display()),
         })?;
 
-        self.client
+        let mut request = self
+            .client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
-            .body(ByteStream::from(bytes))
-            .send()
-            .await
-            .map_err(|error| PublishError::Operation {
-                message: format!("failed to upload {key}: {error}"),
-            })?;
+            .body(ByteStream::from(bytes));
+        if mode == UploadMode::CreateOnly {
+            request = request.if_none_match("*");
+        }
 
-        Ok(())
+        match request.send().await {
+            Ok(_) => Ok(()),
+            Err(error) if mode == UploadMode::CreateOnly && is_precondition_failure(&error) => {
+                Err(PublishError::Operation {
+                    message: format!(
+                        "refusing to overwrite existing version artifact {key}: version artifacts are immutable"
+                    ),
+                })
+            }
+            Err(error) => Err(PublishError::Operation {
+                message: format!("failed to upload {key}: {error}"),
+            }),
+        }
     }
 
     async fn read(&self, key: &str) -> Result<Option<VersionedObject>, PublishError> {

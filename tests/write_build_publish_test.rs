@@ -127,7 +127,11 @@ async fn publish_storage_uploads_and_reads_manifest_bytes() {
     std::fs::write(&manifest_path, b"{}\n").unwrap();
 
     storage
-        .upload_file("index/versions/7/manifest.json", &manifest_path)
+        .upload_file(
+            "index/versions/7/manifest.json",
+            &manifest_path,
+            ltsearch::indexing::UploadMode::CreateOnly,
+        )
         .await
         .unwrap();
     assert!(storage
@@ -135,6 +139,56 @@ async fn publish_storage_uploads_and_reads_manifest_bytes() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn publish_storage_create_only_upload_refuses_to_overwrite() {
+    let harness = MotoHarness::new("publish-storage-create-only").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+    let artifact_root = harness.new_artifact_root();
+    let file_path = artifact_root.join("shard.bin");
+    std::fs::create_dir_all(&artifact_root).unwrap();
+    std::fs::write(&file_path, b"v1").unwrap();
+
+    storage
+        .upload_file(
+            "lance/v7/shard_0/shard.bin",
+            &file_path,
+            ltsearch::indexing::UploadMode::CreateOnly,
+        )
+        .await
+        .unwrap();
+
+    std::fs::write(&file_path, b"v2").unwrap();
+    let error = storage
+        .upload_file(
+            "lance/v7/shard_0/shard.bin",
+            &file_path,
+            ltsearch::indexing::UploadMode::CreateOnly,
+        )
+        .await
+        .expect_err("expected CreateOnly upload over an existing object to fail");
+    assert!(error
+        .to_string()
+        .contains("version artifacts are immutable"));
+    assert_eq!(
+        storage
+            .read("lance/v7/shard_0/shard.bin")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"v1"
+    );
+
+    storage
+        .upload_file(
+            "lance/v7/shard_0/shard.bin",
+            &file_path,
+            ltsearch::indexing::UploadMode::Overwrite,
+        )
+        .await
+        .expect("expected Overwrite upload to succeed");
 }
 
 #[tokio::test]
@@ -811,6 +865,7 @@ impl ltsearch::indexing::PublishStorage for TestPublishStorage {
         &self,
         _key: &str,
         _source: &std::path::Path,
+        _mode: ltsearch::indexing::UploadMode,
     ) -> Result<(), ltsearch::error::PublishError> {
         Ok(())
     }
@@ -819,6 +874,7 @@ impl ltsearch::indexing::PublishStorage for TestPublishStorage {
         &self,
         _key: &str,
         _source: &std::path::Path,
+        _mode: ltsearch::indexing::UploadMode,
     ) -> Result<(), ltsearch::error::PublishError> {
         Ok(())
     }
