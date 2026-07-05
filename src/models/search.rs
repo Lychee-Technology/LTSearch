@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::error::ValidationError;
 
 const QUERY_MAX_CHARS: usize = 1_000;
-const TOP_K_MAX: usize = 100;
+pub const TOP_K_MAX: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]

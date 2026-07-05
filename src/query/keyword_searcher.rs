@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use tantivy::collector::TopDocs;
@@ -13,11 +13,13 @@ use crate::models::{
 };
 use crate::storage::{ActiveManifest, ManifestStore};
 
+use super::retrieval_common::{dedupe_best_by_doc_id, resolve_artifact_path, validate_top_k};
+
 const DOC_ID_FIELD: &str = "doc_id";
 const TEXT_FIELD: &str = "text";
 const METADATA_FIELD: &str = "metadata";
 const QUERY_MAX_CHARS: usize = 1_000;
-const TOP_K_MAX: usize = 100;
+const ARTIFACT_KIND: &str = "Tantivy";
 
 #[derive(Debug, Clone)]
 pub struct KeywordSearcher<M> {
@@ -97,7 +99,8 @@ where
         query: &str,
         top_k: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        let index_path = resolve_artifact_path(&self.artifact_root, &shard.tantivy_path)?;
+        let index_path =
+            resolve_artifact_path(&self.artifact_root, &shard.tantivy_path, ARTIFACT_KIND)?;
         let index = Index::open_in_dir(&index_path).map_err(|source| SearchError::Execution {
             message: format!(
                 "failed to open Tantivy index at {}: {source}",
@@ -158,58 +161,6 @@ where
     }
 }
 
-fn resolve_artifact_path(artifact_root: &Path, tantivy_path: &str) -> Result<PathBuf, SearchError> {
-    let (_, key) = tantivy_path
-        .strip_prefix("s3://")
-        .and_then(|value| value.split_once('/'))
-        .ok_or_else(|| SearchError::Execution {
-            message: format!("invalid Tantivy artifact path: {tantivy_path}"),
-        })?;
-
-    let key_path = Path::new(key);
-    if key_path.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return Err(SearchError::Execution {
-            message: format!("invalid Tantivy artifact path: {tantivy_path}"),
-        });
-    }
-
-    let canonical_artifact_root =
-        artifact_root
-            .canonicalize()
-            .map_err(|source| SearchError::Execution {
-                message: format!(
-                    "failed to canonicalize artifact root {}: {source}",
-                    artifact_root.display()
-                ),
-            })?;
-    let resolved_path = artifact_root.join(key);
-    let canonical_resolved_path =
-        resolved_path
-            .canonicalize()
-            .map_err(|source| SearchError::Execution {
-                message: format!(
-                    "failed to canonicalize Tantivy artifact path {}: {source}",
-                    resolved_path.display()
-                ),
-            })?;
-
-    if !canonical_resolved_path.starts_with(canonical_artifact_root) {
-        return Err(SearchError::Execution {
-            message: format!(
-                "resolved Tantivy artifact path escapes artifact root: {}",
-                canonical_resolved_path.display()
-            ),
-        });
-    }
-
-    Ok(canonical_resolved_path)
-}
-
 fn dedupe_top_docs(
     searcher: &tantivy::Searcher,
     top_docs: Vec<(f32, DocAddress)>,
@@ -218,37 +169,20 @@ fn dedupe_top_docs(
     metadata_field: Option<tantivy::schema::Field>,
     top_k: usize,
 ) -> Result<Vec<SearchResult>, SearchError> {
-    let mut deduped: HashMap<String, SearchResult> = HashMap::new();
+    let mut results = Vec::with_capacity(top_docs.len());
 
     for (score, address) in top_docs {
-        let result = build_search_result(
+        results.push(build_search_result(
             searcher,
             address,
             doc_id_field,
             text_field,
             metadata_field,
             score,
-        )?;
-
-        match deduped.get(&result.doc_id) {
-            Some(existing) if existing.score >= result.score => {}
-            _ => {
-                deduped.insert(result.doc_id.clone(), result);
-            }
-        }
+        )?);
     }
 
-    let mut results: Vec<_> = deduped.into_values().collect();
-    results.sort_by(|left, right| {
-        right
-            .score
-            .partial_cmp(&left.score)
-            .unwrap()
-            .then_with(|| left.doc_id.cmp(&right.doc_id))
-    });
-    results.truncate(top_k);
-
-    Ok(results)
+    Ok(dedupe_best_by_doc_id(results, top_k))
 }
 
 fn validate_query(query: &str) -> Result<(), SearchError> {
@@ -263,18 +197,6 @@ fn validate_query(query: &str) -> Result<(), SearchError> {
             field: "query",
             min: 1,
             max: QUERY_MAX_CHARS,
-        }));
-    }
-
-    Ok(())
-}
-
-fn validate_top_k(top_k: usize) -> Result<(), SearchError> {
-    if top_k == 0 || top_k > TOP_K_MAX {
-        return Err(SearchError::Validation(ValidationError::RangeOutOfRange {
-            field: "top_k",
-            min: 1,
-            max: TOP_K_MAX as u64,
         }));
     }
 

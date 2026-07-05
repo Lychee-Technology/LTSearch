@@ -1,31 +1,25 @@
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use arrow_array::{Array, Float32Array, Float64Array, RecordBatch, StringArray};
 use arrow_schema::DataType;
 use futures::TryStreamExt;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::DistanceType;
-use serde_json::Value;
 
 use crate::error::{SearchError, ValidationError};
-use crate::models::{
-    CacheStats, ChunkSource, Citation, SearchRequest, SearchResult, SearchSource, ShardManifest,
-};
+use crate::models::{CacheStats, SearchRequest, SearchResult, ShardManifest};
 use crate::storage::{ActiveManifest, ManifestStore};
 
+use super::lance_cache::{inspect_path_tree_within_artifact_root, LocalLanceCache};
+use super::lance_decode::decode_lancedb_batches;
+use super::retrieval_common::{
+    dedupe_best_by_doc_id, resolve_artifact_path, validate_query_embedding, validate_top_k,
+};
+
 const LANCE_TABLE_NAME: &str = "documents";
-const DISTANCE_COLUMN_NAME: &str = "_distance";
-const DOC_ID_COLUMN_NAME: &str = "doc_id";
-const TEXT_COLUMN_NAME: &str = "text";
-const METADATA_COLUMN_NAME: &str = "metadata";
 const EMBEDDING_COLUMN_NAME: &str = "embedding";
-const TOP_K_MAX: usize = 100;
+const ARTIFACT_KIND: &str = "local LanceDB";
 
 #[derive(Debug, Clone)]
 pub struct VectorSearcher<M> {
@@ -94,30 +88,18 @@ where
 
         self.begin_version_attempt(active_manifest.head.version_id);
 
-        let mut deduped: HashMap<String, SearchResult> = HashMap::new();
-
+        let mut all_results = Vec::new();
         for shard in &active_manifest.manifest.shards {
-            for result in self.query_shard(
+            all_results.extend(self.query_shard(
                 shard,
                 active_manifest.head.version_id,
                 query_embedding,
                 active_manifest.manifest.embedding_dim,
                 top_k,
-            )? {
-                match deduped.get(&result.doc_id) {
-                    Some(existing) if existing.score >= result.score => {}
-                    _ => {
-                        deduped.insert(result.doc_id.clone(), result);
-                    }
-                }
-            }
+            )?);
         }
 
-        let mut results: Vec<_> = deduped.into_values().collect();
-        results.sort_by(compare_search_results);
-        results.truncate(top_k);
-
-        Ok(results)
+        Ok(dedupe_best_by_doc_id(all_results, top_k))
     }
 
     pub fn search_request(
@@ -149,7 +131,8 @@ where
         embedding_dim: usize,
         top_k: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        let shard_path = resolve_local_lancedb_path(&self.artifact_root, &shard.lance_path)?;
+        let shard_path =
+            resolve_artifact_path(&self.artifact_root, &shard.lance_path, ARTIFACT_KIND)?;
         let shard_size = self.shard_size_bytes(version_id, &shard_path)?;
 
         let shard_path_for_query = shard_path.clone();
@@ -317,325 +300,8 @@ where
     }
 }
 
-#[derive(Debug, Default)]
-struct LocalLanceCache {
-    seen_shards: HashMap<PathBuf, u64>,
-    hit_count: u64,
-    miss_count: u64,
-    attempted_version: Option<u64>,
-    current_version: Option<u64>,
-    bytes_used: u64,
-}
-
-impl LocalLanceCache {
-    fn reset_for_attempt(&mut self, version_id: u64) {
-        self.seen_shards.clear();
-        self.hit_count = 0;
-        self.miss_count = 0;
-        self.bytes_used = 0;
-        self.attempted_version = Some(version_id);
-        self.current_version = None;
-    }
-
-    fn publish_version(&mut self, version_id: u64) {
-        self.attempted_version = Some(version_id);
-        self.current_version = Some(version_id);
-    }
-}
-
-fn validate_query_embedding(query_embedding: &[f32]) -> Result<(), SearchError> {
-    if query_embedding.is_empty() {
-        return Err(SearchError::Validation(ValidationError::Required {
-            field: "query_embedding",
-        }));
-    }
-    if query_embedding.iter().any(|value| !value.is_finite()) {
-        return Err(SearchError::Validation(ValidationError::InvalidValue {
-            field: "query_embedding",
-        }));
-    }
-
-    Ok(())
-}
-
-fn validate_top_k(top_k: usize) -> Result<(), SearchError> {
-    if top_k == 0 || top_k > TOP_K_MAX {
-        return Err(SearchError::Validation(ValidationError::RangeOutOfRange {
-            field: "top_k",
-            min: 1,
-            max: TOP_K_MAX as u64,
-        }));
-    }
-
-    Ok(())
-}
-
-fn compare_search_results(left: &SearchResult, right: &SearchResult) -> Ordering {
-    right
-        .score
-        .total_cmp(&left.score)
-        .then_with(|| left.doc_id.cmp(&right.doc_id))
-}
-
-fn resolve_local_lancedb_path(
-    artifact_root: &Path,
-    artifact_path: &str,
-) -> Result<PathBuf, SearchError> {
-    let (_, key) = artifact_path
-        .strip_prefix("s3://")
-        .and_then(|value| value.split_once('/'))
-        .ok_or_else(|| SearchError::Execution {
-            message: format!("invalid local LanceDB artifact path: {artifact_path}"),
-        })?;
-
-    let key_path = Path::new(key);
-    if key_path.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return Err(SearchError::Execution {
-            message: format!("invalid local LanceDB artifact path: {artifact_path}"),
-        });
-    }
-
-    let canonical_artifact_root =
-        artifact_root
-            .canonicalize()
-            .map_err(|source| SearchError::Execution {
-                message: format!(
-                    "failed to canonicalize artifact root {}: {source}",
-                    artifact_root.display()
-                ),
-            })?;
-    let resolved_path = artifact_root.join(key);
-    let canonical_resolved_path =
-        resolved_path
-            .canonicalize()
-            .map_err(|source| SearchError::Execution {
-                message: format!(
-                    "failed to canonicalize local LanceDB artifact path {}: {source}",
-                    resolved_path.display()
-                ),
-            })?;
-
-    if !canonical_resolved_path.starts_with(canonical_artifact_root) {
-        return Err(SearchError::Execution {
-            message: format!(
-                "resolved local LanceDB artifact path escapes artifact root: {}",
-                canonical_resolved_path.display()
-            ),
-        });
-    }
-
-    Ok(canonical_resolved_path)
-}
-
-fn inspect_path_tree_within_artifact_root(
-    artifact_root: &Path,
-    root: &Path,
-) -> Result<u64, SearchError> {
-    let canonical_artifact_root =
-        artifact_root
-            .canonicalize()
-            .map_err(|source| SearchError::Execution {
-                message: format!(
-                    "failed to canonicalize artifact root {}: {source}",
-                    artifact_root.display()
-                ),
-            })?;
-    let mut pending = vec![root.to_path_buf()];
-    let mut visited_dirs = HashSet::new();
-    let mut total_bytes = 0;
-
-    while let Some(path) = pending.pop() {
-        let canonical_path = path
-            .canonicalize()
-            .map_err(|source| SearchError::Execution {
-                message: format!(
-                    "failed to canonicalize local LanceDB documents path {}: {source}",
-                    path.display()
-                ),
-            })?;
-
-        if !canonical_path.starts_with(&canonical_artifact_root) {
-            return Err(SearchError::Execution {
-                message: format!(
-                    "resolved local LanceDB documents path escapes artifact root: {}",
-                    canonical_path.display()
-                ),
-            });
-        }
-
-        let metadata = fs::metadata(&canonical_path).map_err(|source| SearchError::Execution {
-            message: format!(
-                "failed to inspect local LanceDB documents path {}: {source}",
-                canonical_path.display()
-            ),
-        })?;
-
-        if metadata.is_file() {
-            total_bytes += metadata.len();
-            continue;
-        }
-
-        if metadata.is_dir() {
-            if !visited_dirs.insert(canonical_path.clone()) {
-                return Err(SearchError::Execution {
-                    message: format!(
-                        "local LanceDB artifact path contains a symlink cycle under artifact root: {}",
-                        canonical_path.display()
-                    ),
-                });
-            }
-
-            for entry in fs::read_dir(&canonical_path).map_err(|source| SearchError::Execution {
-                message: format!(
-                    "failed to read local LanceDB artifact directory {}: {source}",
-                    canonical_path.display()
-                ),
-            })? {
-                pending.push(
-                    entry
-                        .map_err(|source| SearchError::Execution {
-                            message: format!(
-                        "failed to read local LanceDB artifact directory entry in {}: {source}",
-                        canonical_path.display()
-                    ),
-                        })?
-                        .path(),
-                );
-            }
-        }
-    }
-
-    Ok(total_bytes)
-}
-
-fn decode_lancedb_batches(
-    batches: &[RecordBatch],
-    shard_path: &Path,
-) -> Result<Vec<SearchResult>, SearchError> {
-    let mut results = Vec::new();
-
-    for batch in batches {
-        let doc_ids = downcast_string_column(batch, DOC_ID_COLUMN_NAME, shard_path)?;
-        let texts = downcast_string_column(batch, TEXT_COLUMN_NAME, shard_path)?;
-        let metadata = downcast_string_column(batch, METADATA_COLUMN_NAME, shard_path)?;
-        let distances =
-            batch
-                .column_by_name(DISTANCE_COLUMN_NAME)
-                .ok_or_else(|| SearchError::Execution {
-                    message: format!(
-                        "local LanceDB query did not return {} column at {}",
-                        DISTANCE_COLUMN_NAME,
-                        shard_path.display()
-                    ),
-                })?;
-
-        for index in 0..batch.num_rows() {
-            let score =
-                lancedb_distance_to_score(distance_value(distances.as_ref(), index, shard_path)?)?;
-            let metadata = parse_metadata_json(metadata.value(index), shard_path)?;
-            let citation = metadata.as_ref().and_then(Citation::from_metadata);
-            let result = SearchResult {
-                doc_id: doc_ids.value(index).to_string(),
-                score,
-                text: texts.value(index).to_string(),
-                metadata,
-                source: SearchSource::Vector,
-                chunk_source: ChunkSource::Dynamic,
-                corpus_type: None,
-                citation,
-            };
-
-            result.validate()?;
-            results.push(result);
-        }
-    }
-
-    Ok(results)
-}
-
-fn downcast_string_column<'a>(
-    batch: &'a RecordBatch,
-    column_name: &str,
-    shard_path: &Path,
-) -> Result<&'a StringArray, SearchError> {
-    batch
-        .column_by_name(column_name)
-        .ok_or_else(|| SearchError::Execution {
-            message: format!(
-                "local LanceDB query did not return {} column at {}",
-                column_name,
-                shard_path.display()
-            ),
-        })?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| SearchError::Execution {
-            message: format!(
-                "local LanceDB column {} had unexpected type at {}",
-                column_name,
-                shard_path.display()
-            ),
-        })
-}
-
-fn distance_value(
-    distance_column: &dyn Array,
-    index: usize,
-    shard_path: &Path,
-) -> Result<f32, SearchError> {
-    if let Some(values) = distance_column.as_any().downcast_ref::<Float32Array>() {
-        return Ok(values.value(index));
-    }
-    if let Some(values) = distance_column.as_any().downcast_ref::<Float64Array>() {
-        return Ok(values.value(index) as f32);
-    }
-
-    Err(SearchError::Execution {
-        message: format!(
-            "local LanceDB distance column had unexpected type at {}",
-            shard_path.display()
-        ),
-    })
-}
-
-fn lancedb_distance_to_score(distance: f32) -> Result<f32, SearchError> {
-    if !distance.is_finite() {
-        return Err(SearchError::Execution {
-            message: "local LanceDB query returned non-finite distance".into(),
-        });
-    }
-
-    Ok((1.0 - distance).clamp(0.0, 1.0))
-}
-
 fn top_k_for_shard(row_count: usize, requested_top_k: usize) -> usize {
     row_count.min(requested_top_k)
-}
-
-fn parse_metadata_json(
-    metadata_json: &str,
-    shard_path: &Path,
-) -> Result<Option<HashMap<String, Value>>, SearchError> {
-    let metadata =
-        serde_json::from_str::<HashMap<String, Value>>(metadata_json).map_err(|source| {
-            SearchError::Execution {
-                message: format!(
-                    "failed to parse metadata from local LanceDB documents table at {}: {source}",
-                    shard_path.display()
-                ),
-            }
-        })?;
-
-    if metadata.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(metadata))
-    }
 }
 
 fn run_lance_query<F>(future: F) -> Result<Vec<SearchResult>, SearchError>

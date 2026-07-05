@@ -3,14 +3,13 @@ use std::collections::BinaryHeap;
 
 use rayon::prelude::*;
 
-use crate::error::{SearchError, ValidationError};
+use crate::error::SearchError;
 use crate::index::{encode_vector, score_query_against_record_512, MmapIndex, TurboRecordSlice};
 use crate::models::{ChunkSource, CorpusType, SearchResult, SearchSource};
 use crate::storage::ActiveManifest;
 
+use super::retrieval_common::{validate_embedding_dim, validate_query_embedding, validate_top_k};
 use super::StaticRetriever;
-
-const TOP_K_MAX: usize = 100;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TurboQuantSearcher {
@@ -30,7 +29,8 @@ impl StaticRetriever for TurboQuantSearcher {
         query_embedding: &[f32],
         top_k: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        validate_query_embedding(query_embedding, self.index.dim() as usize)?;
+        validate_query_embedding(query_embedding)?;
+        validate_embedding_dim(query_embedding, self.index.dim() as usize)?;
         validate_top_k(top_k)?;
 
         let encoded_query = encode_vector(
@@ -146,39 +146,4 @@ fn compare_ranked_results(left: &RankedResult, right: &RankedResult) -> Ordering
         .score
         .total_cmp(&left.score)
         .then_with(|| left.doc_id.cmp(&right.doc_id))
-}
-
-fn validate_query_embedding(
-    query_embedding: &[f32],
-    expected_dim: usize,
-) -> Result<(), SearchError> {
-    if query_embedding.is_empty() {
-        return Err(SearchError::Validation(ValidationError::Required {
-            field: "query_embedding",
-        }));
-    }
-    if query_embedding.iter().any(|value| !value.is_finite()) {
-        return Err(SearchError::Validation(ValidationError::InvalidValue {
-            field: "query_embedding",
-        }));
-    }
-    if query_embedding.len() != expected_dim {
-        return Err(SearchError::Validation(ValidationError::InvalidValue {
-            field: "query_embedding",
-        }));
-    }
-
-    Ok(())
-}
-
-fn validate_top_k(top_k: usize) -> Result<(), SearchError> {
-    if top_k == 0 || top_k > TOP_K_MAX {
-        return Err(SearchError::Validation(ValidationError::RangeOutOfRange {
-            field: "top_k",
-            min: 1,
-            max: TOP_K_MAX as u64,
-        }));
-    }
-
-    Ok(())
 }

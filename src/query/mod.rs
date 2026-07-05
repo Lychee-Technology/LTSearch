@@ -1,7 +1,10 @@
 pub mod context_builder;
 pub mod filter;
 pub mod keyword_searcher;
+mod lance_cache;
+mod lance_decode;
 pub mod ranker;
+mod retrieval_common;
 pub mod router;
 pub mod turbo_searcher;
 pub mod vector_searcher;
