@@ -5,6 +5,13 @@ use ltsearch::error::{IndexError, PublishError};
 use ltsearch::indexing::{BuildIndexResult, PublishResult};
 use ltsearch::models::{IndexManifest, ShardManifest};
 
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
 fn sample_build_request() -> BuildRequest {
     BuildRequest {
         batch_id: "batch-abc".into(),
@@ -32,21 +39,21 @@ fn sample_manifest() -> IndexManifest {
 
 #[test]
 fn build_lambda_returns_success_on_successful_build_and_publish() {
-    let result = handle_build_request(
-        |_request| {
+    let result = block_on(handle_build_request(
+        async |_request| {
             Ok(BuildIndexResult {
                 manifest: sample_manifest(),
                 documents: vec![],
             })
         },
-        |_manifest| {
+        async |_manifest| {
             Ok(PublishResult {
                 activated_version_id: 1,
                 previous_version_id: None,
             })
         },
         sample_build_request(),
-    );
+    ));
 
     let response = result.unwrap();
     assert_eq!(response.activated_version_id, 1);
@@ -56,15 +63,15 @@ fn build_lambda_returns_success_on_successful_build_and_publish() {
 
 #[test]
 fn build_lambda_maps_build_failure_to_error_envelope() {
-    let result = handle_build_request(
-        |_request| {
+    let result = block_on(handle_build_request(
+        async |_request| {
             Err(IndexError::Operation {
                 message: "disk full".into(),
             })
         },
-        |_manifest| panic!("publish should not be called when build fails"),
+        async |_manifest| panic!("publish should not be called when build fails"),
         sample_build_request(),
-    );
+    ));
 
     let error = result.unwrap_err();
     assert_eq!(error.error_type, "build_error");
@@ -73,20 +80,20 @@ fn build_lambda_maps_build_failure_to_error_envelope() {
 
 #[test]
 fn build_lambda_maps_publish_failure_to_error_envelope() {
-    let result = handle_build_request(
-        |_request| {
+    let result = block_on(handle_build_request(
+        async |_request| {
             Ok(BuildIndexResult {
                 manifest: sample_manifest(),
                 documents: vec![],
             })
         },
-        |_manifest| {
+        async |_manifest| {
             Err(PublishError::Operation {
                 message: "CAS conflict".into(),
             })
         },
         sample_build_request(),
-    );
+    ));
 
     let error = result.unwrap_err();
     assert_eq!(error.error_type, "publish_error");
@@ -97,13 +104,13 @@ fn build_lambda_maps_publish_failure_to_error_envelope() {
 fn build_lambda_does_not_publish_when_build_fails() {
     let publish_called = AtomicBool::new(false);
 
-    let result = handle_build_request(
-        |_request| {
+    let result = block_on(handle_build_request(
+        async |_request| {
             Err(IndexError::Operation {
                 message: "build failed".into(),
             })
         },
-        |_manifest| {
+        async |_manifest| {
             publish_called.store(true, Ordering::SeqCst);
             Ok(PublishResult {
                 activated_version_id: 1,
@@ -111,7 +118,7 @@ fn build_lambda_does_not_publish_when_build_fails() {
             })
         },
         sample_build_request(),
-    );
+    ));
 
     assert!(result.is_err());
     assert!(

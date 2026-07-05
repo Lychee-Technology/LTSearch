@@ -127,7 +127,11 @@ async fn publish_storage_uploads_and_reads_manifest_bytes() {
     std::fs::write(&manifest_path, b"{}\n").unwrap();
 
     storage
-        .upload_file("index/versions/7/manifest.json", &manifest_path)
+        .upload_file(
+            "index/versions/7/manifest.json",
+            &manifest_path,
+            ltsearch::indexing::UploadMode::CreateOnly,
+        )
         .await
         .unwrap();
     assert!(storage
@@ -135,6 +139,56 @@ async fn publish_storage_uploads_and_reads_manifest_bytes() {
         .await
         .unwrap()
         .is_some());
+}
+
+#[tokio::test]
+async fn publish_storage_create_only_upload_refuses_to_overwrite() {
+    let harness = MotoHarness::new("publish-storage-create-only").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+    let artifact_root = harness.new_artifact_root();
+    let file_path = artifact_root.join("shard.bin");
+    std::fs::create_dir_all(&artifact_root).unwrap();
+    std::fs::write(&file_path, b"v1").unwrap();
+
+    storage
+        .upload_file(
+            "lance/v7/shard_0/shard.bin",
+            &file_path,
+            ltsearch::indexing::UploadMode::CreateOnly,
+        )
+        .await
+        .unwrap();
+
+    std::fs::write(&file_path, b"v2").unwrap();
+    let error = storage
+        .upload_file(
+            "lance/v7/shard_0/shard.bin",
+            &file_path,
+            ltsearch::indexing::UploadMode::CreateOnly,
+        )
+        .await
+        .expect_err("expected CreateOnly upload over an existing object to fail");
+    assert!(error
+        .to_string()
+        .contains("version artifacts are immutable"));
+    assert_eq!(
+        storage
+            .read("lance/v7/shard_0/shard.bin")
+            .await
+            .unwrap()
+            .unwrap()
+            .bytes,
+        b"v1"
+    );
+
+    storage
+        .upload_file(
+            "lance/v7/shard_0/shard.bin",
+            &file_path,
+            ltsearch::indexing::UploadMode::Overwrite,
+        )
+        .await
+        .expect("expected Overwrite upload to succeed");
 }
 
 #[tokio::test]
@@ -159,9 +213,44 @@ async fn publish_storage_compare_and_swap_returns_false_when_expected_mismatches
         .await
         .unwrap());
     assert!(!storage
-        .compare_and_swap("index/_head", Some(b"different"), b"new")
+        .compare_and_swap("index/_head", Some("\"bogus-etag\""), b"new")
         .await
         .unwrap());
+    assert_eq!(
+        storage.read("index/_head").await.unwrap().unwrap().bytes,
+        b"old"
+    );
+}
+
+#[tokio::test]
+async fn publish_storage_compare_and_swap_rejects_stale_etag_and_existing_object() {
+    let harness = MotoHarness::new("publish-storage-cas-stale").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+
+    // Creation guarded by If-None-Match: second create must lose.
+    assert!(storage
+        .compare_and_swap("index/_head", None, b"v1")
+        .await
+        .unwrap());
+    assert!(!storage
+        .compare_and_swap("index/_head", None, b"v1-again")
+        .await
+        .unwrap());
+
+    // Replacement guarded by If-Match: a stale ETag must lose.
+    let first_etag = storage.read("index/_head").await.unwrap().unwrap().etag;
+    assert!(storage
+        .compare_and_swap("index/_head", Some(&first_etag), b"v2")
+        .await
+        .unwrap());
+    assert!(!storage
+        .compare_and_swap("index/_head", Some(&first_etag), b"v3")
+        .await
+        .unwrap());
+    assert_eq!(
+        storage.read("index/_head").await.unwrap().unwrap().bytes,
+        b"v2"
+    );
 }
 
 #[tokio::test]
@@ -442,21 +531,21 @@ impl MotoHarness {
 
     async fn read_manifest(&self, version_id: u64) -> ltsearch::models::IndexManifest {
         let key = format!("index/versions/{version_id}/manifest.json");
-        let bytes = AwsPublishStorage::new(self.bucket.clone(), self.s3.clone())
+        let object = AwsPublishStorage::new(self.bucket.clone(), self.s3.clone())
             .read(&key)
             .await
             .unwrap()
             .expect("missing manifest object");
-        serde_json::from_slice(&bytes).unwrap()
+        serde_json::from_slice(&object.bytes).unwrap()
     }
 
     async fn assert_head_points_to(&self, version_id: u64) {
-        let bytes = AwsPublishStorage::new(self.bucket.clone(), self.s3.clone())
+        let object = AwsPublishStorage::new(self.bucket.clone(), self.s3.clone())
             .read(ltsearch::storage::INDEX_HEAD_KEY)
             .await
             .unwrap()
             .expect("missing _head object");
-        let head: ltsearch::storage::ManifestHead = serde_json::from_slice(&bytes).unwrap();
+        let head: ltsearch::storage::ManifestHead = serde_json::from_slice(&object.bytes).unwrap();
         assert_eq!(head.version_id, version_id);
         assert_eq!(
             head.manifest_path,
@@ -776,6 +865,7 @@ impl ltsearch::indexing::PublishStorage for TestPublishStorage {
         &self,
         _key: &str,
         _source: &std::path::Path,
+        _mode: ltsearch::indexing::UploadMode,
     ) -> Result<(), ltsearch::error::PublishError> {
         Ok(())
     }
@@ -784,18 +874,22 @@ impl ltsearch::indexing::PublishStorage for TestPublishStorage {
         &self,
         _key: &str,
         _source: &std::path::Path,
+        _mode: ltsearch::indexing::UploadMode,
     ) -> Result<(), ltsearch::error::PublishError> {
         Ok(())
     }
 
-    async fn read(&self, _key: &str) -> Result<Option<Vec<u8>>, ltsearch::error::PublishError> {
+    async fn read(
+        &self,
+        _key: &str,
+    ) -> Result<Option<ltsearch::indexing::VersionedObject>, ltsearch::error::PublishError> {
         Ok(None)
     }
 
     async fn compare_and_swap(
         &self,
         _key: &str,
-        _expected: Option<&[u8]>,
+        _expected_etag: Option<&str>,
         _new_value: &[u8],
     ) -> Result<bool, ltsearch::error::PublishError> {
         Ok(true)

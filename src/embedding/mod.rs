@@ -3,8 +3,6 @@ pub mod generator;
 pub mod ltembed;
 pub mod provider;
 
-pub struct ModuleBoundary;
-
 pub use generator::{EmbeddingError, EmbeddingGenerator};
 #[cfg(feature = "ltembed")]
 pub use ltembed::{

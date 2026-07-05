@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::types::Float32Type;
 use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
@@ -16,6 +15,7 @@ use tantivy::{Index, IndexWriter};
 use crate::embedding::EmbeddingGenerator;
 use crate::error::IndexError;
 use crate::models::{Document, IndexManifest, ShardManifest, WalOperation, WalRecord};
+use crate::storage::staged_publish::{append_cleanup_failure, StagedDir};
 use crate::storage::version_manifest_key;
 
 const ARTIFACT_BUCKET: &str = "local-artifacts";
@@ -94,7 +94,7 @@ where
 
         let manifest = build_manifest(request, documents.len())?;
         let staged_build = self.stage_build(request.version_id, &documents, &manifest)?;
-        self.publish_staged_build(&staged_build)?;
+        self.publish_staged_build(staged_build)?;
 
         Ok(BuildIndexResult {
             manifest,
@@ -112,10 +112,7 @@ where
 
         match self.write_staged_build(&staged_build, documents, manifest) {
             Ok(()) => Ok(staged_build),
-            Err(error) => Err(append_cleanup_failure(
-                error,
-                remove_dir_all_if_exists(&staged_build.root),
-            )),
+            Err(error) => Err(append_cleanup_failure(error, staged_build.dir.abort())),
         }
     }
 
@@ -138,52 +135,28 @@ where
         write_json_file(&staged_build.staged_manifest_path, manifest)
     }
 
-    fn publish_staged_build(&self, staged_build: &StagedBuild) -> Result<(), IndexError> {
+    fn publish_staged_build(&self, staged_build: StagedBuild) -> Result<(), IndexError> {
         if let Some(hook) = &self.before_publish_hook {
             if let Err(error) = hook() {
-                return Err(append_cleanup_failure(
-                    error,
-                    remove_dir_all_if_exists(&staged_build.root),
-                ));
+                return Err(append_cleanup_failure(error, staged_build.dir.abort()));
             }
         }
 
-        if let Err(error) = move_into_place(
-            &staged_build.staged_lance_dir,
-            &staged_build.final_lance_dir,
-        ) {
-            return Err(append_cleanup_failure(
-                error,
-                remove_dir_all_if_exists(&staged_build.root),
-            ));
-        }
-        if let Err(error) = move_into_place(
-            &staged_build.staged_index_dir,
-            &staged_build.final_index_dir,
-        ) {
-            return Err(append_cleanup_failure(
-                error,
-                combine_cleanup_results([
-                    remove_path_if_exists(&staged_build.final_lance_dir),
-                    remove_dir_all_if_exists(&staged_build.root),
-                ]),
-            ));
-        }
-        if let Err(error) = move_into_place(
-            &staged_build.staged_manifest_path,
-            &staged_build.final_manifest_path,
-        ) {
-            return Err(append_cleanup_failure(
-                error,
-                combine_cleanup_results([
-                    remove_path_if_exists(&staged_build.final_lance_dir),
-                    remove_path_if_exists(&staged_build.final_index_dir),
-                    remove_dir_all_if_exists(&staged_build.root),
-                ]),
-            ));
-        }
+        let StagedBuild {
+            dir,
+            staged_lance_dir,
+            staged_index_dir,
+            staged_manifest_path,
+            final_lance_dir,
+            final_index_dir,
+            final_manifest_path,
+        } = staged_build;
 
-        remove_dir_all_if_exists(&staged_build.root)
+        dir.commit(vec![
+            (staged_lance_dir, final_lance_dir),
+            (staged_index_dir, final_index_dir),
+            (staged_manifest_path, final_manifest_path),
+        ])
     }
 
     fn write_lance_artifact(
@@ -424,7 +397,7 @@ pub fn materialize_latest_snapshot(records: &[WalRecord]) -> Result<Vec<Document
 
 #[derive(Debug)]
 struct StagedBuild {
-    root: PathBuf,
+    dir: StagedDir,
     staged_lance_dir: PathBuf,
     staged_index_dir: PathBuf,
     staged_manifest_path: PathBuf,
@@ -435,16 +408,8 @@ struct StagedBuild {
 
 impl StagedBuild {
     fn new(artifact_root: &Path, version_id: u64) -> Result<Self, IndexError> {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|source| IndexError::Operation {
-                message: format!("failed to calculate staging timestamp: {source}"),
-            })?
-            .as_nanos();
-        let root = artifact_root.join(format!(
-            ".index-build-staging-{}-{nonce}",
-            std::process::id()
-        ));
+        let dir = StagedDir::create(artifact_root, "index-build")?;
+        let root = dir.path();
 
         Ok(Self {
             staged_lance_dir: root.join(format!("lance/v{version_id}/shard_0")),
@@ -453,7 +418,7 @@ impl StagedBuild {
             final_lance_dir: artifact_root.join(format!("lance/v{version_id}/shard_0")),
             final_index_dir: artifact_root.join(format!("index/v{version_id}/shard_0")),
             final_manifest_path: artifact_root.join(version_manifest_key(version_id)),
-            root,
+            dir,
         })
     }
 }
@@ -528,62 +493,6 @@ fn ensure_target_is_publishable(path: &Path) -> Result<(), IndexError> {
     Ok(())
 }
 
-fn move_into_place(source: &Path, destination: &Path) -> Result<(), IndexError> {
-    let parent = destination.parent().ok_or_else(|| IndexError::Operation {
-        message: format!("path {} has no parent", destination.display()),
-    })?;
-    fs::create_dir_all(parent).map_err(|source_error| IndexError::Operation {
-        message: format!(
-            "failed to create directory {}: {source_error}",
-            parent.display()
-        ),
-    })?;
-    fs::rename(source, destination).map_err(|source_error| IndexError::Operation {
-        message: format!(
-            "failed to publish staged artifact from {} to {}: {source_error}",
-            source.display(),
-            destination.display()
-        ),
-    })
-}
-
-fn remove_dir_all_if_exists(path: &Path) -> Result<(), IndexError> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    fs::remove_dir_all(path).map_err(|source| IndexError::Operation {
-        message: format!("failed to remove directory {}: {source}", path.display()),
-    })
-}
-
-fn combine_cleanup_results<const N: usize>(
-    results: [Result<(), IndexError>; N],
-) -> Result<(), IndexError> {
-    let errors = results
-        .into_iter()
-        .filter_map(Result::err)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(IndexError::Operation {
-            message: errors.join("; "),
-        })
-    }
-}
-
-fn append_cleanup_failure(error: IndexError, cleanup: Result<(), IndexError>) -> IndexError {
-    match cleanup {
-        Ok(()) => error,
-        Err(cleanup_error) => IndexError::Operation {
-            message: format!("{error}; cleanup failed: {cleanup_error}"),
-        },
-    }
-}
-
 fn run_lance_build<F>(future: F) -> Result<(), IndexError>
 where
     F: std::future::Future<Output = Result<(), IndexError>> + Send + 'static,
@@ -620,21 +529,5 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
         message.clone()
     } else {
         "unknown panic payload".into()
-    }
-}
-
-fn remove_path_if_exists(path: &Path) -> Result<(), IndexError> {
-    if !path.exists() {
-        return Ok(());
-    }
-
-    if path.is_dir() {
-        fs::remove_dir_all(path).map_err(|source| IndexError::Operation {
-            message: format!("failed to remove directory {}: {source}", path.display()),
-        })
-    } else {
-        fs::remove_file(path).map_err(|source| IndexError::Operation {
-            message: format!("failed to remove file {}: {source}", path.display()),
-        })
     }
 }

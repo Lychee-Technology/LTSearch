@@ -38,18 +38,20 @@ impl From<IngestError> for WriteLambdaError {
     }
 }
 
-pub fn handle_write_request<I, D>(
+pub async fn handle_write_request<I, D>(
     ingest_handler: I,
     delete_handler: D,
     request: WriteRequest,
 ) -> Result<WriteResponse, WriteLambdaError>
 where
-    I: FnOnce(Vec<Document>) -> Result<IngestResponse, IngestError>,
-    D: FnOnce(Vec<String>) -> Result<DeleteResponse, IngestError>,
+    I: AsyncFnOnce(Vec<Document>) -> Result<IngestResponse, IngestError>,
+    D: AsyncFnOnce(Vec<String>) -> Result<DeleteResponse, IngestError>,
 {
     match request {
         WriteRequest::Ingest { documents } => {
-            let response = ingest_handler(documents).map_err(WriteLambdaError::from)?;
+            let response = ingest_handler(documents)
+                .await
+                .map_err(WriteLambdaError::from)?;
             Ok(WriteResponse {
                 accepted_count: response.accepted_count,
                 wal_event_ids: response.wal_event_ids,
@@ -57,7 +59,9 @@ where
             })
         }
         WriteRequest::Delete { doc_ids } => {
-            let response = delete_handler(doc_ids).map_err(WriteLambdaError::from)?;
+            let response = delete_handler(doc_ids)
+                .await
+                .map_err(WriteLambdaError::from)?;
             Ok(WriteResponse {
                 accepted_count: response.accepted_count,
                 wal_event_ids: response.wal_event_ids,

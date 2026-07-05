@@ -3,12 +3,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-use aws_sdk_s3::Client as S3Client;
-use ltsearch::embedding::{
-    fixed_generator_from_env, provider_from_env_or_default, EmbeddingGenerator, EmbeddingProvider,
+use ltsearch::bootstrap::{
+    build_embedding_generator_from_env, build_embedding_provider_from_env, s3_client_from_env,
 };
-#[cfg(feature = "ltembed")]
-use ltsearch::embedding::{ltembed_config_from_env, LTEmbedEmbeddingGenerator};
 use ltsearch::index::{load_static_chunks_from_s3, StaticIndexBuilder, TurboBuildConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +60,9 @@ async fn run(args: CliArgs) -> Result<String, String> {
         .await
         .map_err(|error| error.to_string())?;
 
-    let provider = provider_from_env_or_default(
-        "LTSEARCH_BUILD_EMBEDDING_PROVIDER",
-        EmbeddingProvider::Fixed,
-    )
-    .map_err(|error| error.to_string())?;
-    let generator = build_embedding_generator(provider)?;
+    let provider = build_embedding_provider_from_env().map_err(|error| error.to_string())?;
+    let generator =
+        build_embedding_generator_from_env(provider).map_err(|error| error.to_string())?;
 
     let chunk_count = chunks.len();
     eprintln!(
@@ -109,46 +103,6 @@ async fn run(args: CliArgs) -> Result<String, String> {
         "built {} static records (dim={}) in {:?}, total {} bytes",
         result.record_count, result.embedding_dim, elapsed, total_size
     ))
-}
-
-fn build_embedding_generator(
-    provider: EmbeddingProvider,
-) -> Result<Box<dyn EmbeddingGenerator>, String> {
-    match provider {
-        EmbeddingProvider::Fixed => fixed_generator_from_env(
-            "LTSEARCH_BUILD_FIXED_EMBEDDING",
-            Some("LTSEARCH_BUILD_EMBEDDING_DIM"),
-        )
-        .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
-        .map_err(|error| error.to_string()),
-        #[cfg(feature = "ltembed")]
-        EmbeddingProvider::LTEmbed => ltembed_config_from_env(
-            "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
-            "LTSEARCH_BUILD_LTEMBED_CONFIG_PATH",
-            "LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH",
-            "LTSEARCH_BUILD_LTEMBED_POOLING",
-            "LTSEARCH_BUILD_LTEMBED_PREFIX",
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|config| {
-            LTEmbedEmbeddingGenerator::from_config(&config)
-                .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
-                .map_err(|error| error.to_string())
-        }),
-    }
-}
-
-fn s3_client_from_env(config: &aws_config::SdkConfig) -> S3Client {
-    match env::var("AWS_ENDPOINT_URL_S3") {
-        Ok(endpoint_url) => {
-            let s3_config = aws_sdk_s3::config::Builder::from(config)
-                .endpoint_url(endpoint_url)
-                .force_path_style(true)
-                .build();
-            S3Client::from_conf(s3_config)
-        }
-        Err(_) => S3Client::new(config),
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

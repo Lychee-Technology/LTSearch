@@ -55,20 +55,25 @@ impl From<PublishError> for BuildLambdaError {
     }
 }
 
-pub fn handle_build_request<B, P>(
+pub async fn handle_build_request<B, P>(
     build_handler: B,
     publish_handler: P,
     request: BuildRequest,
 ) -> Result<BuildResponse, BuildLambdaError>
 where
-    B: FnOnce(&BuildRequest) -> Result<BuildIndexResult, IndexError>,
-    P: FnOnce(&IndexManifest) -> Result<PublishResult, PublishError>,
+    B: AsyncFnOnce(BuildRequest) -> Result<BuildIndexResult, IndexError>,
+    P: AsyncFnOnce(IndexManifest) -> Result<PublishResult, PublishError>,
 {
-    let build_result = build_handler(&request).map_err(BuildLambdaError::from)?;
-    let publish_result = publish_handler(&build_result.manifest).map_err(BuildLambdaError::from)?;
+    let build_result = build_handler(request)
+        .await
+        .map_err(BuildLambdaError::from)?;
+    let document_count = build_result.documents.len();
+    let publish_result = publish_handler(build_result.manifest)
+        .await
+        .map_err(BuildLambdaError::from)?;
     Ok(BuildResponse {
         activated_version_id: publish_result.activated_version_id,
         previous_version_id: publish_result.previous_version_id,
-        document_count: build_result.documents.len(),
+        document_count,
     })
 }

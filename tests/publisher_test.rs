@@ -7,13 +7,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use ltsearch::error::PublishError;
-use ltsearch::indexing::{IndexPublisher, PublishRequest, PublishStorage, RollbackRequest};
+use ltsearch::indexing::{
+    IndexPublisher, PublishRequest, PublishStorage, RollbackRequest, UploadMode, VersionedObject,
+};
 use ltsearch::models::{IndexManifest, ShardManifest};
 use ltsearch::storage::{version_manifest_key, INDEX_HEAD_KEY};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum StoredObject {
-    File(Vec<u8>),
+    File { bytes: Vec<u8>, etag: String },
     Directory,
 }
 
@@ -21,16 +23,31 @@ enum StoredObject {
 struct RecordingPublishStorage {
     objects: Arc<Mutex<HashMap<String, StoredObject>>>,
     calls: Arc<Mutex<Vec<String>>>,
-    last_expected: Arc<Mutex<Option<Option<Vec<u8>>>>>,
+    etag_counter: Arc<Mutex<u64>>,
+    last_expected: Arc<Mutex<Option<Option<String>>>>,
     compare_and_swap_conflict: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl RecordingPublishStorage {
     fn seed_file(&self, key: &str, bytes: Vec<u8>) {
+        let mut counter = self.etag_counter.lock().unwrap();
+        *counter += 1;
+        let etag = format!("\"etag-{}\"", *counter);
+        drop(counter);
         self.objects
             .lock()
             .unwrap()
-            .insert(key.to_string(), StoredObject::File(bytes));
+            .insert(key.to_string(), StoredObject::File { bytes, etag });
+    }
+
+    fn etag_of(&self, key: &str) -> Option<String> {
+        self.objects.lock().unwrap().get(key).and_then(|object| {
+            if let StoredObject::File { etag, .. } = object {
+                Some(etag.clone())
+            } else {
+                None
+            }
+        })
     }
 
     fn seed_directory(&self, key: &str) {
@@ -46,7 +63,7 @@ impl RecordingPublishStorage {
 
     fn file_bytes(&self, key: &str) -> Option<Vec<u8>> {
         self.objects.lock().unwrap().get(key).and_then(|object| {
-            if let StoredObject::File(bytes) = object {
+            if let StoredObject::File { bytes, .. } = object {
                 Some(bytes.clone())
             } else {
                 None
@@ -54,7 +71,7 @@ impl RecordingPublishStorage {
         })
     }
 
-    fn last_expected(&self) -> Option<Option<Vec<u8>>> {
+    fn last_expected(&self) -> Option<Option<String>> {
         self.last_expected.lock().unwrap().clone()
     }
 
@@ -65,7 +82,12 @@ impl RecordingPublishStorage {
 
 #[async_trait]
 impl PublishStorage for RecordingPublishStorage {
-    async fn upload_directory(&self, key: &str, source: &Path) -> Result<(), PublishError> {
+    async fn upload_directory(
+        &self,
+        key: &str,
+        source: &Path,
+        mode: UploadMode,
+    ) -> Result<(), PublishError> {
         self.calls
             .lock()
             .unwrap()
@@ -92,19 +114,32 @@ impl PublishStorage for RecordingPublishStorage {
                     message: format!("failed to inspect {}: {source_error}", path.display()),
                 })?;
             if file_type.is_dir() {
-                self.upload_directory(&child_key, &path).await?;
+                self.upload_directory(&child_key, &path, mode).await?;
             } else if file_type.is_file() {
-                self.upload_file(&child_key, &path).await?;
+                self.upload_file(&child_key, &path, mode).await?;
             }
         }
         Ok(())
     }
 
-    async fn upload_file(&self, key: &str, source: &Path) -> Result<(), PublishError> {
+    async fn upload_file(
+        &self,
+        key: &str,
+        source: &Path,
+        mode: UploadMode,
+    ) -> Result<(), PublishError> {
         self.calls
             .lock()
             .unwrap()
             .push(format!("upload_file:{key}"));
+
+        if mode == UploadMode::CreateOnly && self.file_bytes(key).is_some() {
+            return Err(PublishError::Operation {
+                message: format!(
+                    "refusing to overwrite existing version artifact {key}: version artifacts are immutable"
+                ),
+            });
+        }
 
         let bytes = fs::read(source).map_err(|source_error| PublishError::Operation {
             message: format!("failed to read {}: {source_error}", source.display()),
@@ -113,30 +148,39 @@ impl PublishStorage for RecordingPublishStorage {
         Ok(())
     }
 
-    async fn read(&self, key: &str) -> Result<Option<Vec<u8>>, PublishError> {
+    async fn read(&self, key: &str) -> Result<Option<VersionedObject>, PublishError> {
         self.calls.lock().unwrap().push(format!("read:{key}"));
-        Ok(self.file_bytes(key))
+        Ok(self.objects.lock().unwrap().get(key).and_then(|object| {
+            if let StoredObject::File { bytes, etag } = object {
+                Some(VersionedObject {
+                    bytes: bytes.clone(),
+                    etag: etag.clone(),
+                })
+            } else {
+                None
+            }
+        }))
     }
 
     async fn compare_and_swap(
         &self,
         key: &str,
-        expected: Option<&[u8]>,
+        expected_etag: Option<&str>,
         new_value: &[u8],
     ) -> Result<bool, PublishError> {
         self.calls
             .lock()
             .unwrap()
             .push(format!("compare_and_swap:{key}"));
-        *self.last_expected.lock().unwrap() = Some(expected.map(|bytes| bytes.to_vec()));
+        *self.last_expected.lock().unwrap() = Some(expected_etag.map(|etag| etag.to_string()));
 
         if let Some(conflict_bytes) = self.compare_and_swap_conflict.lock().unwrap().take() {
             self.seed_file(key, conflict_bytes);
             return Ok(false);
         }
 
-        let current = self.file_bytes(key);
-        if current.as_deref() != expected {
+        let current_etag = self.etag_of(key);
+        if current_etag.as_deref() != expected_etag {
             return Ok(false);
         }
 
@@ -314,8 +358,8 @@ async fn publisher_conditionally_updates_head_with_current_head_contents() {
     create_source_build(&build_root, &manifest);
 
     let storage = RecordingPublishStorage::default();
-    let current_head = head_json(8, 1_700_000_000_100);
-    storage.seed_file(INDEX_HEAD_KEY, current_head.clone());
+    storage.seed_file(INDEX_HEAD_KEY, head_json(8, 1_700_000_000_100));
+    let current_head_etag = storage.etag_of(INDEX_HEAD_KEY).unwrap();
 
     let publisher = IndexPublisher::new(&build_root, storage.clone());
     publisher
@@ -327,10 +371,65 @@ async fn publisher_conditionally_updates_head_with_current_head_contents() {
         .await
         .unwrap();
 
-    assert_eq!(storage.last_expected(), Some(Some(current_head)));
+    assert_eq!(storage.last_expected(), Some(Some(current_head_etag)));
     assert_eq!(
         storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
         head_json(9, 1_700_000_000_500)
+    );
+}
+
+#[tokio::test]
+async fn publisher_publishes_incrementally_without_expected_current_version() {
+    let build_root = temp_fixture_dir("publisher-incremental-none");
+    let manifest = sample_manifest(9);
+    create_source_build(&build_root, &manifest);
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(8, 1_700_000_000_100));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let published = publisher
+        .publish(&PublishRequest {
+            manifest,
+            expected_current_version: None,
+            updated_at: 1_700_000_000_500,
+        })
+        .await
+        .expect("publish without an expected current version must succeed over an existing head");
+
+    assert_eq!(published.activated_version_id, 9);
+    assert_eq!(published.previous_version_id, Some(8));
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(9, 1_700_000_000_500)
+    );
+}
+
+#[tokio::test]
+async fn publisher_rejects_non_monotonic_version_id() {
+    let build_root = temp_fixture_dir("publisher-non-monotonic");
+    let manifest = sample_manifest(8);
+    create_source_build(&build_root, &manifest);
+
+    let storage = RecordingPublishStorage::default();
+    storage.seed_file(INDEX_HEAD_KEY, head_json(8, 1_700_000_000_100));
+
+    let publisher = IndexPublisher::new(&build_root, storage.clone());
+    let error = publisher
+        .publish(&PublishRequest {
+            manifest,
+            expected_current_version: None,
+            updated_at: 1_700_000_000_500,
+        })
+        .await
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("must be greater than active version"));
+    assert_eq!(
+        storage.file_bytes(INDEX_HEAD_KEY).unwrap(),
+        head_json(8, 1_700_000_000_100)
     );
 }
 

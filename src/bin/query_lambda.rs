@@ -1,4 +1,5 @@
 use lambda_runtime::{service_fn, Error, LambdaEvent};
+use ltsearch::bootstrap::s3_client_from_env;
 use ltsearch::models::{SearchRequest, SearchResponse};
 use ltsearch::query_lambda::{
     bootstrap_query_handler_for_version_from_env, handle_search_request,
@@ -202,19 +203,6 @@ async fn sync_prefix(
     }
 
     Ok(())
-}
-
-fn s3_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client {
-    match env::var("AWS_ENDPOINT_URL_S3") {
-        Ok(endpoint_url) => {
-            let s3_config = aws_sdk_s3::config::Builder::from(config)
-                .endpoint_url(endpoint_url)
-                .force_path_style(true)
-                .build();
-            aws_sdk_s3::Client::from_conf(s3_config)
-        }
-        Err(_) => aws_sdk_s3::Client::new(config),
-    }
 }
 
 fn main() -> Result<(), Error> {

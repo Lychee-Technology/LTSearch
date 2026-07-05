@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::fs;
 use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 
 use crate::embedding::{EmbeddingError, EmbeddingGenerator};
 use crate::error::IndexError;
 use crate::models::CorpusType;
+use crate::storage::staged_publish::{append_cleanup_failure, StagedDir};
 
 use super::{
     encode_vector, CentroidTable, MetaRecord, ProjectionMatrix, TurboHeader, TurboRecord512,
@@ -109,14 +110,6 @@ impl<E> StaticIndexBuilder<E> {
             ),
         })?;
 
-        let staged = staged_output_dir(output_dir)?;
-        fs::create_dir_all(&staged).map_err(|error| IndexError::Operation {
-            message: format!(
-                "failed to create staged static output directory {}: {error}",
-                staged.display()
-            ),
-        })?;
-
         let centroids = CentroidTable::generate(embedding_dim, CENTROIDS_PER_DIM, CENTROIDS_SEED);
         let projection = ProjectionMatrix::generate(embedding_dim, embedding_dim, PROJECTION_SEED);
         let header = TurboHeader::new(embedding_dim, chunks.len() as u64);
@@ -186,13 +179,34 @@ impl<E> StaticIndexBuilder<E> {
             turbo_static_meta.extend_from_slice(meta_bytes);
         }
 
-        write_file(&staged.join("centroids.bin"), &centroids.to_bytes())?;
-        write_file(&staged.join("projection.bin"), &projection.to_bytes())?;
-        write_file(&staged.join("turbo_static.bin"), &turbo_static)?;
-        write_file(&staged.join("turbo_static_meta.bin"), &turbo_static_meta)?;
-        write_file(&staged.join("turbo_static_text.bin"), &turbo_static_text)?;
+        // Stage next to the output directory (same filesystem), then swap
+        // the whole directory: a failed rebuild never leaves the previous
+        // static index partially deleted.
+        let staging_base = output_dir.parent().ok_or_else(|| IndexError::Operation {
+            message: format!("path {} has no parent", output_dir.display()),
+        })?;
+        let staging_label = output_dir
+            .file_name()
+            .ok_or_else(|| IndexError::Operation {
+                message: format!("path {} has no file name", output_dir.display()),
+            })?
+            .to_string_lossy()
+            .into_owned();
+        let staged = StagedDir::create(staging_base, &staging_label)?;
 
-        publish_staged_output(output_dir, &staged)?;
+        let write_result = write_static_files(
+            staged.path(),
+            &centroids.to_bytes(),
+            &projection.to_bytes(),
+            &turbo_static,
+            &turbo_static_meta,
+            &turbo_static_text,
+        );
+        if let Err(error) = write_result {
+            return Err(append_cleanup_failure(error, staged.abort()));
+        }
+
+        staged.commit_replace_dir(output_dir)?;
 
         Ok(StaticIndexBuildResult {
             record_count: chunks.len() as u64,
@@ -263,6 +277,21 @@ where
     Ok(resolved)
 }
 
+fn write_static_files(
+    staged_dir: &Path,
+    centroids: &[u8],
+    projection: &[u8],
+    turbo_static: &[u8],
+    turbo_static_meta: &[u8],
+    turbo_static_text: &[u8],
+) -> Result<(), IndexError> {
+    write_file(&staged_dir.join("centroids.bin"), centroids)?;
+    write_file(&staged_dir.join("projection.bin"), projection)?;
+    write_file(&staged_dir.join("turbo_static.bin"), turbo_static)?;
+    write_file(&staged_dir.join("turbo_static_meta.bin"), turbo_static_meta)?;
+    write_file(&staged_dir.join("turbo_static_text.bin"), turbo_static_text)
+}
+
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), IndexError> {
     fs::write(path, bytes).map_err(|error| IndexError::Operation {
         message: format!("failed to write {}: {error}", path.display()),
@@ -295,41 +324,4 @@ fn corpus_type_id(corpus_type: &CorpusType) -> u8 {
         CorpusType::Rfc => 2,
         CorpusType::Other(id) => *id,
     }
-}
-
-fn staged_output_dir(output_dir: &Path) -> Result<PathBuf, IndexError> {
-    let parent = output_dir.parent().ok_or_else(|| IndexError::Operation {
-        message: format!("path {} has no parent", output_dir.display()),
-    })?;
-    let name = output_dir
-        .file_name()
-        .ok_or_else(|| IndexError::Operation {
-            message: format!("path {} has no file name", output_dir.display()),
-        })?
-        .to_string_lossy();
-
-    Ok(parent.join(format!(".{name}.staging")))
-}
-
-fn publish_staged_output(output_dir: &Path, staged: &Path) -> Result<(), IndexError> {
-    for file_name in [
-        "centroids.bin",
-        "projection.bin",
-        "turbo_static.bin",
-        "turbo_static_meta.bin",
-        "turbo_static_text.bin",
-    ] {
-        let source = staged.join(file_name);
-        let destination = output_dir.join(file_name);
-        fs::rename(&source, &destination).map_err(|error| IndexError::Operation {
-            message: format!(
-                "failed to publish staged static artifact {} to {}: {error}",
-                source.display(),
-                destination.display()
-            ),
-        })?;
-    }
-
-    let _ = fs::remove_dir_all(staged);
-    Ok(())
 }
