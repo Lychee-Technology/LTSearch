@@ -148,12 +148,15 @@ fn chunk_block(label: &str, index: usize, r: &SearchResult) -> String {
 
 fn is_cjk(c: char) -> bool {
     matches!(c,
-        // CJK punctuation, CJK Ext A, CJK Unified, compatibility ideographs, fullwidth forms
+        // CJK punctuation, CJK Ext A, CJK Unified, compatibility ideographs, fullwidth
+        // forms, and supplementary ideographic planes (Ext B..G + compat supplement)
         '\u{3000}'..='\u{303F}'
             | '\u{3400}'..='\u{4DBF}'
             | '\u{4E00}'..='\u{9FFF}'
             | '\u{F900}'..='\u{FAFF}'
-            | '\u{FF00}'..='\u{FFEF}')
+            | '\u{FF00}'..='\u{FFEF}'
+            | '\u{20000}'..='\u{2FA1F}'
+            | '\u{30000}'..='\u{3134F}')
 }
 
 #[cfg(test)]
@@ -280,6 +283,12 @@ mod tests {
     #[test]
     fn estimate_tokens_mixed_text() {
         assert_eq!(ContextBuilder::estimate_tokens("合同termination条款"), 7);
+    }
+
+    #[test]
+    fn estimate_tokens_cjk_extension_b_counts_one_per_char() {
+        // U+20000..U+20003, CJK Extension B (rare ideographs in names)
+        assert_eq!(ContextBuilder::estimate_tokens("𠀀𠀁𠀂𠀃"), 4);
     }
 
     #[test]

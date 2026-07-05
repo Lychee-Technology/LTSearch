@@ -311,6 +311,21 @@ mod turbo_model_tests {
     }
 
     #[test]
+    fn search_request_rejects_out_of_range_dynamic_bias() {
+        let req = SearchRequest {
+            query: "test".into(),
+            top_k: 5,
+            filters: None,
+            include_metadata: false,
+            corpus_weights: Some(CorpusWeights {
+                static_bias: 0.5,
+                dynamic_bias: -0.1,
+            }),
+        };
+        assert!(req.validate().is_err());
+    }
+
+    #[test]
     fn search_result_with_static_source() {
         let r = SearchResult {
             doc_id: "abc".into(),
