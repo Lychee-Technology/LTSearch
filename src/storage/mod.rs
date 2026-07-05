@@ -1,6 +1,7 @@
 pub mod head;
 pub mod manifest_store;
 pub mod s3_paths;
+pub mod staged_publish;
 
 pub use head::{HeadError, ManifestHead};
 pub use manifest_store::{ActiveManifest, LocalManifestStore, ManifestStore, ManifestStoreError};
