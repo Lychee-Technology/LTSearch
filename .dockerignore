@@ -2,6 +2,7 @@
 .aws-sam
 .e2e-tmp
 .sam-e2e-artifacts
+.worktrees
 target
 .sam-local-deps/LTEmbed/.git
 .sam-local-deps/LTEmbed/target
