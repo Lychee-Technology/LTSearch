@@ -3,7 +3,7 @@ RUN dnf install -y --allowerasing gcc gcc-c++ make perl pkgconfig openssl-devel 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.94.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 ARG LTEMBED_MODE=stub
-# Tarball with an ort_bundle for jina-embeddings-v5-text-nano at its root:
+# Tarball with an ort_bundle for jina-embeddings-v5-text-nano-retrieval at its root:
 # model.ort, tokenizer.json, build-info.json, libonnxruntime.so (linux/arm64).
 # Produced by the LTEmbed bundle builder; required when LTEMBED_MODE=real.
 ARG LTEMBED_BUNDLE_URL=

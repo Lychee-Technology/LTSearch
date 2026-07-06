@@ -551,7 +551,7 @@ The system supports two embedding providers, selected per deployment via environ
 | Provider | Env value | Description |
 | -------- | --------- | ----------- |
 | Fixed | `fixed` | Deterministic stub vector; all documents and queries share the same vector. Used in CI and unit tests. |
-| LTEmbed | `ltembed` | Real model inference: `jinaai/jina-embeddings-v5-text-nano`, **512-dim** (768-dim raw, Matryoshka-truncated and L2-re-normalized to 512 by the LTEmbed ONNX engine; last-token pooling; `Query: ` / `Document: ` prefixes applied by the engine per input kind — build side embeds Documents, query side embeds Queries). |
+| LTEmbed | `ltembed` | Real model inference: `jinaai/jina-embeddings-v5-text-nano-retrieval`, **512-dim** (768-dim raw, Matryoshka-truncated and L2-re-normalized to 512 by the LTEmbed ONNX engine; last-token pooling; `Query: ` / `Document: ` prefixes applied by the engine per input kind — build side embeds Documents, query side embeds Queries). |
 
 The provider is configured independently for the build pipeline (`LTSEARCH_BUILD_EMBEDDING_PROVIDER`) and the query path (`LTSEARCH_QUERY_EMBEDDING_PROVIDER`). Both must use the same provider and dimension for a given index version. The static TurboQuant path is pinned to 512-dim (`TurboRecord512`), matching the LTEmbed output.
 
@@ -561,7 +561,7 @@ LTEmbed configuration per side is two env vars: `LTSEARCH_{BUILD,QUERY}_LTEMBED_
 
 ## **LTEmbed Asset Delivery**
 
-Model files are too large for Lambda Layers and impractical to download at cold-start. Instead, an **ort bundle** — produced by the LTEmbed bundle builder for jina-embeddings-v5-text-nano — is **baked into the Lambda container image** at build time.
+Model files are too large for Lambda Layers and impractical to download at cold-start. Instead, an **ort bundle** — produced by the LTEmbed bundle pipeline (`minimal-ort-builder` release assets, q4f16 with a matching minimal-build `libonnxruntime.so`) for jina-embeddings-v5-text-nano-retrieval — is **baked into the Lambda container image** at build time.
 
 Build flow:
 

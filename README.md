@@ -146,7 +146,7 @@ The SAM Local E2E scripts run the full write → build → query pipeline agains
 | Mode | Description | When to use |
 |------|-------------|-------------|
 | `fixed` (default) | Deterministic 3-dim stub vector, no model required | CI, quick local iteration |
-| `ltembed` | Real `jinaai/jina-embeddings-v5-text-nano` inference via the LTEmbed ONNX engine, 512-dim | Testing real semantic search locally |
+| `ltembed` | Real `jinaai/jina-embeddings-v5-text-nano-retrieval` inference via the LTEmbed ONNX engine, 512-dim | Testing real semantic search locally |
 
 The `ltembed` mode downloads an ort bundle (`model.ort`, `tokenizer.json`, `build-info.json`, `libonnxruntime.so`) during `docker build`; point `LTSEARCH_E2E_LTEMBED_BUNDLE_URL` at an LTEmbed bundle tarball. Rust tests that need real inference look for a sibling `../LTEmbed/ort_bundle/` checkout and skip when absent.
 
