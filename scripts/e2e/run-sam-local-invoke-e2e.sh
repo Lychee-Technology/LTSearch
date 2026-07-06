@@ -187,10 +187,12 @@ messages = response.get('Messages', [])
 if not messages:
     raise SystemExit('expected one SQS batch message for LTEmbed run')
 body = json.loads(messages[0]['Body'])
+# The fixed-provider run above already activated version 1 in the shared
+# bucket; the monotonic publish check requires a strictly greater version.
 event = {
     'batch_id': body['batch_id'],
     'wal_key': body['wal_key'],
-    'version_id': 1,
+    'version_id': 2,
     'embedding_dim': 512,
 }
 json.dump(event, open(sys.argv[2], 'w'))
@@ -213,12 +215,12 @@ PY
     > "$LTEMBED_QUERY_RESPONSE_JSON"
 
   assert_json_field "$LTEMBED_WRITE_RESPONSE_JSON" accepted_count 6
-  assert_json_field "$LTEMBED_BUILD_RESPONSE_JSON" activated_version_id 1
+  assert_json_field "$LTEMBED_BUILD_RESPONSE_JSON" activated_version_id 2
 
   python3 - <<'PY' "$LTEMBED_QUERY_RESPONSE_JSON"
 import json, sys
 response = json.load(open(sys.argv[1]))
-assert response['index_version'] == 1, response
+assert response['index_version'] == 2, response
 assert response['dynamic_count'] >= 1, response
 doc_ids = [item['doc_id'] for item in response['dynamic_chunks']]
 assert 'doc-rust-hybrid' in doc_ids, response
