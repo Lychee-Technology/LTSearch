@@ -114,7 +114,11 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("tokenizer.json", content)
         self.assertIn("build-info.json", content)
         self.assertIn("libonnxruntime.so", content)
-        # real mode must fail loudly when no bundle URL is provided
+        # defaults to the public pinned minimal-ort-builder release asset
+        self.assertIn(
+            "minimal-ort-builder/releases/download/v1.0.9/", content
+        )
+        # real mode still fails loudly if the URL is explicitly emptied
         self.assertIn("requires LTEMBED_BUNDLE_URL", content)
         # download must happen before COPY so the layer is cached independently
         download_pos = content.index("LTEMBED_BUNDLE_URL")
