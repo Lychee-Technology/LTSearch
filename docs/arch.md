@@ -551,49 +551,43 @@ The system supports two embedding providers, selected per deployment via environ
 | Provider | Env value | Description |
 | -------- | --------- | ----------- |
 | Fixed | `fixed` | Deterministic stub vector; all documents and queries share the same vector. Used in CI and unit tests. |
-| LTEmbed | `ltembed` | Real model inference. **Production target: `jinaai/jina-embeddings-v5-text-nano`, 512-dim** (768-dim raw, Matryoshka-truncated and re-normalized to 512 by the LTEmbed engine; last-token pooling; built-in `Query: ` / `Document: ` prefixes). |
+| LTEmbed | `ltembed` | Real model inference: `jinaai/jina-embeddings-v5-text-nano-retrieval`, **512-dim** (768-dim raw, Matryoshka-truncated and L2-re-normalized to 512 by the LTEmbed ONNX engine; last-token pooling; `Query: ` / `Document: ` prefixes applied by the engine per input kind — build side embeds Documents, query side embeds Queries). |
 
-The provider is configured independently for the build pipeline (`LTSEARCH_BUILD_EMBEDDING_PROVIDER`) and the query path (`LTSEARCH_QUERY_EMBEDDING_PROVIDER`). Both must use the same provider and dimension for a given index version. The static TurboQuant path is pinned to 512-dim (`TurboRecord512`), matching the production target.
+The provider is configured independently for the build pipeline (`LTSEARCH_BUILD_EMBEDDING_PROVIDER`) and the query path (`LTSEARCH_QUERY_EMBEDDING_PROVIDER`). Both must use the same provider and dimension for a given index version. The static TurboQuant path is pinned to 512-dim (`TurboRecord512`), matching the LTEmbed output.
 
-> **Transitional note (tracked in #96):** the ltembed revision currently pinned
-> in `Cargo.lock` is the legacy candle-based engine (mean/cls pooling,
-> `config.json` + `model.safetensors` loading). It cannot load the jina-v5
-> custom architecture, so the local real-mode E2E still runs an e5-small-family
-> model at 384-dim (`sam/builder.Dockerfile` `HF_MODEL` default, the
-> `../LTEmbed/assets` test fixture, and `bootstrap.rs`'s 384 assertion are all
-> part of that coherent legacy stack). Upgrading the integration to the current
-> LTEmbed ONNX engine — which implements the production target natively — is
-> issue #96; until it lands, do not switch any single piece of that stack in
-> isolation.
+LTEmbed configuration per side is two env vars: `LTSEARCH_{BUILD,QUERY}_LTEMBED_BUNDLE_DIR` (directory holding `tokenizer.json` + `build-info.json`, and optionally `libonnxruntime.so`) and `LTSEARCH_{BUILD,QUERY}_LTEMBED_MODEL_PATH` (the `model.ort` weights). Pooling, prefixes, and output dimension are owned by the engine and its bundle metadata — there are no pooling/prefix env vars.
 
 ---
 
 ## **LTEmbed Asset Delivery**
 
-Model files are too large for Lambda Layers and impractical to download at cold-start (the legacy `intfloat/multilingual-e5-small` weights are ~471 MB; the target `jina-embeddings-v5-text-nano` safetensors are ~212 MB, with the ONNX bundle strategy decided in #96). Instead, the model files are **baked into the Lambda container image** at build time.
+Model files are too large for Lambda Layers and impractical to download at cold-start. Instead, an **ort bundle** — produced by the LTEmbed bundle pipeline (`minimal-ort-builder` release assets, q4f16 with a matching minimal-build `libonnxruntime.so`) for jina-embeddings-v5-text-nano-retrieval — is **baked into the Lambda container image** at build time.
 
 Build flow:
 
 ```
-docker build --build-arg LTEMBED_MODE=real sam/builder.Dockerfile
-  → downloads model.safetensors, config.json, tokenizer.json from HuggingFace
+docker build --build-arg LTEMBED_MODE=real \
+             --build-arg LTEMBED_BUNDLE_URL=<ort-bundle tarball> \
+             sam/builder.Dockerfile
+  → downloads and unpacks the bundle into /ltembed-assets/
   → compiles Rust binaries with --features ltembed
-  → embeds files at /ltembed-assets/ in the builder image
+    (against the LTEmbed checkout staged at .sam-local-deps/LTEmbed)
 
 sam build
   → index_builder_lambda.Dockerfile: COPY --from=builder /ltembed-assets /ltembed-assets
   → query_lambda.Dockerfile:         COPY --from=builder /ltembed-assets /ltembed-assets
 ```
 
-The default `LTEMBED_MODE=stub` skips the download and compiles with the ltembed-stub crate, which produces zero-overhead deterministic vectors. This is the CI default.
+The default `LTEMBED_MODE=stub` skips the download and satisfies the ltembed git dependency with the vendored stub crate; binaries are built without the `ltembed` feature and use the `fixed` provider. This is the CI default. `LTEMBED_MODE=real` fails the build loudly if `LTEMBED_BUNDLE_URL` is not provided.
 
-Model files inside Lambda containers:
+Bundle files inside Lambda containers:
 
 | File | Container path |
 | ---- | -------------- |
-| `model.safetensors` | `/ltembed-assets/model.safetensors` |
-| `config.json` | `/ltembed-assets/config.json` |
+| `model.ort` | `/ltembed-assets/model.ort` |
 | `tokenizer.json` | `/ltembed-assets/tokenizer.json` |
+| `build-info.json` | `/ltembed-assets/build-info.json` |
+| `libonnxruntime.so` | `/ltembed-assets/libonnxruntime.so` (resolved automatically by the engine; `ort` is built with `load-dynamic`) |
 
 ---
 

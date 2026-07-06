@@ -291,14 +291,14 @@ fn valid_search_request() -> SearchRequest {
 }
 
 #[cfg(feature = "ltembed")]
-fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
+fn maybe_ltembed_bundle_dir() -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .map(|ancestor| ancestor.join("LTEmbed/assets"))
+        .map(|ancestor| ancestor.join("LTEmbed/ort_bundle"))
         .find(|candidate| {
-            candidate.join("config.json").exists()
+            candidate.join("build-info.json").exists()
                 && candidate.join("tokenizer.json").exists()
-                && candidate.join("model.safetensors").exists()
+                && candidate.join("model.ort").exists()
         })
 }
 
@@ -383,22 +383,19 @@ fn query_lambda_bootstrap_returns_service_error_when_embedding_provider_is_missi
 
 #[cfg(feature = "ltembed")]
 #[test]
-fn query_lambda_bootstrap_reports_missing_ltembed_model_path() {
+fn query_lambda_bootstrap_reports_missing_ltembed_bundle_dir() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
-    let root = temp_fixture_dir("query-lambda-bootstrap-ltembed-missing-model");
+    let root = temp_fixture_dir("query-lambda-bootstrap-ltembed-missing-bundle");
     write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(7));
     write_fixture(&root, &version_manifest_key(7), &sample_manifest_json(7));
 
     std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "ltembed");
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
+    std::env::remove_var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR");
     std::env::remove_var("LTSEARCH_QUERY_LTEMBED_MODEL_PATH");
-    std::env::remove_var("LTSEARCH_QUERY_LTEMBED_CONFIG_PATH");
-    std::env::remove_var("LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH");
-    std::env::remove_var("LTSEARCH_QUERY_LTEMBED_POOLING");
-    std::env::remove_var("LTSEARCH_QUERY_LTEMBED_PREFIX");
 
     let error = match bootstrap_query_handler_from_env() {
-        Ok(_) => panic!("expected bootstrap to fail without LTEmbed model path"),
+        Ok(_) => panic!("expected bootstrap to fail without LTEmbed bundle dir"),
         Err(error) => error,
     };
 
@@ -406,41 +403,42 @@ fn query_lambda_bootstrap_reports_missing_ltembed_model_path() {
     assert_eq!(body["error_type"], "execution_error");
     assert_eq!(
         body["message"],
-        "query lambda bootstrap failed: missing LTSEARCH_QUERY_LTEMBED_MODEL_PATH"
+        "query lambda bootstrap failed: missing LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR"
     );
 }
 
 #[cfg(feature = "ltembed")]
 #[test]
-fn query_lambda_bootstrap_reports_unsupported_ltembed_pooling_mode() {
+fn query_lambda_bootstrap_reports_missing_ltembed_bundle_files() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
-    let root = temp_fixture_dir("query-lambda-bootstrap-ltembed-bad-pooling");
+    let root = temp_fixture_dir("query-lambda-bootstrap-ltembed-missing-files");
     write_fixture(&root, INDEX_HEAD_KEY, &sample_head_json(7));
     write_fixture(&root, &version_manifest_key(7), &sample_manifest_json(7));
 
     std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "ltembed");
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
     std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
-        "/tmp/model.safetensors",
+        "LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR",
+        root.join("no-such-bundle"),
     );
-    std::env::set_var("LTSEARCH_QUERY_LTEMBED_CONFIG_PATH", "/tmp/config.json");
     std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH",
-        "/tmp/tokenizer.json",
+        "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
+        root.join("no-such-bundle/model.ort"),
     );
-    std::env::set_var("LTSEARCH_QUERY_LTEMBED_POOLING", "median");
 
     let error = match bootstrap_query_handler_from_env() {
-        Ok(_) => panic!("expected bootstrap to fail for unsupported LTEmbed pooling mode"),
+        Ok(_) => panic!("expected bootstrap to fail when bundle files are missing"),
         Err(error) => error,
     };
 
     let body = serde_json::to_value(&error).unwrap();
     assert_eq!(body["error_type"], "execution_error");
-    assert_eq!(
-        body["message"],
-        "query lambda bootstrap failed: unsupported LTEmbed pooling mode: median"
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            "query lambda bootstrap failed: embedding generation failed: LTEmbed bootstrap failed:"
+        ),
+        "unexpected message: {message}"
     );
 }
 
@@ -586,8 +584,8 @@ fn query_lambda_bootstrap_rejects_fixed_embedding_dim_mismatch_before_serving_re
 #[test]
 fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
-    let Some(assets_dir) = maybe_ltembed_assets_dir() else {
-        eprintln!("Skipping: LTEmbed assets not found in sibling checkout");
+    let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
+        eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
         return;
     };
 
@@ -607,28 +605,19 @@ fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() 
         &root,
         "lance/v7/shard_0",
         &[
-            json!({"doc_id":"doc-1","text":"rust hybrid search","embedding": repeated_embedding(384, 0.01)}),
-            json!({"doc_id":"doc-2","text":"rust keyword","embedding": repeated_embedding(384, 0.009)}),
+            json!({"doc_id":"doc-1","text":"rust hybrid search","embedding": repeated_embedding(512, 0.01)}),
+            json!({"doc_id":"doc-2","text":"rust keyword","embedding": repeated_embedding(512, 0.009)}),
         ],
-        384,
+        512,
     );
 
     std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "ltembed");
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
+    std::env::set_var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR", &bundle_dir);
     std::env::set_var(
         "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
-        assets_dir.join("model.safetensors"),
+        bundle_dir.join("model.ort"),
     );
-    std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_CONFIG_PATH",
-        assets_dir.join("config.json"),
-    );
-    std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH",
-        assets_dir.join("tokenizer.json"),
-    );
-    std::env::set_var("LTSEARCH_QUERY_LTEMBED_POOLING", "mean");
-    std::env::set_var("LTSEARCH_QUERY_LTEMBED_PREFIX", "query:");
 
     let handler = bootstrap_query_handler_from_env().expect("expected LTEmbed bootstrap to work");
     let response = handle_search_request(
@@ -653,8 +642,8 @@ fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() 
 #[test]
 fn query_lambda_bootstrap_rejects_ltembed_dim_mismatch_before_serving_requests() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
-    let Some(assets_dir) = maybe_ltembed_assets_dir() else {
-        eprintln!("Skipping: LTEmbed assets not found in sibling checkout");
+    let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
+        eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
         return;
     };
 
@@ -668,20 +657,11 @@ fn query_lambda_bootstrap_rejects_ltembed_dim_mismatch_before_serving_requests()
 
     std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "ltembed");
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
+    std::env::set_var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR", &bundle_dir);
     std::env::set_var(
         "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
-        assets_dir.join("model.safetensors"),
+        bundle_dir.join("model.ort"),
     );
-    std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_CONFIG_PATH",
-        assets_dir.join("config.json"),
-    );
-    std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH",
-        assets_dir.join("tokenizer.json"),
-    );
-    std::env::set_var("LTSEARCH_QUERY_LTEMBED_POOLING", "mean");
-    std::env::set_var("LTSEARCH_QUERY_LTEMBED_PREFIX", "query:");
 
     let error = match bootstrap_query_handler_from_env() {
         Ok(_) => panic!("expected bootstrap to fail for LTEmbed embedding dimension mismatch"),
@@ -691,7 +671,7 @@ fn query_lambda_bootstrap_rejects_ltembed_dim_mismatch_before_serving_requests()
     assert_eq!(body["error_type"], "execution_error");
     assert_eq!(
         body["message"],
-        "query lambda bootstrap failed: LTSEARCH_QUERY_LTEMBED embedding dimension 384 does not match manifest embedding_dim 3"
+        "query lambda bootstrap failed: LTSEARCH_QUERY_LTEMBED embedding dimension 512 does not match manifest embedding_dim 3"
     );
 }
 

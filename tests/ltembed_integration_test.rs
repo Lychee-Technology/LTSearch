@@ -5,9 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ltsearch::embedding::{
-    EmbeddingGenerator, LTEmbedConfig, LTEmbedEmbeddingGenerator, LTEmbedPoolingMode,
-};
+use ltembed::engine::EmbeddingInputKind;
+use ltsearch::embedding::{EmbeddingGenerator, LTEmbedConfig, LTEmbedEmbeddingGenerator};
 use ltsearch::indexing::{BuildIndexRequest, LocalIndexBuilder};
 use ltsearch::models::{Document, SearchRequest, WalOperation, WalRecord};
 use ltsearch::query::{KeywordSearcher, QueryRouter, VectorSearcher};
@@ -49,24 +48,21 @@ fn temp_fixture_dir(test_name: &str) -> PathBuf {
     dir
 }
 
-fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
+fn maybe_ltembed_bundle_dir() -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .map(|ancestor| ancestor.join("LTEmbed/assets"))
+        .map(|ancestor| ancestor.join("LTEmbed/ort_bundle"))
         .find(|candidate| {
-            candidate.join("config.json").exists()
+            candidate.join("build-info.json").exists()
                 && candidate.join("tokenizer.json").exists()
-                && candidate.join("model.safetensors").exists()
+                && candidate.join("model.ort").exists()
         })
 }
 
-fn ltembed_config(assets_dir: &Path, prefix: &str) -> LTEmbedConfig {
+fn ltembed_config(bundle_dir: &Path) -> LTEmbedConfig {
     LTEmbedConfig {
-        model_path: assets_dir.join("model.safetensors").display().to_string(),
-        config_path: assets_dir.join("config.json").display().to_string(),
-        tokenizer_path: assets_dir.join("tokenizer.json").display().to_string(),
-        pooling: LTEmbedPoolingMode::Mean,
-        prefix: Some(prefix.into()),
+        bundle_dir: bundle_dir.display().to_string(),
+        model_path: bundle_dir.join("model.ort").display().to_string(),
     }
 }
 
@@ -95,22 +91,24 @@ fn upsert_record(
 
 #[test]
 fn ltembed_end_to_end_build_and_hybrid_query_flow() {
-    let Some(assets_dir) = maybe_ltembed_assets_dir() else {
-        eprintln!("Skipping: LTEmbed assets not found in sibling checkout");
+    let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
+        eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
         return;
     };
 
     let root = temp_fixture_dir("ltembed-end-to-end-flow");
-    let build_generator =
-        LTEmbedEmbeddingGenerator::from_config(&ltembed_config(&assets_dir, "passage:"))
-            .expect("expected LTEmbed build generator to bootstrap");
+    let build_generator = LTEmbedEmbeddingGenerator::from_config(
+        &ltembed_config(&bundle_dir),
+        EmbeddingInputKind::Document,
+    )
+    .expect("expected LTEmbed build generator to bootstrap");
     let builder = LocalIndexBuilder::new(&root, build_generator);
 
     let built = builder
         .build(&BuildIndexRequest {
             version_id: 9,
             created_at: 1_700_000_029_000,
-            embedding_dim: 384,
+            embedding_dim: 512,
             records: vec![
                 upsert_record(
                     "event-1",
@@ -149,9 +147,11 @@ fn ltembed_end_to_end_build_and_hybrid_query_flow() {
         manifest: built.manifest.clone(),
     };
 
-    let query_generator =
-        LTEmbedEmbeddingGenerator::from_config(&ltembed_config(&assets_dir, "query:"))
-            .expect("expected LTEmbed query generator to bootstrap");
+    let query_generator = LTEmbedEmbeddingGenerator::from_config(
+        &ltembed_config(&bundle_dir),
+        EmbeddingInputKind::Query,
+    )
+    .expect("expected LTEmbed query generator to bootstrap");
     let manifest_store = FixedManifestStore::new(active_manifest.clone());
     let keyword_searcher = KeywordSearcher::new(manifest_store.clone(), &root);
     let vector_searcher = VectorSearcher::new(manifest_store.clone(), &root);
@@ -173,7 +173,7 @@ fn ltembed_end_to_end_build_and_hybrid_query_flow() {
         .expect("expected LTEmbed end-to-end search to succeed");
 
     assert_eq!(response.index_version, 9);
-    assert_eq!(built.manifest.embedding_dim, 384);
+    assert_eq!(built.manifest.embedding_dim, 512);
     assert!(!response.dynamic_chunks.is_empty());
     assert!(response
         .dynamic_chunks
@@ -192,11 +192,13 @@ fn ltembed_end_to_end_build_and_hybrid_query_flow() {
         .iter()
         .all(|result| !result.doc_id.is_empty()));
 
-    let query_embedding =
-        LTEmbedEmbeddingGenerator::from_config(&ltembed_config(&assets_dir, "query:"))
-            .expect("expected LTEmbed query generator to bootstrap")
-            .generate("rust retrieval")
-            .expect("expected LTEmbed query embedding to be generated");
+    let query_embedding = LTEmbedEmbeddingGenerator::from_config(
+        &ltembed_config(&bundle_dir),
+        EmbeddingInputKind::Query,
+    )
+    .expect("expected LTEmbed query generator to bootstrap")
+    .generate("rust retrieval")
+    .expect("expected LTEmbed query embedding to be generated");
     assert_eq!(query_embedding.len(), built.manifest.embedding_dim);
 
     let keyword_results =

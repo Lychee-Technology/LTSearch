@@ -118,21 +118,23 @@ pub fn build_embedding_generator_from_env(
         }),
         #[cfg(feature = "ltembed")]
         EmbeddingProvider::LTEmbed => ltembed_config_from_env(
+            "LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR",
             "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
-            "LTSEARCH_BUILD_LTEMBED_CONFIG_PATH",
-            "LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH",
-            "LTSEARCH_BUILD_LTEMBED_POOLING",
-            "LTSEARCH_BUILD_LTEMBED_PREFIX",
         )
         .map_err(|error| BootstrapError::Embedding {
             message: error.to_string(),
         })
         .and_then(|config| {
-            LTEmbedEmbeddingGenerator::from_config(&config)
-                .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
-                .map_err(|error| BootstrapError::Embedding {
-                    message: error.to_string(),
-                })
+            // Build side embeds corpus chunks — Document inputs; the engine
+            // prepends the model's document prefix itself.
+            LTEmbedEmbeddingGenerator::from_config(
+                &config,
+                ltembed::engine::EmbeddingInputKind::Document,
+            )
+            .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
+            .map_err(|error| BootstrapError::Embedding {
+                message: error.to_string(),
+            })
         }),
     }
 }
@@ -229,27 +231,42 @@ mod tests {
 
         use super::*;
 
-        fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
+        /// Locates a sibling-checkout ort bundle: a directory holding
+        /// `tokenizer.json` + `build-info.json` next to `model.ort`.
+        fn maybe_ltembed_bundle_dir() -> Option<PathBuf> {
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .ancestors()
-                .map(|ancestor| ancestor.join("LTEmbed/assets"))
+                .map(|ancestor| ancestor.join("LTEmbed/ort_bundle"))
                 .find(|candidate| {
-                    candidate.join("config.json").exists()
+                    candidate.join("build-info.json").exists()
                         && candidate.join("tokenizer.json").exists()
-                        && candidate.join("model.safetensors").exists()
+                        && candidate.join("model.ort").exists()
                 })
+        }
+
+        #[test]
+        fn ltembed_provider_reports_missing_bundle_dir() {
+            let _guard = env_guard();
+            std::env::remove_var("LTSEARCH_BUILD_FIXED_EMBEDDING");
+            std::env::remove_var("LTSEARCH_BUILD_EMBEDDING_DIM");
+            std::env::remove_var("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR");
+            std::env::remove_var("LTSEARCH_BUILD_LTEMBED_MODEL_PATH");
+
+            let error = match build_embedding_generator_from_env(EmbeddingProvider::LTEmbed) {
+                Ok(_) => panic!("expected LTEmbed bootstrap to fail without bundle dir"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                "missing LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR"
+            );
         }
 
         #[test]
         fn ltembed_provider_reports_missing_model_path() {
             let _guard = env_guard();
-            std::env::remove_var("LTSEARCH_BUILD_FIXED_EMBEDDING");
-            std::env::remove_var("LTSEARCH_BUILD_EMBEDDING_DIM");
+            std::env::set_var("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR", "/tmp/ort_bundle");
             std::env::remove_var("LTSEARCH_BUILD_LTEMBED_MODEL_PATH");
-            std::env::remove_var("LTSEARCH_BUILD_LTEMBED_CONFIG_PATH");
-            std::env::remove_var("LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH");
-            std::env::remove_var("LTSEARCH_BUILD_LTEMBED_POOLING");
-            std::env::remove_var("LTSEARCH_BUILD_LTEMBED_PREFIX");
 
             let error = match build_embedding_generator_from_env(EmbeddingProvider::LTEmbed) {
                 Ok(_) => panic!("expected LTEmbed bootstrap to fail without model path"),
@@ -262,52 +279,18 @@ mod tests {
         }
 
         #[test]
-        fn ltembed_provider_reports_unsupported_pooling_mode() {
+        fn ltembed_provider_builds_embedding_generator_when_bundle_is_available() {
             let _guard = env_guard();
-            std::env::set_var(
-                "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
-                "/tmp/model.safetensors",
-            );
-            std::env::set_var("LTSEARCH_BUILD_LTEMBED_CONFIG_PATH", "/tmp/config.json");
-            std::env::set_var(
-                "LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH",
-                "/tmp/tokenizer.json",
-            );
-            std::env::set_var("LTSEARCH_BUILD_LTEMBED_POOLING", "median");
-            std::env::remove_var("LTSEARCH_BUILD_LTEMBED_PREFIX");
-
-            let error = match build_embedding_generator_from_env(EmbeddingProvider::LTEmbed) {
-                Ok(_) => panic!("expected LTEmbed bootstrap to reject pooling mode"),
-                Err(error) => error,
-            };
-            assert_eq!(
-                error.to_string(),
-                "unsupported LTEmbed pooling mode: median"
-            );
-        }
-
-        #[test]
-        fn ltembed_provider_builds_embedding_generator_when_assets_are_available() {
-            let _guard = env_guard();
-            let Some(assets_dir) = maybe_ltembed_assets_dir() else {
-                eprintln!("Skipping: LTEmbed assets not found in sibling checkout");
+            let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
+                eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
                 return;
             };
 
+            std::env::set_var("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR", &bundle_dir);
             std::env::set_var(
                 "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
-                assets_dir.join("model.safetensors"),
+                bundle_dir.join("model.ort"),
             );
-            std::env::set_var(
-                "LTSEARCH_BUILD_LTEMBED_CONFIG_PATH",
-                assets_dir.join("config.json"),
-            );
-            std::env::set_var(
-                "LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH",
-                assets_dir.join("tokenizer.json"),
-            );
-            std::env::set_var("LTSEARCH_BUILD_LTEMBED_POOLING", "mean");
-            std::env::set_var("LTSEARCH_BUILD_LTEMBED_PREFIX", "passage:");
 
             let generator = build_embedding_generator_from_env(EmbeddingProvider::LTEmbed)
                 .expect("expected LTEmbed bootstrap to construct generator");
@@ -315,10 +298,9 @@ mod tests {
                 .generate("rust search document")
                 .expect("expected LTEmbed generator to produce an embedding");
 
-            // 384 is the legacy e5-family fixture staged in ../LTEmbed/assets;
-            // the pinned ltembed engine cannot load the 512-dim production
-            // target (jina-v5-nano) until the engine upgrade lands (#96).
-            assert_eq!(embedding.len(), 384);
+            // jina-v5-nano production target: 768 raw, truncated + L2-normalized
+            // to 512 by the engine (#94 ruling, #96 upgrade).
+            assert_eq!(embedding.len(), 512);
         }
     }
 }

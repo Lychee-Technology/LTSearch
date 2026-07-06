@@ -75,10 +75,8 @@ cargo build --bin query_lambda
 | `LTSEARCH_QUERY_EMBEDDING_PROVIDER` | Embedding provider: `fixed` or `ltembed` |
 | `LTSEARCH_QUERY_ARTIFACT_ROOT` | Local path to index artifacts |
 | `LTSEARCH_QUERY_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
-| `LTSEARCH_QUERY_LTEMBED_MODEL_PATH` | Path to `model.safetensors` (provider=`ltembed`) |
-| `LTSEARCH_QUERY_LTEMBED_CONFIG_PATH` | Path to `config.json` |
-| `LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH` | Path to `tokenizer.json` |
-| `LTSEARCH_QUERY_LTEMBED_POOLING` | Pooling strategy (e.g. `mean`) |
+| `LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR` | Dir with `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
+| `LTSEARCH_QUERY_LTEMBED_MODEL_PATH` | Path to `model.ort` |
 | `LTSEARCH_QUERY_STATIC_DIR` | Optional: parent dir for static TurboQuant index (`static/` subdir). Default: `LTSEARCH_QUERY_ARTIFACT_ROOT`. Set to `/app` when using Docker image. |
 
 ### write_lambda
@@ -109,10 +107,8 @@ cargo build --bin index_builder_lambda
 | `LTSEARCH_BUILD_EMBEDDING_PROVIDER` | Embedding provider: `fixed` or `ltembed` |
 | `LTSEARCH_BUILD_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
 | `LTSEARCH_BUILD_EMBEDDING_DIM` | Embedding dimension |
-| `LTSEARCH_BUILD_LTEMBED_MODEL_PATH` | Path to `model.safetensors` (provider=`ltembed`) |
-| `LTSEARCH_BUILD_LTEMBED_CONFIG_PATH` | Path to `config.json` |
-| `LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH` | Path to `tokenizer.json` |
-| `LTSEARCH_BUILD_LTEMBED_POOLING` | Pooling strategy (e.g. `mean`) |
+| `LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR` | Dir with `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
+| `LTSEARCH_BUILD_LTEMBED_MODEL_PATH` | Path to `model.ort` |
 
 ### turbo_index_builder
 
@@ -127,10 +123,8 @@ cargo build --bin turbo_index_builder
 | `LTSEARCH_BUILD_EMBEDDING_PROVIDER` | Embedding provider: `fixed` or `ltembed` (default: `fixed`) |
 | `LTSEARCH_BUILD_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
 | `LTSEARCH_BUILD_EMBEDDING_DIM` | Embedding dimension |
-| `LTSEARCH_BUILD_LTEMBED_MODEL_PATH` | Path to `model.safetensors` (provider=`ltembed`) |
-| `LTSEARCH_BUILD_LTEMBED_CONFIG_PATH` | Path to `config.json` |
-| `LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH` | Path to `tokenizer.json` |
-| `LTSEARCH_BUILD_LTEMBED_POOLING` | Pooling strategy (e.g. `mean`) |
+| `LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR` | Dir with `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
+| `LTSEARCH_BUILD_LTEMBED_MODEL_PATH` | Path to `model.ort` |
 
 Usage:
 ```bash
@@ -152,9 +146,9 @@ The SAM Local E2E scripts run the full write → build → query pipeline agains
 | Mode | Description | When to use |
 |------|-------------|-------------|
 | `fixed` (default) | Deterministic 3-dim stub vector, no model required | CI, quick local iteration |
-| `ltembed` | Real model inference. Production target: `jinaai/jina-embeddings-v5-text-nano`, 512-dim; local E2E currently still runs the legacy e5-small stack at 384-dim until the engine upgrade lands (#96) | Testing real semantic search locally |
+| `ltembed` | Real `jinaai/jina-embeddings-v5-text-nano-retrieval` inference via the LTEmbed ONNX engine, 512-dim | Testing real semantic search locally |
 
-The `ltembed` mode downloads `model.safetensors`, `config.json`, and `tokenizer.json` from HuggingFace automatically during `docker build` (model pinned by `HF_MODEL` in `sam/builder.Dockerfile`). No manual file setup is required.
+The `ltembed` mode downloads an ort bundle (`model.ort`, `tokenizer.json`, `build-info.json`, `libonnxruntime.so`) during `docker build`; point `LTSEARCH_E2E_LTEMBED_BUNDLE_URL` at an LTEmbed bundle tarball. Rust tests that need real inference look for a sibling `../LTEmbed/ort_bundle/` checkout and skip when absent.
 
 ### SAM invoke E2E (CI-compatible)
 
