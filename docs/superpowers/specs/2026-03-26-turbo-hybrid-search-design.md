@@ -18,7 +18,7 @@ This document describes a two-tier hybrid search architecture that separates sta
 | Constraint | Value |
 |---|---|
 | Static corpus update frequency | Monthly / quarterly |
-| Static corpus scale | 10万 ~ 100万 chunks (~15–156 MB compressed) |
+| Static corpus scale | 10万 ~ 100万 chunks (~21–208 MB compressed) |
 | Static corpus tenancy | Shared across all tenants |
 | Dynamic data tenancy | Per-tenant |
 | Result presentation | Blended (single unified answer) |
@@ -59,39 +59,77 @@ Both paths execute **fully in parallel**. There is no cross-path score normaliza
 
 ## 4. Static Index: File Layout
 
-Three memory-mapped binary files, all bundled in the Lambda Docker image:
+Five memory-mapped files, all bundled in the Lambda Docker image:
 
 ```
 /app/static/
-  turbo_static.bin       # Compressed vectors, 156 bytes per record
-  turbo_static_meta.bin  # Fixed-size metadata, one record per chunk
+  turbo_static.bin       # 32-byte header + compressed vectors, 208 bytes per record
+  turbo_static_meta.bin  # Fixed-size metadata, one 32-byte record per chunk
   turbo_static_text.bin  # Concatenated raw text, variable length
+  centroids.bin          # 1D MSE centroid table (4 centroids per dimension)
+  projection.bin         # QJL projection matrix S (512 × 512)
 ```
 
-### `turbo_static.bin` — TurboRecord (156 bytes, repr(C))
+### `turbo_static.bin` — TurboHeader (32 bytes) + typed records
+
+The file opens with a 32-byte header, validated on every load:
 
 | Field | Type | Size | Description |
 |---|---|---|---|
-| `doc_id` | `u64` | 8 B | Unique chunk identifier |
-| `idx` | `[u8; 96]` | 96 B | Stage 1: 2-bit MSE quantization indices (384 dims × 2 bits) |
-| `qjl` | `[u8; 48]` | 48 B | Stage 2: QJL residual sign bits (384 dims × 1 bit) |
+| magic | `[u8; 4]` | 4 B | `TQNT` |
+| version | `u32` | 4 B | Currently 1 |
+| dim | `u32` | 4 B | Embedding dimension, currently 512 |
+| record_count | `u64` | 8 B | Number of records that follow |
+| (padding) | — | 12 B | Zero-filled |
+
+`(version, dim)` dispatches to a `KnownRecordLayout` variant: `(1, 512)` →
+`V1Dim512`; any other combination fails loading with `UnsupportedLayout`.
+Future layouts are additive — existing images keep loading unchanged. Total
+file size must equal exactly `32 + record_count × 208`.
+
+### Record: `TurboRecord512` (208 bytes, repr(C), layout `V1Dim512`)
+
+| Field | Type | Size | Description |
+|---|---|---|---|
+| `doc_id` | `u64` | 8 B | FNV-1a 64-bit hash of the string chunk id |
+| `idx` | `[u8; 128]` | 128 B | Stage 1: 2-bit MSE quantization indices (512 dims × 2 bits) |
+| `qjl` | `[u8; 64]` | 64 B | Stage 2: QJL residual sign bits (512 dims × 1 bit) |
 | `gamma` | `f32` | 4 B | L2 norm of residual vector ‖r‖₂ |
+| `_reserved` | `[u8; 4]` | 4 B | Zero-filled; keeps the record size 8-byte aligned |
 
-### `turbo_static_meta.bin` — MetaRecord (fixed-size, repr(C))
+### `turbo_static_meta.bin` — MetaRecord (32 bytes, repr(C))
 
 | Field | Type | Size | Description |
 |---|---|---|---|
-| `doc_id` | `u64` | 8 B | Links to TurboRecord |
+| `doc_id` | `u64` | 8 B | Links to TurboRecord512 |
 | `corpus_type` | `u8` | 1 B | Enum: Legal=0, Contract=1, RFC=2, ... |
 | `_pad` | `[u8; 3]` | 3 B | Alignment padding |
-| `text_offset` | `u64` | 8 B | Byte offset into turbo_static_text.bin |
-| `text_len` | `u32` | 4 B | Byte length of text |
+| `text_offset` | `u64` | 8 B | Byte offset into turbo_static_text.bin (4 B alignment gap before this field) |
+| `text_len` | `u32` | 4 B | Byte length of text (4 B trailing padding after this field) |
+
+Total record size is 32 bytes including the two alignment gaps. File length
+must be a multiple of 32 and match the header's `record_count`.
 
 ### `turbo_static_text.bin`
 
 Concatenated UTF-8 text for all chunks. Accessed via `text_offset` + `text_len` from MetaRecord. Single memory address lookup — no S3 dependency.
 
-All three files are `mmap`-mounted once at Lambda startup and reused for the container's lifetime.
+### `centroids.bin` / `projection.bin`
+
+Both share an 8-byte asset header (two `u32` dimensions) followed by
+little-endian `f32` values:
+
+- `centroids.bin`: header `(dim, centroids_per_dim = 4)`, then `dim × 4`
+  values — the per-dimension 1D MSE centroid table (8,200 bytes at 512 d).
+  Generated with fixed seed 7.
+- `projection.bin`: header `(input_dim, output_dim)`, then the row-major
+  `512 × 512` QJL projection matrix S (~1 MB at 512 d). Generated with fixed
+  seed 11.
+
+The fixed seeds make builds reproducible. Loading validates both files'
+dimensions against the header's `dim`.
+
+All five files are `mmap`-mounted once at Lambda startup and reused for the container's lifetime.
 
 ---
 
@@ -102,19 +140,25 @@ All three files are `mmap`-mounted once at Lambda startup and reused for the con
 ```rust
 // src/index/mmap_index.rs
 pub struct MmapIndex {
-    records: &'static [TurboRecord],
-    meta: &'static [MetaRecord],
-    text_blob: &'static [u8],
-    centroids: Centroids,        // 1D MSE centroids, loaded at startup
+    header: TurboHeader,          // parsed from turbo_static.bin
+    layout: KnownRecordLayout,    // V1Dim512
+    bin_mmap: Mmap,
+    meta_mmap: Mmap,
+    text_mmap: Mmap,
+    centroids: CentroidTable,     // 1D MSE centroids, loaded at startup
     projection: ProjectionMatrix, // QJL matrix S, loaded at startup
 }
 
 impl MmapIndex {
-    pub fn load_from_image() -> Self;  // called once in Lambda handler init
+    pub fn load(dir: &Path) -> Result<Self, MmapIndexError>;
+    /// OnceLock-backed singleton; called once in Lambda handler init.
+    pub fn global_from_image() -> Result<&'static Self, MmapIndexError>;
+    /// Typed zero-copy view over bin_mmap, dispatched by layout.
+    pub fn records(&self) -> TurboRecordSlice<'_>;  // ::V1Dim512(&[TurboRecord512])
 }
 ```
 
-`centroids` and `projection` are precomputed offline and bundled alongside the `.bin` files.
+`centroids` and `projection` are precomputed offline and bundled alongside the `.bin` files. All five files are size/dimension-validated during `load`; warm instances reuse the singleton without re-mmapping.
 
 ### 5.2 New: `TurboQuantSearcher`
 
@@ -124,12 +168,20 @@ pub struct TurboQuantSearcher {
     index: &'static MmapIndex,
 }
 
-impl TurboQuantSearcher {
-    pub async fn search(&self, query_embedding: &[f32], top_k: usize) -> Vec<SearchResult>;
+impl StaticRetriever for TurboQuantSearcher {
+    fn search(
+        &self,
+        active_manifest: &ActiveManifest,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<SearchResult>, SearchError>;
 }
 ```
 
-Implements the same search trait as `VectorSearcher`. Uses `rayon` parallel iterator for brute-force linear scan. Score formula (TurboQuant_prod estimator):
+Implements the `StaticRetriever` trait consumed by the QueryRouter's static
+branch (synchronous — parallelism comes from `rayon`, not async). Brute-force
+linear scan with per-thread bounded heaps; ties broken by ascending `doc_id`
+for deterministic ordering. Score formula (TurboQuant_prod estimator):
 
 ```
 score = ⟨y, x̃_mse⟩ + γ · ⟨y, S^T · sign(qjl)⟩
@@ -261,14 +313,16 @@ Static documents in S3
         │
    Embedding generation (same model as dynamic path)
         │
-   TurboQuant compression → turbo_static.bin
+   Centroid/projection generation (fixed seeds 7/11)
+                          → centroids.bin, projection.bin
+   TurboQuant compression → turbo_static.bin (header + records)
    Metadata extraction   → turbo_static_meta.bin
    Text concatenation    → turbo_static_text.bin
         │
    Docker image rebuild → ECR push → Lambda function update
 ```
 
-The three output files are committed as build artifacts into the Docker image layer, not fetched at runtime.
+The five output files are committed as build artifacts into the Docker image layer, not fetched at runtime. The builder (`StaticIndexBuilder`, CLI wrapper `src/bin/turbo_index_builder.rs`) only accepts 512-dimensional embeddings and stages all files in a sibling directory before an atomic directory swap.
 
 ---
 
@@ -287,7 +341,7 @@ Dynamic data (per-tenant):
 ```
 
 Static index update flow:
-1. Run offline build pipeline → produce 3 `.bin` files
+1. Run offline build pipeline → produce 5 `.bin` files
 2. `docker build` with new files → `docker push` to ECR
 3. `aws lambda update-function-code` → Lambda picks up new image
 

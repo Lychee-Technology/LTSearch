@@ -2,13 +2,13 @@
 
 ## 1. Introduction
 ### 1.1 Purpose
-This document details the architecture for a highly optimized, pure in-memory vector search engine designed for read-heavy, low-frequency update environments (e.g., enterprise policies, legal documents). The system leverages the `e5-small` embedding model and the state-of-the-art **TurboQuant** extreme compression algorithm, bypassing traditional Vector Databases in favor of a zero-copy memory-mapped (`mmap`) architecture in Rust.
+This document details the architecture for a highly optimized, pure in-memory vector search engine designed for read-heavy, low-frequency update environments (e.g., enterprise policies, legal documents). The system leverages a 512-dimensional text embedding model and the state-of-the-art **TurboQuant** extreme compression algorithm, bypassing traditional Vector Databases in favor of a zero-copy memory-mapped (`mmap`) architecture in Rust.
 
 ### 1.2 Background & Motivation
 Traditional vector databases incur significant memory overhead and serialization/deserialization costs. By utilizing TurboQuant's `TurboQuant_prod` algorithm , which is optimized for unbiased inner product estimation , we can compress high-dimensional vectors to a minimal footprint (e.g., 3 bits per dimension). Storing these fixed-size compressed representations in a flat binary file allows the OS Page Cache to manage memory via `mmap`, achieving near-instant startup times and zero-copy deserialization.
 
 ### 1.3 Goals
-* **Extreme Compression:** Compress 384-dimensional `e5-small` vectors to ~156 bytes per document using TurboQuant's two-stage algorithm.
+* **Extreme Compression:** Compress 512-dimensional embedding vectors to 208 bytes per document using TurboQuant's two-stage algorithm.
 * **Zero-Copy Retrieval:** Utilize memory-mapped files to eliminate memory allocation and parsing overhead during search.
 * **High Performance:** Execute brute-force parallel exact search in memory using CPU caches and SIMD instructions.
 * **Minimal Dependency:** Operate without external database daemon processes.
@@ -22,17 +22,17 @@ The architecture is divided into two primary subsystems: the **Offline Indexer**
 
 ### 2.1 Offline Indexer (Write Path)
 This pipeline is triggered when new documents are added or updated. It follows an append-only processing flow:
-1.  **Text Processing:** Documents are chunked and prefixed with `passage: ` (specific to the `e5-small` requirement).
-2.  **Embedding Generation:** The Rust `candle` framework executes the `e5-small` model to generate a 384-dimensional dense float32 vector ($x$).
+1.  **Text Processing:** Documents are chunked and, when the embedding model requires it, prefixed with `passage: ` (configurable via `LTSEARCH_BUILD_LTEMBED_PREFIX`).
+2.  **Embedding Generation:** The embedding layer generates a 512-dimensional dense float32 vector ($x$).
 3.  **TurboQuant Compression:** The vector $x$ passes through the `TurboQuant_prod` pipeline.
-    * *Stage 1 (MSE Quantization):* The vector is randomly rotated to induce a Beta distribution on its coordinates , then quantized using $b-1$ bits.
+    * *Stage 1 (MSE Quantization):* Each coordinate is quantized to $b-1$ bits against a shared per-dimension 1D centroid table (4 centroids per dimension, generated from a fixed seed). The paper's random-rotation preprocessing step is not applied in the current implementation.
     * *Stage 2 (QJL Transform):* The residual error vector is quantized using the Quantized Johnson-Lindenstrauss (QJL) transform down to 1 single sign bit per coordinate.
 4.  **Binary Serialization:** The resulting compressed data structure is appended to a flat, continuous `.bin` file on disk.
 
 ### 2.2 Online Search Server (Read Path)
 This pipeline is optimized for ultra-low latency:
 1.  **Memory Mapping:** Upon startup, the service memory-maps the `.bin` file into a continuous byte slice, casting it directly to an array of strictly defined structs.
-2.  **Query Embedding:** The user's query is prefixed with `query: ` and passed through the `candle` `e5-small` model to generate an uncompressed float32 vector ($y$).
+2.  **Query Embedding:** The user's query is prefixed with `query: ` when the embedding model requires it, then passed through the embedding layer to generate an uncompressed float32 vector ($y$).
 3.  **Parallel Scoring:** The system uses parallel iterators (e.g., via `rayon`) to scan the mapped memory array. For each compressed vector, it calculates the unbiased inner product score using the TurboQuant estimation formula.
 4.  **Top-K Aggregation:** The highest-scoring Document IDs are collected using a min-heap and returned to the application layer.
 
@@ -41,17 +41,18 @@ This pipeline is optimized for ultra-low latency:
 ## 3. Data Structure & Memory Layout
 The cornerstone of this zero-copy architecture is the fixed-size, strictly aligned C-representation (`repr(C)`) layout of the compressed vector. 
 
-Assuming the target bit-width $b=3$  for $d=384$ (`e5-small`), the structure per document is designed as follows:
+Assuming the target bit-width $b=3$  for $d=512$, the structure per document (`TurboRecord512`) is designed as follows:
 
 | Field Name | Description | Size (Bytes) | Derivation |
 | :--- | :--- | :--- | :--- |
 | `doc_id` | Unique identifier for the document chunk. | 8 bytes | 64-bit unsigned integer |
-| `idx` | Phase 1 MSE quantization pointers. | 96 bytes | 384 dims $\times$ 2 bits ($b-1$)  |
-| `qjl` | Phase 2 residual sign bits (+1 or -1). | 48 bytes | 384 dims $\times$ 1 bit  |
+| `idx` | Phase 1 MSE quantization pointers. | 128 bytes | 512 dims $\times$ 2 bits ($b-1$)  |
+| `qjl` | Phase 2 residual sign bits (+1 or -1). | 64 bytes | 512 dims $\times$ 1 bit  |
 | `gamma` | The L2 norm ($\|\|r\|\|_2$) of the residual vector. | 4 bytes | 32-bit floating point |
+| `_reserved` | Zero-filled reserved bytes; keep the record 8-byte aligned. | 4 bytes | — |
 
-**Total Memory Footprint:** **156 Bytes per vector.**
-*A knowledge base of 1,000,000 documents will result in a single `~156 MB` binary file.*
+**Total Memory Footprint:** **208 Bytes per vector.**
+*A knowledge base of 1,000,000 documents will result in a single `~208 MB` binary file (plus a 32-byte file header).*
 
 ---
 
@@ -91,4 +92,4 @@ Because the vectors are compressed independently (Data-oblivious) , the index bu
 
 ### 5.3 System Limitations
 * **Query-Time Compute:** Brute-force scanning scales linearly $O(N)$. While SIMD and parallelization make this exceptionally fast for datasets under 10 million records, it will eventually bottleneck on CPU cycles for billion-scale datasets compared to Approximate Nearest Neighbor (ANN) graph traversals.
-* **Static Matrices:** The global rotation matrix $\Pi$ and projection matrix $S$ must remain consistent. Changing them requires a full re-indexing of the `.bin` file.
+* **Static Matrices:** The global 1D centroid table and projection matrix $S$ (both generated from fixed seeds) must remain consistent between build and query time. Changing them requires a full re-indexing of the `.bin` file.
