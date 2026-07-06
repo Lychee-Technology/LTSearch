@@ -118,17 +118,19 @@ fn bootstrap_query_embedding_handler(
         #[cfg(feature = "ltembed")]
         EmbeddingProvider::LTEmbed => {
             let config = ltembed_config_from_env(
+                "LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR",
                 "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
-                "LTSEARCH_QUERY_LTEMBED_CONFIG_PATH",
-                "LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH",
-                "LTSEARCH_QUERY_LTEMBED_POOLING",
-                "LTSEARCH_QUERY_LTEMBED_PREFIX",
             )
             .map_err(|error| bootstrap_error(error.to_string()))?;
             (
+                // Query side embeds user queries — the engine prepends the
+                // model's query prefix itself.
                 Box::new(
-                    LTEmbedEmbeddingGenerator::from_config(&config)
-                        .map_err(|error| bootstrap_error(error.to_string()))?,
+                    LTEmbedEmbeddingGenerator::from_config(
+                        &config,
+                        ltembed::engine::EmbeddingInputKind::Query,
+                    )
+                    .map_err(|error| bootstrap_error(error.to_string()))?,
                 ),
                 "LTSEARCH_QUERY_LTEMBED",
                 "embedding dimension",

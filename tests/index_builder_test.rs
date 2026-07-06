@@ -6,9 +6,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_schema::DataType;
+#[cfg(feature = "ltembed")]
+use ltembed::engine::EmbeddingInputKind;
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
 #[cfg(feature = "ltembed")]
-use ltsearch::embedding::{LTEmbedConfig, LTEmbedEmbeddingGenerator, LTEmbedPoolingMode};
+use ltsearch::embedding::{LTEmbedConfig, LTEmbedEmbeddingGenerator};
 use ltsearch::indexing::{
     materialize_latest_snapshot, BuildIndexRequest, BuildIndexResult, LocalIndexBuilder,
 };
@@ -34,14 +36,14 @@ fn temp_fixture_dir(test_name: &str) -> PathBuf {
 }
 
 #[cfg(feature = "ltembed")]
-fn maybe_ltembed_assets_dir() -> Option<PathBuf> {
+fn maybe_ltembed_bundle_dir() -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .map(|ancestor| ancestor.join("LTEmbed/assets"))
+        .map(|ancestor| ancestor.join("LTEmbed/ort_bundle"))
         .find(|candidate| {
-            candidate.join("config.json").exists()
+            candidate.join("build-info.json").exists()
                 && candidate.join("tokenizer.json").exists()
-                && candidate.join("model.safetensors").exists()
+                && candidate.join("model.ort").exists()
         })
 }
 
@@ -511,27 +513,27 @@ fn local_index_builder_generates_missing_embeddings_and_writes_searcher_compatib
 #[cfg(feature = "ltembed")]
 #[test]
 fn local_index_builder_generates_missing_embeddings_with_ltembed() {
-    let Some(assets_dir) = maybe_ltembed_assets_dir() else {
-        eprintln!("Skipping: LTEmbed assets not found in sibling checkout");
+    let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
+        eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
         return;
     };
 
     let root = temp_fixture_dir("index-builder-ltembed-artifacts");
-    let generator = LTEmbedEmbeddingGenerator::from_config(&LTEmbedConfig {
-        model_path: assets_dir.join("model.safetensors").display().to_string(),
-        config_path: assets_dir.join("config.json").display().to_string(),
-        tokenizer_path: assets_dir.join("tokenizer.json").display().to_string(),
-        pooling: LTEmbedPoolingMode::Mean,
-        prefix: Some("passage:".into()),
-    })
-    .expect("expected LTEmbed generator to bootstrap from local assets");
+    let generator = LTEmbedEmbeddingGenerator::from_config(
+        &LTEmbedConfig {
+            bundle_dir: bundle_dir.display().to_string(),
+            model_path: bundle_dir.join("model.ort").display().to_string(),
+        },
+        EmbeddingInputKind::Document,
+    )
+    .expect("expected LTEmbed generator to bootstrap from local bundle");
     let builder = LocalIndexBuilder::new(&root, generator);
 
     let built = builder
         .build(&BuildIndexRequest {
             version_id: 8,
             created_at: 1_700_000_019_000,
-            embedding_dim: 384,
+            embedding_dim: 512,
             records: vec![
                 upsert_record(
                     "event-1",
@@ -578,14 +580,14 @@ fn local_index_builder_generates_missing_embeddings_with_ltembed() {
         .iter()
         .any(|result| result.doc_id == "doc-generated"));
 
-    let query_generator = LTEmbedEmbeddingGenerator::from_config(&LTEmbedConfig {
-        model_path: assets_dir.join("model.safetensors").display().to_string(),
-        config_path: assets_dir.join("config.json").display().to_string(),
-        tokenizer_path: assets_dir.join("tokenizer.json").display().to_string(),
-        pooling: LTEmbedPoolingMode::Mean,
-        prefix: Some("query:".into()),
-    })
-    .expect("expected LTEmbed query generator to bootstrap from local assets");
+    let query_generator = LTEmbedEmbeddingGenerator::from_config(
+        &LTEmbedConfig {
+            bundle_dir: bundle_dir.display().to_string(),
+            model_path: bundle_dir.join("model.ort").display().to_string(),
+        },
+        EmbeddingInputKind::Query,
+    )
+    .expect("expected LTEmbed query generator to bootstrap from local bundle");
     let query_embedding = query_generator
         .generate("rust embeddings")
         .expect("expected LTEmbed query embedding to be generated");

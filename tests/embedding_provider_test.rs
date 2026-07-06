@@ -47,6 +47,7 @@ fn provider_parsing_rejects_unsupported_provider() {
     );
 }
 
+#[cfg(not(feature = "ltembed"))]
 #[test]
 fn provider_parsing_rejects_ltembed_when_feature_is_disabled() {
     let _guard = EMBEDDING_PROVIDER_ENV_LOCK.lock().unwrap();

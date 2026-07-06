@@ -105,33 +105,33 @@ class SamInvokeE2ETest(unittest.TestCase):
             self.assertIn("ltsearch-e2e-builder", content, dockerfile_path.as_posix())
             self.assertIn("FROM public.ecr.aws/lambda/provided:al2023-arm64", content)
 
-    def test_builder_dockerfile_downloads_from_huggingface(self) -> None:
+    def test_builder_dockerfile_downloads_ltembed_bundle(self) -> None:
         builder_path = REPO_ROOT / "sam" / "builder.Dockerfile"
         content = builder_path.read_text(encoding="utf-8")
 
-        self.assertIn("huggingface.co/${HF_MODEL}", content)
-        self.assertIn("intfloat/multilingual-e5-small", content)
-        self.assertIn("model.safetensors", content)
-        self.assertIn("config.json", content)
+        self.assertIn("ARG LTEMBED_BUNDLE_URL=", content)
+        self.assertIn("model.ort", content)
         self.assertIn("tokenizer.json", content)
-        self.assertIn("HF_MODEL", content)
+        self.assertIn("build-info.json", content)
+        # real mode must fail loudly when no bundle URL is provided
+        self.assertIn("requires LTEMBED_BUNDLE_URL", content)
         # download must happen before COPY so the layer is cached independently
-        download_pos = content.index("huggingface.co")
+        download_pos = content.index("LTEMBED_BUNDLE_URL")
         copy_pos = content.index("COPY . .")
         self.assertLess(download_pos, copy_pos)
 
     def test_ltembed_env_vars_wired_in_sam_template(self) -> None:
         content = SAM_TEMPLATE_PATH.read_text(encoding="utf-8")
 
+        self.assertIn("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR", content)
         self.assertIn("LTSEARCH_BUILD_LTEMBED_MODEL_PATH", content)
-        self.assertIn("LTSEARCH_BUILD_LTEMBED_CONFIG_PATH", content)
-        self.assertIn("LTSEARCH_BUILD_LTEMBED_TOKENIZER_PATH", content)
-        self.assertIn("LTSEARCH_BUILD_LTEMBED_POOLING", content)
+        self.assertIn("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR", content)
         self.assertIn("LTSEARCH_QUERY_LTEMBED_MODEL_PATH", content)
-        self.assertIn("LTSEARCH_QUERY_LTEMBED_CONFIG_PATH", content)
-        self.assertIn("LTSEARCH_QUERY_LTEMBED_TOKENIZER_PATH", content)
-        self.assertIn("LTSEARCH_QUERY_LTEMBED_POOLING", content)
-        self.assertIn("/ltembed-assets/model.safetensors", content)
+        self.assertIn("/ltembed-assets/model.ort", content)
+        # legacy candle-era wiring must be gone
+        self.assertNotIn("LTEMBED_CONFIG_PATH", content)
+        self.assertNotIn("LTEMBED_POOLING", content)
+        self.assertNotIn("model.safetensors", content)
 
     def test_builder_dockerfile_supports_ltembed_mode(self) -> None:
         builder_path = REPO_ROOT / "sam" / "builder.Dockerfile"
@@ -158,7 +158,8 @@ class SamInvokeE2ETest(unittest.TestCase):
         content = INVOKE_SCRIPT_PATH.read_text(encoding="utf-8")
         self.assertIn("LTSEARCH_E2E_LTEMBED", content)
         self.assertIn("LTEMBED_MODE=real", content)
-        self.assertIn("embedding_dim': 384", content)
+        self.assertIn("LTSEARCH_E2E_LTEMBED_BUNDLE_URL", content)
+        self.assertIn("embedding_dim': 512", content)
         self.assertIn("env-vars-ltembed.json", content)
         self.assertIn("LTSEARCH_BUILD_EMBEDDING_PROVIDER", content)
         self.assertIn("LTSEARCH_QUERY_EMBEDDING_PROVIDER", content)

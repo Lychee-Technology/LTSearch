@@ -3,46 +3,57 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ltembed::error::LTEmbedError;
+use ltembed::engine::{EmbeddingInput, EmbeddingInputKind};
+use ltembed::error::{InferenceError, LTEmbedError};
 use ltsearch::embedding::{
     EmbeddingError, EmbeddingGenerator, LTEmbedConfig, LTEmbedEmbeddingGenerator, LTEmbedEngine,
-    LTEmbedPoolingMode,
 };
+
+#[derive(Debug, Clone, PartialEq)]
+struct SeenInput {
+    text: String,
+    kind: EmbeddingInputKind,
+}
 
 #[derive(Debug)]
 enum StubResult {
     Success(Vec<f32>),
-    Failure(String),
+    Failure,
 }
 
 #[derive(Debug)]
 struct StubEngine {
-    seen_inputs: Arc<Mutex<Vec<String>>>,
+    seen_inputs: Arc<Mutex<Vec<SeenInput>>>,
     result: StubResult,
 }
 
 impl StubEngine {
-    fn success(seen_inputs: Arc<Mutex<Vec<String>>>, embedding: Vec<f32>) -> Self {
+    fn success(seen_inputs: Arc<Mutex<Vec<SeenInput>>>, embedding: Vec<f32>) -> Self {
         Self {
             seen_inputs,
             result: StubResult::Success(embedding),
         }
     }
 
-    fn failure(seen_inputs: Arc<Mutex<Vec<String>>>, error: LTEmbedError) -> Self {
+    fn failure(seen_inputs: Arc<Mutex<Vec<SeenInput>>>) -> Self {
         Self {
             seen_inputs,
-            result: StubResult::Failure(error.to_string()),
+            result: StubResult::Failure,
         }
     }
 }
 
 impl LTEmbedEngine for StubEngine {
-    fn embed(&self, text: &str) -> Result<Vec<f32>, LTEmbedError> {
-        self.seen_inputs.lock().unwrap().push(text.to_string());
+    fn embed(&self, input: EmbeddingInput<'_>) -> Result<Vec<f32>, LTEmbedError> {
+        self.seen_inputs.lock().unwrap().push(SeenInput {
+            text: input.text.to_string(),
+            kind: input.kind,
+        });
         match &self.result {
             StubResult::Success(embedding) => Ok(embedding.clone()),
-            StubResult::Failure(message) => Err(LTEmbedError::Inference(message.clone())),
+            StubResult::Failure => Err(LTEmbedError::Inference(InferenceError::Internal(
+                "bad hidden state".into(),
+            ))),
         }
     }
 }
@@ -56,98 +67,81 @@ fn temp_path(name: &str) -> PathBuf {
 }
 
 #[test]
-fn ltembed_generator_applies_prefix_before_embedding() {
+fn ltembed_generator_passes_query_kind_without_manual_prefix() {
     let seen_inputs = Arc::new(Mutex::new(Vec::new()));
     let generator = LTEmbedEmbeddingGenerator::new_for_tests(
         StubEngine::success(seen_inputs.clone(), vec![0.1, 0.2, 0.3]),
-        Some("query:".into()),
+        EmbeddingInputKind::Query,
     );
 
     let embedding = generator.generate("hello world").unwrap();
 
     assert_eq!(embedding, vec![0.1, 0.2, 0.3]);
+    // Prefixing is owned by the LTEmbed engine — the generator must pass the
+    // text through untouched and tag it with the configured input kind.
     assert_eq!(
         seen_inputs.lock().unwrap().as_slice(),
-        ["query: hello world"]
+        [SeenInput {
+            text: "hello world".into(),
+            kind: EmbeddingInputKind::Query,
+        }]
     );
 }
 
 #[test]
-fn ltembed_generator_leaves_text_unchanged_without_prefix() {
+fn ltembed_generator_passes_document_kind_for_build_side() {
     let seen_inputs = Arc::new(Mutex::new(Vec::new()));
     let generator = LTEmbedEmbeddingGenerator::new_for_tests(
         StubEngine::success(seen_inputs.clone(), vec![0.4, 0.5, 0.6]),
-        None,
+        EmbeddingInputKind::Document,
     );
 
-    let embedding = generator.generate("plain text").unwrap();
+    let embedding = generator.generate("chunk text").unwrap();
 
     assert_eq!(embedding, vec![0.4, 0.5, 0.6]);
-    assert_eq!(seen_inputs.lock().unwrap().as_slice(), ["plain text"]);
+    assert_eq!(
+        seen_inputs.lock().unwrap().as_slice(),
+        [SeenInput {
+            text: "chunk text".into(),
+            kind: EmbeddingInputKind::Document,
+        }]
+    );
 }
 
 #[test]
 fn ltembed_generator_maps_engine_errors_to_embedding_error() {
     let seen_inputs = Arc::new(Mutex::new(Vec::new()));
     let generator = LTEmbedEmbeddingGenerator::new_for_tests(
-        StubEngine::failure(
-            seen_inputs,
-            LTEmbedError::Inference("bad hidden state".into()),
-        ),
-        Some("query:".into()),
+        StubEngine::failure(seen_inputs),
+        EmbeddingInputKind::Query,
     );
 
     let error = generator.generate("broken input").unwrap_err();
 
-    assert_eq!(
-        error,
-        EmbeddingError::Generation {
-            message:
-                "LTEmbed embedding failed: Inference failed: Inference failed: bad hidden state"
-                    .into()
-        }
+    let EmbeddingError::Generation { message } = error;
+    assert!(
+        message.starts_with("LTEmbed embedding failed:"),
+        "unexpected message: {message}"
     );
-}
-
-#[test]
-fn pooling_mode_parses_supported_values() {
-    assert_eq!(
-        "mean".parse::<LTEmbedPoolingMode>().unwrap(),
-        LTEmbedPoolingMode::Mean
-    );
-    assert_eq!(
-        "cls".parse::<LTEmbedPoolingMode>().unwrap(),
-        LTEmbedPoolingMode::Cls
-    );
-}
-
-#[test]
-fn pooling_mode_rejects_unsupported_values() {
-    let error = "median".parse::<LTEmbedPoolingMode>().unwrap_err();
-
-    assert_eq!(
-        error.to_string(),
-        "unsupported LTEmbed pooling mode: median"
+    assert!(
+        message.contains("bad hidden state"),
+        "unexpected message: {message}"
     );
 }
 
 #[test]
 fn ltembed_generator_from_config_maps_bootstrap_failures() {
     let config = LTEmbedConfig {
-        model_path: temp_path("missing-model").display().to_string(),
-        config_path: temp_path("missing-config").display().to_string(),
-        tokenizer_path: temp_path("missing-tokenizer").display().to_string(),
-        pooling: LTEmbedPoolingMode::Mean,
-        prefix: Some("query:".into()),
+        bundle_dir: temp_path("missing-bundle").display().to_string(),
+        model_path: temp_path("missing-model.ort").display().to_string(),
     };
 
-    let error = LTEmbedEmbeddingGenerator::from_config(&config).unwrap_err();
+    let error =
+        LTEmbedEmbeddingGenerator::from_config(&config, EmbeddingInputKind::Query).unwrap_err();
 
-    assert_eq!(
-        error,
-        EmbeddingError::Generation {
-            message: "LTEmbed bootstrap failed: I/O error: No such file or directory (os error 2)"
-                .to_string()
-        }
+    let EmbeddingError::Generation { message } = error;
+    assert!(
+        message.starts_with("LTEmbed bootstrap failed:"),
+        "unexpected message: {message}"
     );
 }

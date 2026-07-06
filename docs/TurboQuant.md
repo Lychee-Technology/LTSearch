@@ -22,7 +22,7 @@ The architecture is divided into two primary subsystems: the **Offline Indexer**
 
 ### 2.1 Offline Indexer (Write Path)
 This pipeline is triggered when new documents are added or updated. It follows an append-only processing flow:
-1.  **Text Processing:** Documents are chunked, then prefixed per the embedding model's requirements: the production-target LTEmbed engine prepends `Document: ` itself, while the legacy e5 stack uses an explicit `passage: ` prefix via `LTSEARCH_BUILD_LTEMBED_PREFIX` (see `docs/arch.md` §21 and issue #96).
+1.  **Text Processing:** Documents are chunked; the LTEmbed engine prepends the model's `Document: ` prefix itself when embedding them (see `docs/arch.md` §21).
 2.  **Embedding Generation:** The embedding layer generates a 512-dimensional dense float32 vector ($x$).
 3.  **TurboQuant Compression:** The vector $x$ passes through the `TurboQuant_prod` pipeline.
     * *Stage 1 (MSE Quantization):* Each coordinate is quantized to $b-1$ bits against a shared per-dimension 1D centroid table (4 centroids per dimension, generated from a fixed seed). The paper's random-rotation preprocessing step is not applied in the current implementation.
@@ -32,7 +32,7 @@ This pipeline is triggered when new documents are added or updated. It follows a
 ### 2.2 Online Search Server (Read Path)
 This pipeline is optimized for ultra-low latency:
 1.  **Memory Mapping:** Upon startup, the service memory-maps the `.bin` file into a continuous byte slice, casting it directly to an array of strictly defined structs.
-2.  **Query Embedding:** The user's query is prefixed per the embedding model's requirements (`Query: ` is built into the production-target engine; the legacy e5 stack used `query: `), then passed through the embedding layer to generate an uncompressed float32 vector ($y$).
+2.  **Query Embedding:** The user's query is passed through the embedding layer, which prepends the model's `Query: ` prefix itself, generating an uncompressed float32 vector ($y$).
 3.  **Parallel Scoring:** The system uses parallel iterators (e.g., via `rayon`) to scan the mapped memory array. For each compressed vector, it calculates the unbiased inner product score using the TurboQuant estimation formula.
 4.  **Top-K Aggregation:** The highest-scoring Document IDs are collected using a min-heap and returned to the application layer.
 

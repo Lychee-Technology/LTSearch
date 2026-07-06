@@ -115,11 +115,18 @@ PY
 if [[ "${LTSEARCH_E2E_LTEMBED:-}" == "true" ]]; then
   echo "--- LTEmbed E2E ---" >&2
 
+  if [[ -z "${LTSEARCH_E2E_LTEMBED_BUNDLE_URL:-}" ]]; then
+    echo "LTSEARCH_E2E_LTEMBED=true requires LTSEARCH_E2E_LTEMBED_BUNDLE_URL" >&2
+    echo "(tarball with ort_bundle at its root: model.ort, tokenizer.json, build-info.json, libonnxruntime.so)" >&2
+    exit 1
+  fi
+
   LTEMBED_BUILDER_LOG="$E2E_OUTPUT_DIR/ltsearch-builder-ltembed.log"
   LTEMBED_BUILDER_DOCKER_EVENTS_LOG="$E2E_OUTPUT_DIR/ltsearch-builder-ltembed-docker-events.log"
   run_with_heartbeat "docker build ltsearch-e2e-builder (ltembed)" "$LTEMBED_BUILDER_LOG" "$LTEMBED_BUILDER_DOCKER_EVENTS_LOG" \
     env DOCKER_BUILDKIT=1 docker build \
       --build-arg LTEMBED_MODE=real \
+      --build-arg "LTEMBED_BUNDLE_URL=${LTSEARCH_E2E_LTEMBED_BUNDLE_URL}" \
       --tag ltsearch-e2e-builder \
       --file "$REPO_ROOT/sam/builder.Dockerfile" \
       "$REPO_ROOT"
@@ -180,7 +187,7 @@ event = {
     'batch_id': body['batch_id'],
     'wal_key': body['wal_key'],
     'version_id': 1,
-    'embedding_dim': 384,
+    'embedding_dim': 512,
 }
 json.dump(event, open(sys.argv[2], 'w'))
 PY
