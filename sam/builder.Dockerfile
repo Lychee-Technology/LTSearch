@@ -18,7 +18,8 @@ RUN mkdir -p /ltembed-assets && \
       rm /tmp/ltembed-bundle.tar.gz && \
       test -f /ltembed-assets/model.ort && \
       test -f /ltembed-assets/tokenizer.json && \
-      test -f /ltembed-assets/build-info.json; \
+      test -f /ltembed-assets/build-info.json && \
+      test -f /ltembed-assets/libonnxruntime.so; \
     fi
 WORKDIR /src
 COPY . .

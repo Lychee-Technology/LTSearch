@@ -113,6 +113,7 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("model.ort", content)
         self.assertIn("tokenizer.json", content)
         self.assertIn("build-info.json", content)
+        self.assertIn("libonnxruntime.so", content)
         # real mode must fail loudly when no bundle URL is provided
         self.assertIn("requires LTEMBED_BUNDLE_URL", content)
         # download must happen before COPY so the layer is cached independently
@@ -159,6 +160,9 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("LTSEARCH_E2E_LTEMBED", content)
         self.assertIn("LTEMBED_MODE=real", content)
         self.assertIn("LTSEARCH_E2E_LTEMBED_BUNDLE_URL", content)
+        # the real-mode Docker build patches ltembed to .sam-local-deps/LTEmbed,
+        # so the checkout must be staged before building
+        self.assertIn("prepare_local_ltembed_checkout", content)
         self.assertIn("embedding_dim': 512", content)
         self.assertIn("env-vars-ltembed.json", content)
         self.assertIn("LTSEARCH_BUILD_EMBEDDING_PROVIDER", content)

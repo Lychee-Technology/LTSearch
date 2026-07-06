@@ -546,22 +546,22 @@ fn local_index_builder_generates_missing_embeddings_with_ltembed() {
                     "event-2",
                     "doc-kept",
                     "already embedded body",
-                    Some(repeated_embedding(384, 0.01)),
+                    Some(repeated_embedding(512, 0.01)),
                     1_700_000_001_200,
                 ),
             ],
         })
         .expect("expected LTEmbed-backed builder to succeed");
 
-    assert_eq!(built.manifest.embedding_dim, 384);
+    assert_eq!(built.manifest.embedding_dim, 512);
     assert_eq!(built.manifest.document_count, 2);
     assert_eq!(built.documents.len(), 2);
     assert!(built
         .documents
         .iter()
-        .all(|document| document.embedding.as_ref().is_some_and(|v| v.len() == 384)));
+        .all(|document| document.embedding.as_ref().is_some_and(|v| v.len() == 512)));
 
-    assert_real_lance_artifact(&root, 8, 2, 384);
+    assert_real_lance_artifact(&root, 8, 2, 512);
 
     let active_manifest = ActiveManifest {
         head: ManifestHead {

@@ -121,6 +121,10 @@ if [[ "${LTSEARCH_E2E_LTEMBED:-}" == "true" ]]; then
     exit 1
   fi
 
+  # The real-mode build patches ltembed to /src/.sam-local-deps/LTEmbed, so the
+  # checkout must be staged into the Docker context first.
+  prepare_local_ltembed_checkout "$REPO_ROOT"
+
   LTEMBED_BUILDER_LOG="$E2E_OUTPUT_DIR/ltsearch-builder-ltembed.log"
   LTEMBED_BUILDER_DOCKER_EVENTS_LOG="$E2E_OUTPUT_DIR/ltsearch-builder-ltembed-docker-events.log"
   run_with_heartbeat "docker build ltsearch-e2e-builder (ltembed)" "$LTEMBED_BUILDER_LOG" "$LTEMBED_BUILDER_DOCKER_EVENTS_LOG" \
