@@ -578,7 +578,7 @@ sam build
   → query_lambda.Dockerfile:         COPY --from=builder /ltembed-assets /ltembed-assets
 ```
 
-The default `LTEMBED_MODE=stub` skips the download and satisfies the ltembed git dependency with the vendored stub crate; binaries are built without the `ltembed` feature and use the `fixed` provider. This is the CI default. `LTEMBED_MODE=real` fails the build loudly if `LTEMBED_BUNDLE_URL` is not provided.
+The default `LTEMBED_MODE=stub` skips the download and satisfies the ltembed git dependency with the vendored stub crate; binaries are built without the `ltembed` feature and use the `fixed` provider. This is the CI default. `LTEMBED_MODE=real` downloads the pinned default `LTEMBED_BUNDLE_URL` (overridable to bump the model version) and fails the build loudly only if that URL is explicitly emptied or unreachable.
 
 Bundle files inside Lambda containers:
 
