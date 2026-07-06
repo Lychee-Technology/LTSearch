@@ -315,6 +315,9 @@ mod tests {
                 .generate("rust search document")
                 .expect("expected LTEmbed generator to produce an embedding");
 
+            // 384 is the legacy e5-family fixture staged in ../LTEmbed/assets;
+            // the pinned ltembed engine cannot load the 512-dim production
+            // target (jina-v5-nano) until the engine upgrade lands (#96).
             assert_eq!(embedding.len(), 384);
         }
     }

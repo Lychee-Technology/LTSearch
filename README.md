@@ -152,9 +152,9 @@ The SAM Local E2E scripts run the full write → build → query pipeline agains
 | Mode | Description | When to use |
 |------|-------------|-------------|
 | `fixed` (default) | Deterministic 3-dim stub vector, no model required | CI, quick local iteration |
-| `ltembed` | Real `jinaai/jina-embeddings-v5-text-nano` model, 512-dim | Testing real semantic search locally |
+| `ltembed` | Real model inference. Production target: `jinaai/jina-embeddings-v5-text-nano`, 512-dim; local E2E currently still runs the legacy e5-small stack at 384-dim until the engine upgrade lands (#96) | Testing real semantic search locally |
 
-The `ltembed` mode downloads `model.safetensors`, `config.json`, and `tokenizer.json` from HuggingFace automatically during `docker build`. No manual file setup is required.
+The `ltembed` mode downloads `model.safetensors`, `config.json`, and `tokenizer.json` from HuggingFace automatically during `docker build` (model pinned by `HF_MODEL` in `sam/builder.Dockerfile`). No manual file setup is required.
 
 ### SAM invoke E2E (CI-compatible)
 
