@@ -551,15 +551,26 @@ The system supports two embedding providers, selected per deployment via environ
 | Provider | Env value | Description |
 | -------- | --------- | ----------- |
 | Fixed | `fixed` | Deterministic stub vector; all documents and queries share the same vector. Used in CI and unit tests. |
-| LTEmbed | `ltembed` | Real model inference using `intfloat/multilingual-e5-small` (384-dim). Used in production and local LTEmbed E2E. |
+| LTEmbed | `ltembed` | Real model inference. **Production target: `jinaai/jina-embeddings-v5-text-nano`, 512-dim** (768-dim raw, Matryoshka-truncated and re-normalized to 512 by the LTEmbed engine; last-token pooling; built-in `Query: ` / `Document: ` prefixes). |
 
-The provider is configured independently for the build pipeline (`LTSEARCH_BUILD_EMBEDDING_PROVIDER`) and the query path (`LTSEARCH_QUERY_EMBEDDING_PROVIDER`). Both must use the same provider and dimension for a given index version.
+The provider is configured independently for the build pipeline (`LTSEARCH_BUILD_EMBEDDING_PROVIDER`) and the query path (`LTSEARCH_QUERY_EMBEDDING_PROVIDER`). Both must use the same provider and dimension for a given index version. The static TurboQuant path is pinned to 512-dim (`TurboRecord512`), matching the production target.
+
+> **Transitional note (tracked in #96):** the ltembed revision currently pinned
+> in `Cargo.lock` is the legacy candle-based engine (mean/cls pooling,
+> `config.json` + `model.safetensors` loading). It cannot load the jina-v5
+> custom architecture, so the local real-mode E2E still runs an e5-small-family
+> model at 384-dim (`sam/builder.Dockerfile` `HF_MODEL` default, the
+> `../LTEmbed/assets` test fixture, and `bootstrap.rs`'s 384 assertion are all
+> part of that coherent legacy stack). Upgrading the integration to the current
+> LTEmbed ONNX engine — which implements the production target natively — is
+> issue #96; until it lands, do not switch any single piece of that stack in
+> isolation.
 
 ---
 
 ## **LTEmbed Asset Delivery**
 
-The `intfloat/multilingual-e5-small` model (~471 MB) is too large for Lambda Layers and impractical to download at cold-start. Instead, the model files are **baked into the Lambda container image** at build time.
+Model files are too large for Lambda Layers and impractical to download at cold-start (the legacy `intfloat/multilingual-e5-small` weights are ~471 MB; the target `jina-embeddings-v5-text-nano` safetensors are ~212 MB, with the ONNX bundle strategy decided in #96). Instead, the model files are **baked into the Lambda container image** at build time.
 
 Build flow:
 
