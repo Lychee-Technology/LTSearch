@@ -11,12 +11,12 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
 use ltsearch::error::{SearchError, ValidationError};
 use ltsearch::models::{
-    ChunkSource, FilterValue, IndexManifest, SearchRequest, SearchResult, SearchSource,
-    ShardManifest,
+    ChunkSource, Citation, CorpusType, CorpusWeights, FilterValue, IndexManifest, SearchRequest,
+    SearchResult, SearchSource, ShardManifest,
 };
 use ltsearch::query::{
-    KeywordRetriever, KeywordSearcher, QueryRouter, StaticRetriever, VectorRetriever,
-    VectorSearcher, WarningSink,
+    ContextBuilder, KeywordRetriever, KeywordSearcher, QueryRouter, StaticRetriever,
+    VectorRetriever, VectorSearcher, WarningSink,
 };
 use ltsearch::storage::{
     version_manifest_key, ActiveManifest, LocalManifestStore, ManifestHead, ManifestStore,
@@ -872,6 +872,132 @@ fn router_returns_up_to_three_x_top_k_candidates_per_path() {
     // dynamic path: 3 vector + 3 keyword, all distinct → fused 6, all kept
     assert_eq!(response.dynamic_chunks.len(), 6);
     assert_eq!(response.dynamic_count, 6);
+}
+
+fn result_with_citation(
+    doc_id: &str,
+    score: f32,
+    source: SearchSource,
+    chunk_source: ChunkSource,
+    corpus_type: Option<CorpusType>,
+    title: &str,
+) -> SearchResult {
+    SearchResult {
+        doc_id: doc_id.into(),
+        score,
+        text: format!("text for {doc_id}"),
+        metadata: Some(std::collections::HashMap::from([(
+            "resource_id".to_string(),
+            json!(doc_id),
+        )])),
+        source,
+        chunk_source,
+        corpus_type,
+        citation: Some(Citation {
+            resource_id: doc_id.into(),
+            source_type: "s3".into(),
+            source_ref: format!("ref/{doc_id}"),
+            title: Some(title.into()),
+            url: None,
+        }),
+    }
+}
+
+/// End-to-end proof that an upstream caller can assemble the LLM context from a
+/// `SearchResponse` alone (the #90 contract): run a query with
+/// `include_metadata=false`, then drive `ContextBuilder` over the response —
+/// citation titles must survive the metadata strip and render into the §6
+/// format, the system prompt must reflect `corpus_weights`, and a tight budget
+/// must truncate while keeping the skeleton.
+#[test]
+fn upstream_can_assemble_llm_context_from_search_response() {
+    let start = Arc::new(Instant::now());
+    let corpus_weights = CorpusWeights {
+        static_bias: 0.9,
+        dynamic_bias: 0.1,
+    };
+    // Stub retrievers assert the query is "rust search"; the labels/titles below
+    // exercise the Chinese context format regardless of the query text.
+    let request = SearchRequest {
+        query: "rust search".into(),
+        top_k: 2,
+        filters: None,
+        include_metadata: false,
+        corpus_weights: Some(corpus_weights.clone()),
+    };
+    let static_retriever = StubStaticRetriever::new(
+        vec![result_with_citation(
+            "law-1",
+            0.95,
+            SearchSource::Static,
+            ChunkSource::Static,
+            Some(CorpusType::Legal),
+            "民法典",
+        )],
+        Duration::from_millis(0),
+        start.clone(),
+        7,
+        6,
+    );
+    let keyword = StubKeywordRetriever::new(
+        vec![result_with_citation(
+            "user-1",
+            8.0,
+            SearchSource::Keyword,
+            ChunkSource::Dynamic,
+            None,
+            "会议记录",
+        )],
+        Duration::from_millis(0),
+        start.clone(),
+        7,
+        6,
+    );
+    let vector = StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 7, 6);
+    let router = QueryRouter::new(
+        StubManifestStore::new(7),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        keyword.clone(),
+        vector.clone(),
+    )
+    .with_static_retriever(static_retriever.clone());
+
+    let response = router.search(&request).unwrap();
+
+    // include_metadata=false dropped the metadata map but kept the citation.
+    assert!(response.static_chunks[0].metadata.is_none());
+    assert_eq!(
+        response.static_chunks[0]
+            .citation
+            .as_ref()
+            .and_then(|c| c.title.as_deref()),
+        Some("民法典")
+    );
+
+    // Upstream builds the context from the response alone.
+    let context = ContextBuilder::build_context(
+        &response.static_chunks,
+        &response.dynamic_chunks,
+        &request.query,
+    );
+    assert!(context.contains("=== 参考资料 ==="));
+    assert!(context.contains("[法规 #1] 民法典"));
+    assert!(context.contains("[用户数据 #1] 会议记录"));
+    assert!(context.contains("=== 问题 ===\nrust search"));
+
+    // corpus_weights (the caller's own request field) drives the system prompt.
+    let system_prompt = ContextBuilder::build_system_prompt(Some(&corpus_weights));
+    assert!(system_prompt.contains("以法规/合同为准"));
+
+    // A tight token budget truncates chunks but keeps the skeleton.
+    let bounded = ContextBuilder::build_context_bounded(
+        &response.static_chunks,
+        &response.dynamic_chunks,
+        &request.query,
+        20,
+    );
+    assert!(ContextBuilder::estimate_tokens(&bounded) <= 20);
+    assert!(bounded.contains("=== 问题 ===\nrust search"));
 }
 
 #[test]

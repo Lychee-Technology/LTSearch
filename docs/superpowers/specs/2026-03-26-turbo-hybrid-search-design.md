@@ -280,47 +280,64 @@ LTSearch-side LLM code. Format below is produced by `ContextBuilder`.
 
 ### Context Format
 
+`ContextBuilder::build_context` emits Chinese labels (the product is
+Chinese-facing); this is the source of truth. Static chunks are labelled by
+`corpus_type` (法规/合同/RFC), with `citation.title` appended when present:
+
 ```
-=== Reference Materials ===
+=== 参考资料 ===
 
-[Legal/Contract #1] <title>
+[法规 #1] <title>
 <text>
 
-[Legal/Contract #2] ...
-... (up to 3*K static chunks)
+[法规 #2] ...
+... (最多 3*K static chunks)
 
-[User Data #1] <title>
+[用户数据 #1] <title>
 <text>
 
-[User Data #2] ...
-... (up to 3*K dynamic chunks)
+[用户数据 #2] ...
+... (最多 3*K dynamic chunks)
 
-=== Question ===
+=== 问题 ===
 {query}
 ```
 
+`<title>` comes from `citation.title`. Dynamic chunks carry it (populated from
+metadata by the keyword/vector searchers, preserved past `include_metadata=false`
+per §5.6). Static Turbo chunks currently have no title in the index format, so
+they render as `[法规 #1]` without a title — enriching the static index with
+titles is tracked in #101.
+
 ### System Prompt Template
 
-```
-You are a professional document retrieval assistant.
+`ContextBuilder::build_system_prompt(corpus_weights)`:
 
-References are grouped into two categories:
-- [Legal/Contract]: from the shared authoritative document library (laws, contracts, RFCs)
-- [User Data]: from the user's private documents
+```
+你是一个专业的文档检索助手。
+
+参考资料分为两类：
+- [法规/合同/RFC]：来自共享权威文档库（法律法规、合同模板、RFC等）
+- [用户数据]：来自用户的私有文档
 
 {weight_instruction}
 
-Only cite content directly relevant to the question. Ignore unrelated passages.
-Always indicate the source type when citing.
+回答时只引用与问题直接相关的内容，忽略无关片段。
+引用时注明来源类型。
 ```
+
+`corpus_weights` is a **`SearchRequest` field owned by the caller** — the
+upstream that authored the request already holds it and passes it straight to
+`build_system_prompt`. It is *not* echoed in `SearchResponse` (the caller does
+not need its own input returned).
 
 ### `weight_instruction` Selection
 
 | Condition | Instruction |
 |---|---|
-| `static_bias > 0.7` | "If Legal/Contract and User Data conflict, defer to Legal/Contract." |
-| `dynamic_bias > 0.7` | "Prioritize User Data; supplement with Legal/Contract only when needed." |
-| default (equal / unset) | "Draw from both sources equally without preference." |
+| `static_bias > 0.7` | "如法规/合同与用户数据冲突，以法规/合同为准。" |
+| `dynamic_bias > 0.7` | "优先参考用户数据，不足时补充引用法规/合同。" |
+| default (equal / unset) | "综合两类来源回答，不偏向任何一方。" |
 
 ---
 
