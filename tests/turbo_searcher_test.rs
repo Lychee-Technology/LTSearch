@@ -8,7 +8,7 @@ use ltsearch::index::{
 };
 use ltsearch::models::{CorpusType, SearchSource};
 use ltsearch::models::{IndexManifest, ShardManifest};
-use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
+use ltsearch::query::{ContextBuilder, StaticRetriever, TurboQuantSearcher};
 use ltsearch::storage::{ActiveManifest, ManifestHead};
 
 fn stub_manifest() -> ActiveManifest {
@@ -473,4 +473,49 @@ fn turbo_searcher_populates_citation_from_title_and_leaves_untitled_bare() {
     let untitled = &results[1];
     assert_eq!(untitled.doc_id, "20");
     assert!(untitled.citation.is_none());
+}
+
+/// End-to-end: a static index built with a `metadata["title"]` renders the
+/// enriched `[法规 #1] <title>` label through the real searcher → ContextBuilder
+/// pipeline, while an untitled chunk keeps a bare label.
+#[test]
+fn static_title_renders_into_assembled_context_end_to_end() {
+    let dir = temp_dir("context-e2e");
+    write_test_index(
+        &dir,
+        512,
+        &[
+            FixtureDoc {
+                doc_id: 10,
+                corpus_type: 0,
+                text: "民法典正文",
+                title: Some("民法典"),
+                embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            },
+            FixtureDoc {
+                doc_id: 20,
+                corpus_type: 0,
+                text: "无标题条文",
+                title: None,
+                embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
+            },
+        ],
+    );
+
+    let searcher = load_searcher(&dir);
+    let results = searcher
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            2,
+        )
+        .unwrap();
+    assert_eq!(results[0].doc_id, "10");
+
+    let context = ContextBuilder::build_context(&results, &[], "民法典是什么?");
+
+    // The titled top chunk carries its title into the label; the untitled chunk
+    // renders a bare label with no title text.
+    assert!(context.contains("[法规 #1] 民法典\n民法典正文"));
+    assert!(context.contains("[法规 #2]\n无标题条文"));
 }
