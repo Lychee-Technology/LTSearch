@@ -240,9 +240,43 @@ pub struct SearchRequest {
 }
 ```
 
+### 5.6 Response Contract: candidates per path
+
+`top_k` is the **K base**. Each path retrieves `3*K` candidates internally
+(`retrieval_window(top_k) = 3*top_k`, capped at 100), and `SearchResponse`
+returns those candidates **in full — up to `3*K` per path**, not truncated to
+`K`. So a `top_k = 5` request yields up to 15 static + 15 dynamic chunks (the
+designed 6*K), and the upstream caller assembles the LLM context from them.
+(`QueryRouter::search` truncates each group to `retrieval_window(top_k)`;
+`SearchResponse::validate` caps each group at the same value.)
+
+`citation` (title, source ref, url) is a first-class provenance field and is
+**preserved even when `include_metadata=false`** — only the freeform `metadata`
+map is dropped. This lets an upstream caller request a lean response yet still
+render source labels (`[法规 #1] 民法典`) from `citation.title`.
+
 ---
 
 ## 6. LLM Integration
+
+### Integration Ownership
+
+The LLM turn lives **outside LTSearch**. LTSearch is a pure retrieval service:
+its query Lambda returns `SearchResponse` (JSON) and never calls an LLM.
+`ContextBuilder` (`src/query/context_builder.rs`) is a **library** the upstream
+caller (e.g. `ltbase.api`, which owns the LLM interaction) depends on:
+
+- The caller receives `SearchResponse` (up to `3*K` per path, with `text`,
+  `corpus_type`, and `citation.title` per §5.6).
+- It calls `ContextBuilder::build_context_bounded(static_chunks, dynamic_chunks,
+  query, max_tokens)` to assemble the 6*K context, and
+  `build_system_prompt(corpus_weights)` for the weight instruction.
+- **`max_tokens` (the token budget) is owned by the caller** — it knows the
+  target LLM's context window; LTSearch does not hold this budget.
+
+LTSearch's public surface (`SearchResponse` fields + the `ContextBuilder`
+export) is sufficient for the caller to construct context without any
+LTSearch-side LLM code. Format below is produced by `ContextBuilder`.
 
 ### Context Format
 

@@ -812,6 +812,69 @@ fn router_uses_three_x_top_k_for_static_and_dynamic_retrievers() {
 }
 
 #[test]
+fn router_returns_up_to_three_x_top_k_candidates_per_path() {
+    // With top_k=2 the retrieval window is 6 per path. When more than top_k
+    // candidates are available, the response must keep up to 3*K per path (not
+    // truncate to K) so an upstream caller can assemble the full 6*K LLM context.
+    let start = Arc::new(Instant::now());
+    let request = SearchRequest {
+        query: "rust search".into(),
+        top_k: 2,
+        filters: None,
+        include_metadata: false,
+        corpus_weights: None,
+    };
+    let statics: Vec<SearchResult> = (0..6)
+        .map(|i| {
+            sample_result(
+                &format!("doc-static-{i}"),
+                0.9 - i as f32 * 0.01,
+                SearchSource::Static,
+            )
+        })
+        .collect();
+    let keywords: Vec<SearchResult> = (0..3)
+        .map(|i| {
+            sample_result(
+                &format!("doc-kw-{i}"),
+                8.0 - i as f32,
+                SearchSource::Keyword,
+            )
+        })
+        .collect();
+    let vectors: Vec<SearchResult> = (0..3)
+        .map(|i| {
+            sample_result(
+                &format!("doc-vec-{i}"),
+                0.9 - i as f32 * 0.01,
+                SearchSource::Vector,
+            )
+        })
+        .collect();
+    let static_retriever =
+        StubStaticRetriever::new(statics, Duration::from_millis(0), start.clone(), 7, 6);
+    let keyword =
+        StubKeywordRetriever::new(keywords, Duration::from_millis(0), start.clone(), 7, 6);
+    let vector = StubVectorRetriever::new(vectors, Duration::from_millis(0), start, 7, 6);
+    let router = QueryRouter::new(
+        StubManifestStore::new(7),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        keyword.clone(),
+        vector.clone(),
+    )
+    .with_static_retriever(static_retriever.clone());
+
+    let response = router.search(&request).unwrap();
+
+    // static path: 6 available, window 6 → all 6 kept (would be 2 under the old cap)
+    assert_eq!(response.static_chunks.len(), 6);
+    assert_eq!(response.static_count, 6);
+    // dynamic path: 3 vector + 3 keyword, all distinct → fused 6, all kept
+    assert_eq!(response.dynamic_chunks.len(), 6);
+    assert_eq!(response.dynamic_count, 6);
+}
+
+#[test]
 fn router_falls_back_to_keyword_only_when_embedding_generation_fails() {
     let start = Arc::new(Instant::now());
     let manifest_store = StubManifestStore::new(7);

@@ -190,7 +190,11 @@ pub struct SearchResponse {
 }
 
 impl SearchResponse {
-    pub fn validate(&self, requested_top_k: usize) -> Result<(), ValidationError> {
+    /// `max_chunks_per_path` is the response cap per source group — the
+    /// retrieval window (3*K), not the request's `top_k`. Each group is
+    /// returned in full up to this cap so an upstream caller can assemble the
+    /// 6*K LLM context.
+    pub fn validate(&self, max_chunks_per_path: usize) -> Result<(), ValidationError> {
         if self.static_chunks.len() > self.static_count {
             return Err(ValidationError::Mismatch {
                 field: "static_chunks",
@@ -203,16 +207,16 @@ impl SearchResponse {
                 expected: "dynamic_chunks.len() <= dynamic_count",
             });
         }
-        if self.static_chunks.len() > requested_top_k {
+        if self.static_chunks.len() > max_chunks_per_path {
             return Err(ValidationError::Mismatch {
                 field: "static_chunks",
-                expected: "static_chunks.len() <= requested_top_k",
+                expected: "static_chunks.len() <= max_chunks_per_path",
             });
         }
-        if self.dynamic_chunks.len() > requested_top_k {
+        if self.dynamic_chunks.len() > max_chunks_per_path {
             return Err(ValidationError::Mismatch {
                 field: "dynamic_chunks",
-                expected: "dynamic_chunks.len() <= requested_top_k",
+                expected: "dynamic_chunks.len() <= max_chunks_per_path",
             });
         }
         for result in &self.static_chunks {
