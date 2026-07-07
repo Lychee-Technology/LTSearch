@@ -273,7 +273,9 @@ fn write_test_index(dir: &Path, documents: &[Vec<f32>]) {
         let meta = MetaRecord {
             doc_id: (index + 1) as u64,
             corpus_type: (index % 3) as u8,
-            _pad: [0; 3],
+            _pad: [0; 7],
+            title_offset: 0,
+            title_len: 0,
             text_offset,
             text_len: text.len() as u32,
         };
@@ -286,6 +288,7 @@ fn write_test_index(dir: &Path, documents: &[Vec<f32>]) {
     fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
     fs::write(dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
     fs::write(dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(dir.join("centroids.bin"), centroids.to_bytes()).unwrap();
     fs::write(dir.join("projection.bin"), projection.to_bytes()).unwrap();
 }

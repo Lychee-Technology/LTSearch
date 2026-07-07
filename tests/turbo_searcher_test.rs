@@ -74,6 +74,7 @@ struct FixtureDoc<'a> {
     doc_id: u64,
     corpus_type: u8,
     text: &'a str,
+    title: Option<&'a str>,
     embedding: Vec<f32>,
 }
 
@@ -90,6 +91,7 @@ fn write_test_index(dir: &Path, dim: u32, docs: &[FixtureDoc<'_>]) {
     let mut bin_data = header.to_bytes();
     let mut meta_data = Vec::new();
     let mut text_blob = Vec::new();
+    let mut title_blob = Vec::new();
 
     for doc in docs {
         let encoded = encode_vector(&doc.embedding, &centroids, &projection).unwrap();
@@ -110,12 +112,22 @@ fn write_test_index(dir: &Path, dim: u32, docs: &[FixtureDoc<'_>]) {
 
         let text_offset = text_blob.len() as u64;
         text_blob.extend_from_slice(doc.text.as_bytes());
+        let title_offset = title_blob.len() as u64;
+        let title_len = match doc.title {
+            Some(title) => {
+                title_blob.extend_from_slice(title.as_bytes());
+                title.len() as u32
+            }
+            None => 0,
+        };
         let meta = MetaRecord {
             doc_id: doc.doc_id,
             corpus_type: doc.corpus_type,
-            _pad: [0; 3],
+            _pad: [0; 7],
             text_offset,
             text_len: doc.text.len() as u32,
+            title_offset,
+            title_len,
         };
         let meta_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(&meta as *const MetaRecord as *const u8, META_RECORD_SIZE)
@@ -126,6 +138,7 @@ fn write_test_index(dir: &Path, dim: u32, docs: &[FixtureDoc<'_>]) {
     fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
     fs::write(dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
     fs::write(dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), &title_blob).unwrap();
     fs::write(dir.join("centroids.bin"), centroids.to_bytes()).unwrap();
     fs::write(dir.join("projection.bin"), projection.to_bytes()).unwrap();
 }
@@ -146,18 +159,21 @@ fn turbo_searcher_returns_static_results_with_corpus_mapping_and_stable_tie_brea
                 doc_id: 20,
                 corpus_type: 2,
                 text: "rfc twenty",
+                title: None,
                 embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 10,
                 corpus_type: 0,
                 text: "legal ten",
+                title: None,
                 embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 30,
                 corpus_type: 1,
                 text: "contract thirty",
+                title: None,
                 embedding: padded_embedding(&[0.0, 0.0, 0.0, 0.0]),
             },
         ],
@@ -199,6 +215,7 @@ fn turbo_searcher_rejects_query_embeddings_with_wrong_dimension() {
             doc_id: 1,
             corpus_type: 0,
             text: "legal one",
+            title: None,
             embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
         }],
     );
@@ -226,6 +243,7 @@ fn turbo_searcher_rejects_top_k_out_of_range() {
             doc_id: 1,
             corpus_type: 0,
             text: "legal one",
+            title: None,
             embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
         }],
     );
@@ -263,18 +281,21 @@ fn turbo_searcher_allows_top_k_at_the_maximum_and_returns_all_available_docs() {
                 doc_id: 10,
                 corpus_type: 0,
                 text: "legal ten",
+                title: None,
                 embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 20,
                 corpus_type: 1,
                 text: "contract twenty",
+                title: None,
                 embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
             },
             FixtureDoc {
                 doc_id: 30,
                 corpus_type: 2,
                 text: "rfc thirty",
+                title: None,
                 embedding: padded_embedding(&[0.8, -0.8, 0.0, 0.8]),
             },
         ],
@@ -310,6 +331,7 @@ fn turbo_searcher_returns_stable_single_document_results_and_scores() {
             doc_id: 42,
             corpus_type: 1,
             text: "contract forty-two",
+            title: None,
             embedding: query.clone(),
         }],
     );
@@ -352,24 +374,28 @@ fn turbo_searcher_returns_best_top_k_without_leaking_lower_ranked_hits() {
                 doc_id: 5,
                 corpus_type: 0,
                 text: "best",
+                title: None,
                 embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 4,
                 corpus_type: 1,
                 text: "second",
+                title: None,
                 embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
             },
             FixtureDoc {
                 doc_id: 3,
                 corpus_type: 2,
                 text: "third",
+                title: None,
                 embedding: padded_embedding(&[0.8, -0.8, 0.0, 0.8]),
             },
             FixtureDoc {
                 doc_id: 2,
                 corpus_type: 0,
                 text: "fourth",
+                title: None,
                 embedding: padded_embedding(&[0.0, 0.0, 0.0, 0.0]),
             },
         ],

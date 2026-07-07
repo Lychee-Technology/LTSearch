@@ -43,7 +43,7 @@ impl StaticRetriever for TurboQuantSearcher {
         })?;
 
         let heap = match self.index.records() {
-            TurboRecordSlice::V1Dim512(records) => records
+            TurboRecordSlice::V2Dim512(records) => records
                 .par_iter()
                 .enumerate()
                 .try_fold(BinaryHeap::new, |mut heap, (record_index, record)| {

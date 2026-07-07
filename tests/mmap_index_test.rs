@@ -53,6 +53,7 @@ fn write_test_index(
         text_blob.extend_from_slice(text.as_bytes());
     }
     fs::write(dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
 
     let mut meta_data = Vec::new();
     for (i, &(doc_id, _)) in records.iter().enumerate() {
@@ -60,9 +61,11 @@ fn write_test_index(
         let meta = MetaRecord {
             doc_id,
             corpus_type: meta_corpus_types[i],
-            _pad: [0; 3],
+            _pad: [0; 7],
             text_offset,
             text_len,
+            title_offset: 0,
+            title_len: 0,
         };
         let meta_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(&meta as *const MetaRecord as *const u8, META_RECORD_SIZE)
@@ -95,6 +98,7 @@ fn write_unknown_layout_index(dir: &std::path::Path, dim: u32, record_count: u64
     )
     .unwrap();
     fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
         CentroidTable::generate(dim, 16, 7).to_bytes(),
@@ -163,6 +167,7 @@ fn mmap_index_rejects_truncated_bin_file() {
     fs::write(dir.join("turbo_static.bin"), header.to_bytes()).unwrap();
     fs::write(dir.join("turbo_static_meta.bin"), []).unwrap();
     fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
         CentroidTable::generate(512, 16, 7).to_bytes(),
@@ -198,7 +203,7 @@ fn mmap_index_header_returns_correct_info() {
     let index = MmapIndex::load(&dir).unwrap();
     assert_eq!(index.dim(), 512);
     assert_eq!(index.record_count(), 1);
-    assert_eq!(index.layout(), ltsearch::index::KnownRecordLayout::V1Dim512);
+    assert_eq!(index.layout(), ltsearch::index::KnownRecordLayout::V2Dim512);
 }
 
 #[test]
@@ -246,7 +251,7 @@ fn mmap_index_exposes_typed_record_slice() {
     let index = MmapIndex::load(&dir).unwrap();
 
     match index.records() {
-        TurboRecordSlice::V1Dim512(records) => {
+        TurboRecordSlice::V2Dim512(records) => {
             assert_eq!(records.len(), 2);
             assert_eq!(records[0].doc_id, 11);
             assert!((records[1].gamma - 0.75).abs() < f32::EPSILON);

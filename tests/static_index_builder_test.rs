@@ -70,7 +70,10 @@ fn static_index_builder_generates_missing_embeddings_and_writes_loadable_artifac
                 StaticChunk {
                     doc_id: "1001".into(),
                     text: "alpha body".into(),
-                    metadata: HashMap::from([("lang".into(), json!("en"))]),
+                    metadata: HashMap::from([
+                        ("lang".into(), json!("en")),
+                        ("title".into(), json!("民法典")),
+                    ]),
                     corpus_type: CorpusType::Legal,
                 },
                 StaticChunk {
@@ -93,6 +96,7 @@ fn static_index_builder_generates_missing_embeddings_and_writes_loadable_artifac
     assert!(output.join("turbo_static.bin").is_file());
     assert!(output.join("turbo_static_meta.bin").is_file());
     assert!(output.join("turbo_static_text.bin").is_file());
+    assert!(output.join("turbo_static_title.bin").is_file());
 
     let index = MmapIndex::load(&output).unwrap();
     assert_eq!(index.record_count(), 2);
@@ -104,6 +108,11 @@ fn static_index_builder_generates_missing_embeddings_and_writes_loadable_artifac
     assert_eq!(index.meta(1).corpus_type, 2);
     assert_eq!(index.text(0), "alpha body");
     assert_eq!(index.text(1), "beta body");
+    // Chunk 1001 carried metadata["title"]; chunk 1002 had none.
+    assert_eq!(index.title(0), Some("民法典"));
+    assert_eq!(index.title(1), None);
+    assert_eq!(index.meta(0).title_len as usize, "民法典".len());
+    assert_eq!(index.meta(1).title_len, 0);
 }
 
 #[test]
@@ -141,6 +150,7 @@ fn static_index_builder_is_deterministic_for_identical_inputs() {
         "turbo_static.bin",
         "turbo_static_meta.bin",
         "turbo_static_text.bin",
+        "turbo_static_title.bin",
     ] {
         assert_eq!(
             fs::read(output_a.join(file_name)).unwrap(),

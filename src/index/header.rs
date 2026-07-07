@@ -3,7 +3,7 @@ use std::fmt;
 use super::record::TurboRecord512;
 
 pub const TURBO_MAGIC: [u8; 4] = *b"TQNT";
-const TURBO_VERSION: u32 = 1;
+const TURBO_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurboHeader {
@@ -22,7 +22,7 @@ pub enum TurboHeaderError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnownRecordLayout {
-    V1Dim512,
+    V2Dim512,
 }
 
 impl fmt::Display for TurboHeaderError {
@@ -51,14 +51,14 @@ impl fmt::Display for TurboHeaderError {
 impl KnownRecordLayout {
     pub fn from_header(header: &TurboHeader) -> Result<Self, TurboHeaderError> {
         match (header.version(), header.dim()) {
-            (TURBO_VERSION, 512) => Ok(Self::V1Dim512),
+            (TURBO_VERSION, 512) => Ok(Self::V2Dim512),
             (version, dim) => Err(TurboHeaderError::UnsupportedLayout { version, dim }),
         }
     }
 
     pub fn record_size(&self) -> usize {
         match self {
-            Self::V1Dim512 => std::mem::size_of::<TurboRecord512>(),
+            Self::V2Dim512 => std::mem::size_of::<TurboRecord512>(),
         }
     }
 }
