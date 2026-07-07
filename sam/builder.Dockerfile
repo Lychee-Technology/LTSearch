@@ -3,10 +3,11 @@ RUN dnf install -y --allowerasing gcc gcc-c++ make perl pkgconfig openssl-devel 
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.94.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 ARG LTEMBED_MODE=stub
-# Tarball with an ort_bundle for jina-embeddings-v5-text-nano-retrieval at its root:
-# model.ort, tokenizer.json, build-info.json, libonnxruntime.so (linux/arm64).
-# Produced by the LTEmbed bundle builder; required when LTEMBED_MODE=real.
-ARG LTEMBED_BUNDLE_URL=
+# ort_bundle tarball for jina-embeddings-v5-text-nano-retrieval, with
+# model.ort, tokenizer.json, build-info.json, libonnxruntime.so (linux/arm64)
+# under a leading ./ (hence --strip-components=1 below). Defaults to the public
+# minimal-ort-builder release asset; override to bump the pinned model version.
+ARG LTEMBED_BUNDLE_URL=https://github.com/Lychee-Technology/minimal-ort-builder/releases/download/v1.0.9/jinaai__jina-embeddings-v5-text-nano-retrieval_q4f16_linux-arm64.tar.gz
 RUN mkdir -p /ltembed-assets && \
     if [ "$LTEMBED_MODE" != "stub" ]; then \
       if [ -z "$LTEMBED_BUNDLE_URL" ]; then \

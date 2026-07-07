@@ -561,7 +561,7 @@ LTEmbed configuration per side is two env vars: `LTSEARCH_{BUILD,QUERY}_LTEMBED_
 
 ## **LTEmbed Asset Delivery**
 
-Model files are too large for Lambda Layers and impractical to download at cold-start. Instead, an **ort bundle** — produced by the LTEmbed bundle pipeline (`minimal-ort-builder` release assets, q4f16 with a matching minimal-build `libonnxruntime.so`) for jina-embeddings-v5-text-nano-retrieval — is **baked into the Lambda container image** at build time.
+Model files are too large for Lambda Layers and impractical to download at cold-start. Instead, an **ort bundle** — a public `minimal-ort-builder` release asset (q4f16 `model.ort` for jina-embeddings-v5-text-nano-retrieval with a matching minimal-build `libonnxruntime.so`) — is **baked into the Lambda container image** at build time. `sam/builder.Dockerfile` pins the exact bundle version via the `LTEMBED_BUNDLE_URL` build arg (default: `minimal-ort-builder` v1.0.9); bumping the model is a one-line change to that default.
 
 Build flow:
 
@@ -578,7 +578,7 @@ sam build
   → query_lambda.Dockerfile:         COPY --from=builder /ltembed-assets /ltembed-assets
 ```
 
-The default `LTEMBED_MODE=stub` skips the download and satisfies the ltembed git dependency with the vendored stub crate; binaries are built without the `ltembed` feature and use the `fixed` provider. This is the CI default. `LTEMBED_MODE=real` fails the build loudly if `LTEMBED_BUNDLE_URL` is not provided.
+The default `LTEMBED_MODE=stub` skips the download and satisfies the ltembed git dependency with the vendored stub crate; binaries are built without the `ltembed` feature and use the `fixed` provider. This is the CI default. `LTEMBED_MODE=real` downloads the pinned default `LTEMBED_BUNDLE_URL` (overridable to bump the model version) and fails the build loudly only if that URL is explicitly emptied or unreachable.
 
 Bundle files inside Lambda containers:
 
