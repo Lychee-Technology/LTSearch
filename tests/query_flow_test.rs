@@ -314,8 +314,9 @@ fn query_flow_hybrid_retrieval_returns_correct_version_and_results() {
     // Assert: response.index_version == 1
     assert_eq!(response.index_version, 1);
 
-    // Assert: response.dynamic_chunks.len() == 2
-    assert_eq!(response.dynamic_chunks.len(), 2);
+    // Assert: top_k=2 → window 6; all 3 indexed docs are returned (no longer
+    // truncated to top_k, so an upstream caller gets the full candidate set).
+    assert_eq!(response.dynamic_chunks.len(), 3);
 
     // Assert: all doc_ids are unique
     let unique_ids: HashSet<&str> = response

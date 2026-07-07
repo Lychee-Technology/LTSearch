@@ -187,12 +187,16 @@ fn build_to_hybrid_query_flow_returns_built_version_and_unique_results() {
         .unwrap();
 
     assert_eq!(response.index_version, 14);
-    assert_eq!(response.dynamic_chunks.len(), 2);
-    assert_eq!(response.dynamic_count, 2);
-    assert_ne!(
-        response.dynamic_chunks[0].doc_id,
-        response.dynamic_chunks[1].doc_id
-    );
+    // top_k=2 → retrieval window 6; all 3 indexed dynamic docs fit and are
+    // returned (the old top_k truncation would have dropped the lowest-ranked).
+    assert_eq!(response.dynamic_chunks.len(), 3);
+    assert_eq!(response.dynamic_count, 3);
+    let unique_ids: std::collections::HashSet<_> = response
+        .dynamic_chunks
+        .iter()
+        .map(|result| result.doc_id.as_str())
+        .collect();
+    assert_eq!(unique_ids.len(), 3);
     assert!(response
         .dynamic_chunks
         .iter()

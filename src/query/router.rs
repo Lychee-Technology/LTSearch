@@ -179,10 +179,13 @@ where
             self.search_single_pass(request, &active_manifest, &query_embedding)?
         };
 
+        // Return up to the full retrieval window (3*K) per path so an upstream
+        // caller can assemble the designed 6*K LLM context from the response.
+        let max_chunks_per_path = retrieval_window(request.top_k);
         let mut static_chunks = apply_filters(results.static_chunks, request.filters.as_ref());
         let mut dynamic_chunks = apply_filters(results.dynamic_chunks, request.filters.as_ref());
-        static_chunks.truncate(request.top_k);
-        dynamic_chunks.truncate(request.top_k);
+        static_chunks.truncate(max_chunks_per_path);
+        dynamic_chunks.truncate(max_chunks_per_path);
         if !request.include_metadata {
             static_chunks = strip_metadata(static_chunks);
             dynamic_chunks = strip_metadata(dynamic_chunks);
@@ -198,7 +201,7 @@ where
             latency_ms: started_at.elapsed().as_millis() as u64,
             index_version,
         };
-        response.validate(request.top_k)?;
+        response.validate(max_chunks_per_path)?;
 
         Ok(response)
     }

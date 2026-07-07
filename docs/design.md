@@ -343,10 +343,12 @@ pub async fn search(
 - Index cache contains valid index version
 
 **Postconditions:**
-- Returns SearchResponse with at most `top_k` results
-- Results are sorted by descending score
-- All returned doc_ids are unique
-- If successful: response.results.len() <= request.top_k
+- Returns SearchResponse with `static_chunks` and `dynamic_chunks`, each holding
+  up to `3 * top_k` candidates (the retrieval window), not truncated to `top_k`
+  — see the TurboQuant hybrid spec §5.6. `top_k` is the K base.
+- Results within each group are sorted by descending score
+- All returned doc_ids are unique within a group
+- If successful: `static_chunks.len()`/`dynamic_chunks.len()` each `<= 3 * top_k`
 - If error: returns descriptive SearchError
 - No mutations to request parameter
 
