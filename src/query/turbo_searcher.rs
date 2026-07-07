@@ -5,7 +5,7 @@ use rayon::prelude::*;
 
 use crate::error::SearchError;
 use crate::index::{encode_vector, score_query_against_record_512, MmapIndex, TurboRecordSlice};
-use crate::models::{ChunkSource, CorpusType, SearchResult, SearchSource};
+use crate::models::{ChunkSource, Citation, CorpusType, SearchResult, SearchSource};
 use crate::storage::ActiveManifest;
 
 use super::retrieval_common::{validate_embedding_dim, validate_query_embedding, validate_top_k};
@@ -63,6 +63,7 @@ impl StaticRetriever for TurboQuantSearcher {
                         score,
                         doc_id: meta.doc_id,
                         text: self.index.text(record_index as u64).to_string(),
+                        title: self.index.title(record_index as u64).map(str::to_string),
                         corpus_type: CorpusType::from_id(meta.corpus_type),
                     };
 
@@ -82,15 +83,29 @@ impl StaticRetriever for TurboQuantSearcher {
 
         Ok(ranked
             .into_iter()
-            .map(|candidate| SearchResult {
-                doc_id: candidate.doc_id.to_string(),
-                score: candidate.score,
-                text: candidate.text,
-                metadata: None,
-                source: SearchSource::Static,
-                chunk_source: ChunkSource::Static,
-                corpus_type: Some(candidate.corpus_type),
-                citation: None,
+            .map(|candidate| {
+                let doc_id = candidate.doc_id.to_string();
+                let source_type = corpus_source_type(&candidate.corpus_type);
+                // A title makes the chunk citable: ContextBuilder reads
+                // `citation.title` to render `[法规 #1] <title>`. Without one,
+                // `citation` stays None and the bare label is rendered.
+                let citation = candidate.title.map(|title| Citation {
+                    resource_id: doc_id.clone(),
+                    source_type: source_type.to_string(),
+                    source_ref: doc_id.clone(),
+                    title: Some(title),
+                    url: None,
+                });
+                SearchResult {
+                    doc_id,
+                    score: candidate.score,
+                    text: candidate.text,
+                    metadata: None,
+                    source: SearchSource::Static,
+                    chunk_source: ChunkSource::Static,
+                    corpus_type: Some(candidate.corpus_type),
+                    citation,
+                }
             })
             .collect())
     }
@@ -101,7 +116,20 @@ struct RankedResult {
     score: f32,
     doc_id: u64,
     text: String,
+    title: Option<String>,
     corpus_type: CorpusType,
+}
+
+/// Machine-readable provenance identifier for a static corpus type. This feeds
+/// `Citation::source_type`; the human-facing context label comes separately
+/// from `corpus_type` via `context_builder::corpus_type_label`.
+fn corpus_source_type(corpus_type: &CorpusType) -> &'static str {
+    match corpus_type {
+        CorpusType::Legal => "legal",
+        CorpusType::Contract => "contract",
+        CorpusType::Rfc => "rfc",
+        CorpusType::Other(_) => "other",
+    }
 }
 
 impl PartialEq for RankedResult {

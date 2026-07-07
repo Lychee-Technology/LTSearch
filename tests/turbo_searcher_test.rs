@@ -422,3 +422,55 @@ fn turbo_searcher_returns_best_top_k_without_leaking_lower_ranked_hits() {
     assert!(results[0].score >= results[1].score);
     assert!(results[1].score >= results[2].score);
 }
+
+#[test]
+fn turbo_searcher_populates_citation_from_title_and_leaves_untitled_bare() {
+    let dir = temp_dir("citation-from-title");
+    write_test_index(
+        &dir,
+        512,
+        &[
+            FixtureDoc {
+                doc_id: 10,
+                corpus_type: 0,
+                text: "legal ten",
+                title: Some("民法典"),
+                embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            },
+            FixtureDoc {
+                doc_id: 20,
+                corpus_type: 2,
+                text: "rfc twenty",
+                title: None,
+                embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
+            },
+        ],
+    );
+
+    let searcher = load_searcher(&dir);
+    let results = searcher
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            2,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    let titled = &results[0];
+    assert_eq!(titled.doc_id, "10");
+    let citation = titled
+        .citation
+        .as_ref()
+        .expect("titled static chunk must carry a citation");
+    assert_eq!(citation.title.as_deref(), Some("民法典"));
+    assert_eq!(citation.source_type, "legal");
+    assert_eq!(citation.resource_id, "10");
+    assert_eq!(citation.source_ref, "10");
+    assert_eq!(citation.url, None);
+
+    let untitled = &results[1];
+    assert_eq!(untitled.doc_id, "20");
+    assert!(untitled.citation.is_none());
+}
