@@ -12,12 +12,12 @@ pub struct TurboRecord512 {
 
 #[derive(Debug, Clone, Copy)]
 pub enum TypedTurboRecordRef<'a> {
-    V1Dim512(&'a TurboRecord512),
+    V2Dim512(&'a TurboRecord512),
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum TurboRecordSlice<'a> {
-    V1Dim512(&'a [TurboRecord512]),
+    V2Dim512(&'a [TurboRecord512]),
 }
 
 pub struct TurboRecordRef<'a> {

@@ -52,6 +52,7 @@ fn write_test_index(
         text_blob.extend_from_slice(text.as_bytes());
     }
     fs::write(dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
 
     let mut meta_data = Vec::new();
     for (i, &(doc_id, _)) in records.iter().enumerate() {
@@ -59,7 +60,9 @@ fn write_test_index(
         let meta = MetaRecord {
             doc_id,
             corpus_type: meta_corpus_types[i],
-            _pad: [0; 3],
+            _pad: [0; 7],
+            title_offset: 0,
+            title_len: 0,
             text_offset,
             text_len,
         };

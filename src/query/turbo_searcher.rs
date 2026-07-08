@@ -5,9 +5,10 @@ use rayon::prelude::*;
 
 use crate::error::SearchError;
 use crate::index::{encode_vector, score_query_against_record_512, MmapIndex, TurboRecordSlice};
-use crate::models::{ChunkSource, CorpusType, SearchResult, SearchSource};
+use crate::models::{ChunkSource, Citation, CorpusType, SearchResult, SearchSource};
 use crate::storage::ActiveManifest;
 
+use super::context_builder::corpus_type_label;
 use super::retrieval_common::{validate_embedding_dim, validate_query_embedding, validate_top_k};
 use super::StaticRetriever;
 
@@ -43,7 +44,7 @@ impl StaticRetriever for TurboQuantSearcher {
         })?;
 
         let heap = match self.index.records() {
-            TurboRecordSlice::V1Dim512(records) => records
+            TurboRecordSlice::V2Dim512(records) => records
                 .par_iter()
                 .enumerate()
                 .try_fold(BinaryHeap::new, |mut heap, (record_index, record)| {
@@ -62,8 +63,7 @@ impl StaticRetriever for TurboQuantSearcher {
                     let candidate = RankedResult {
                         score,
                         doc_id: meta.doc_id,
-                        text: self.index.text(record_index as u64).to_string(),
-                        corpus_type: CorpusType::from_id(meta.corpus_type),
+                        record_index: record_index as u64,
                     };
 
                     push_bounded(&mut heap, candidate, top_k);
@@ -80,28 +80,51 @@ impl StaticRetriever for TurboQuantSearcher {
         let mut ranked = heap.into_vec();
         ranked.sort_by(compare_ranked_results);
 
+        // Materialize text/title only for the selected top-K, keeping the
+        // parallel scan above zero-copy over the mmap.
         Ok(ranked
             .into_iter()
-            .map(|candidate| SearchResult {
-                doc_id: candidate.doc_id.to_string(),
-                score: candidate.score,
-                text: candidate.text,
-                metadata: None,
-                source: SearchSource::Static,
-                chunk_source: ChunkSource::Static,
-                corpus_type: Some(candidate.corpus_type),
-                citation: None,
+            .map(|candidate| {
+                let doc_id = candidate.doc_id.to_string();
+                let corpus_type =
+                    CorpusType::from_id(self.index.meta(candidate.record_index).corpus_type);
+                let text = self.index.text(candidate.record_index).to_string();
+                // A title makes the chunk citable: ContextBuilder reads
+                // `citation.title` to render `[法规 #1] <title>`. Without one,
+                // `citation` stays None and the bare label is rendered.
+                let citation = self
+                    .index
+                    .title(candidate.record_index)
+                    .map(|title| Citation {
+                        resource_id: doc_id.clone(),
+                        source_type: corpus_type_label(Some(&corpus_type)).to_string(),
+                        source_ref: doc_id.clone(),
+                        title: Some(title.to_string()),
+                        url: None,
+                    });
+                SearchResult {
+                    doc_id,
+                    score: candidate.score,
+                    text,
+                    metadata: None,
+                    source: SearchSource::Static,
+                    chunk_source: ChunkSource::Static,
+                    corpus_type: Some(corpus_type),
+                    citation,
+                }
             })
             .collect())
     }
 }
 
+// Only score + doc_id drive ranking/tie-breaks, so the parallel scan keeps
+// candidates cheap (no per-record String allocation); the winning records'
+// text/title are read from the mmap after top-K selection via `record_index`.
 #[derive(Debug, Clone)]
 struct RankedResult {
     score: f32,
     doc_id: u64,
-    text: String,
-    corpus_type: CorpusType,
+    record_index: u64,
 }
 
 impl PartialEq for RankedResult {

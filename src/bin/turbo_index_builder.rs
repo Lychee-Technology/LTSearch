@@ -90,6 +90,7 @@ async fn run(args: CliArgs) -> Result<String, String> {
         "turbo_static.bin",
         "turbo_static_meta.bin",
         "turbo_static_text.bin",
+        "turbo_static_title.bin",
     ] {
         let path = dir.join(file_name);
         if let Ok(meta) = fs::metadata(&path) {

@@ -20,6 +20,7 @@ pub struct MmapIndex {
     bin_mmap: Mmap,
     meta_mmap: Mmap,
     text_mmap: Mmap,
+    title_mmap: Mmap,
     centroids: CentroidTable,
     projection: ProjectionMatrix,
 }
@@ -98,12 +99,15 @@ impl MmapIndex {
         let bin_path = dir.join("turbo_static.bin");
         let meta_path = dir.join("turbo_static_meta.bin");
         let text_path = dir.join("turbo_static_text.bin");
+        let title_path = dir.join("turbo_static_title.bin");
         let centroids_path = dir.join("centroids.bin");
         let projection_path = dir.join("projection.bin");
 
+        // Parse the header (and reject unsupported versions/layouts) before
+        // touching the other blobs, so a legacy v1 image — which has no
+        // `turbo_static_title.bin` — fails through `TurboHeader::from_bytes`
+        // with `UnsupportedVersion`, not an I/O error on the missing title file.
         let bin_mmap = mmap_file(&bin_path)?;
-        let meta_mmap = mmap_file(&meta_path)?;
-        let text_mmap = mmap_file(&text_path)?;
         if bin_mmap.len() < TurboHeader::SIZE {
             return Err(MmapIndexError::FileSizeMismatch {
                 file: "turbo_static.bin",
@@ -114,6 +118,10 @@ impl MmapIndex {
 
         let header = TurboHeader::from_bytes(&bin_mmap[..TurboHeader::SIZE])?;
         let layout = KnownRecordLayout::from_header(&header)?;
+
+        let meta_mmap = mmap_file(&meta_path)?;
+        let text_mmap = mmap_file(&text_path)?;
+        let title_mmap = mmap_file(&title_path)?;
 
         let expected_bin_size =
             TurboHeader::SIZE as u64 + header.record_count() * layout.record_size() as u64;
@@ -184,6 +192,7 @@ impl MmapIndex {
             bin_mmap,
             meta_mmap,
             text_mmap,
+            title_mmap,
             centroids,
             projection,
         })
@@ -234,7 +243,7 @@ impl MmapIndex {
         );
 
         match self.records() {
-            TurboRecordSlice::V1Dim512(records) => {
+            TurboRecordSlice::V2Dim512(records) => {
                 TurboRecordRef::from_turbo_record_512(&records[index as usize], &self.header)
             }
         }
@@ -242,12 +251,12 @@ impl MmapIndex {
 
     pub fn records(&self) -> TurboRecordSlice<'_> {
         match self.layout {
-            KnownRecordLayout::V1Dim512 => {
+            KnownRecordLayout::V2Dim512 => {
                 let bytes = &self.bin_mmap[TurboHeader::SIZE..];
                 let ptr = bytes.as_ptr() as *const TurboRecord512;
                 let len = self.header.record_count() as usize;
                 let records = unsafe { std::slice::from_raw_parts(ptr, len) };
-                TurboRecordSlice::V1Dim512(records)
+                TurboRecordSlice::V2Dim512(records)
             }
         }
     }
@@ -268,12 +277,21 @@ impl MmapIndex {
         meta.text_from_blob(&self.text_mmap)
     }
 
+    pub fn title(&self, index: u64) -> Option<&str> {
+        let meta = self.meta(index);
+        meta.title_from_blob(&self.title_mmap)
+    }
+
     pub fn record_data(&self) -> &[u8] {
         &self.bin_mmap[TurboHeader::SIZE..]
     }
 
     pub fn text_blob(&self) -> &[u8] {
         &self.text_mmap
+    }
+
+    pub fn title_blob(&self) -> &[u8] {
+        &self.title_mmap
     }
 
     pub(crate) fn global_from_dir_for_tests<'a>(
@@ -355,6 +373,7 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
+        fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
         fs::write(
             dir.join("centroids.bin"),
             CentroidTable::generate(512, 16, 7).to_bytes(),

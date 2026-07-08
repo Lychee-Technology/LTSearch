@@ -117,6 +117,7 @@ impl<E> StaticIndexBuilder<E> {
         let mut turbo_static = header.to_bytes();
         let mut turbo_static_meta = Vec::with_capacity(chunks.len() * META_RECORD_SIZE);
         let mut turbo_static_text = Vec::new();
+        let mut turbo_static_title = Vec::new();
 
         for (chunk, embedding) in chunks.iter().zip(resolved_embeddings.iter()) {
             let encoded = encode_vector(embedding, &centroids, &projection).map_err(|error| {
@@ -163,12 +164,32 @@ impl<E> StaticIndexBuilder<E> {
 
             let text_offset = turbo_static_text.len() as u64;
             turbo_static_text.extend_from_slice(chunk.text.as_bytes());
+
+            // Title mirrors the text blob: a chunk without a non-empty
+            // `metadata["title"]` records `title_len == 0`, which reads back as
+            // `None` and degrades to the bare `[法规 #1]` context label.
+            let title = chunk
+                .metadata
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|title| !title.is_empty());
+            let title_offset = turbo_static_title.len() as u64;
+            let title_len = match title {
+                Some(title) => {
+                    turbo_static_title.extend_from_slice(title.as_bytes());
+                    title.len() as u32
+                }
+                None => 0,
+            };
+
             let meta = MetaRecord {
                 doc_id,
                 corpus_type: corpus_type_id(&chunk.corpus_type),
-                _pad: [0; 3],
+                _pad: [0; 7],
                 text_offset,
                 text_len: chunk.text.len() as u32,
+                title_offset,
+                title_len,
             };
             let meta_bytes: &[u8] = unsafe {
                 std::slice::from_raw_parts(
@@ -201,6 +222,7 @@ impl<E> StaticIndexBuilder<E> {
             &turbo_static,
             &turbo_static_meta,
             &turbo_static_text,
+            &turbo_static_title,
         );
         if let Err(error) = write_result {
             return Err(append_cleanup_failure(error, staged.abort()));
@@ -284,12 +306,17 @@ fn write_static_files(
     turbo_static: &[u8],
     turbo_static_meta: &[u8],
     turbo_static_text: &[u8],
+    turbo_static_title: &[u8],
 ) -> Result<(), IndexError> {
     write_file(&staged_dir.join("centroids.bin"), centroids)?;
     write_file(&staged_dir.join("projection.bin"), projection)?;
     write_file(&staged_dir.join("turbo_static.bin"), turbo_static)?;
     write_file(&staged_dir.join("turbo_static_meta.bin"), turbo_static_meta)?;
-    write_file(&staged_dir.join("turbo_static_text.bin"), turbo_static_text)
+    write_file(&staged_dir.join("turbo_static_text.bin"), turbo_static_text)?;
+    write_file(
+        &staged_dir.join("turbo_static_title.bin"),
+        turbo_static_title,
+    )
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), IndexError> {

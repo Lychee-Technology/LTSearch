@@ -53,6 +53,7 @@ fn write_test_index(
         text_blob.extend_from_slice(text.as_bytes());
     }
     fs::write(dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
 
     let mut meta_data = Vec::new();
     for (i, &(doc_id, _)) in records.iter().enumerate() {
@@ -60,9 +61,11 @@ fn write_test_index(
         let meta = MetaRecord {
             doc_id,
             corpus_type: meta_corpus_types[i],
-            _pad: [0; 3],
+            _pad: [0; 7],
             text_offset,
             text_len,
+            title_offset: 0,
+            title_len: 0,
         };
         let meta_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(&meta as *const MetaRecord as *const u8, META_RECORD_SIZE)
@@ -95,6 +98,7 @@ fn write_unknown_layout_index(dir: &std::path::Path, dim: u32, record_count: u64
     )
     .unwrap();
     fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
         CentroidTable::generate(dim, 16, 7).to_bytes(),
@@ -163,6 +167,7 @@ fn mmap_index_rejects_truncated_bin_file() {
     fs::write(dir.join("turbo_static.bin"), header.to_bytes()).unwrap();
     fs::write(dir.join("turbo_static_meta.bin"), []).unwrap();
     fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
         CentroidTable::generate(512, 16, 7).to_bytes(),
@@ -198,7 +203,7 @@ fn mmap_index_header_returns_correct_info() {
     let index = MmapIndex::load(&dir).unwrap();
     assert_eq!(index.dim(), 512);
     assert_eq!(index.record_count(), 1);
-    assert_eq!(index.layout(), ltsearch::index::KnownRecordLayout::V1Dim512);
+    assert_eq!(index.layout(), ltsearch::index::KnownRecordLayout::V2Dim512);
 }
 
 #[test]
@@ -230,6 +235,25 @@ fn mmap_index_accepts_known_v1_dim_512_layout() {
 }
 
 #[test]
+fn mmap_index_rejects_legacy_v1_image_before_touching_title_blob() {
+    // A real pre-title (v1) image on disk has turbo_static.bin with version=1
+    // and no turbo_static_title.bin. Load must fail through the header version
+    // check, not with an I/O error on the missing title blob.
+    let dir = temp_dir("legacy-v1-image");
+    let mut header_bytes = TurboHeader::new(512, 1).to_bytes();
+    header_bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+    fs::write(dir.join("turbo_static.bin"), &header_bytes).unwrap();
+    // Deliberately omit turbo_static_title.bin (and the other blobs): the header
+    // rejection must happen first.
+
+    let err = MmapIndex::load(&dir).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported version"),
+        "expected an unsupported-version header error, got: {err}"
+    );
+}
+
+#[test]
 fn mmap_index_rejects_unknown_record_layout() {
     let dir = temp_dir("unknown-layout");
     write_unknown_layout_index(&dir, 384, 1);
@@ -246,7 +270,7 @@ fn mmap_index_exposes_typed_record_slice() {
     let index = MmapIndex::load(&dir).unwrap();
 
     match index.records() {
-        TurboRecordSlice::V1Dim512(records) => {
+        TurboRecordSlice::V2Dim512(records) => {
             assert_eq!(records.len(), 2);
             assert_eq!(records[0].doc_id, 11);
             assert!((records[1].gamma - 0.75).abs() < f32::EPSILON);

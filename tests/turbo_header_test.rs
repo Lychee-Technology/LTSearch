@@ -4,7 +4,7 @@ use ltsearch::index::{TurboHeader, TURBO_MAGIC};
 fn header_roundtrip_for_512_dim() {
     let header = TurboHeader::new(512, 1000);
     assert_eq!(header.magic(), TURBO_MAGIC);
-    assert_eq!(header.version(), 1);
+    assert_eq!(header.version(), 2);
     assert_eq!(header.dim(), 512);
     assert_eq!(header.record_count(), 1000);
 
@@ -30,6 +30,20 @@ fn header_computes_stride_for_384_dim() {
     assert_eq!(header.idx_size(), 96);
     assert_eq!(header.qjl_size(), 48);
     assert_eq!(header.record_stride(), 156);
+}
+
+#[test]
+fn header_rejects_legacy_v1_image() {
+    // Craft a header that is valid except for the old version tag: a pre-title
+    // (v1) static image must fail loudly rather than be misread under the 40B
+    // MetaRecord layout.
+    let mut bytes = TurboHeader::new(512, 10).to_bytes();
+    bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+    let err = TurboHeader::from_bytes(&bytes).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported version"),
+        "expected an unsupported-version error, got: {err}"
+    );
 }
 
 #[test]

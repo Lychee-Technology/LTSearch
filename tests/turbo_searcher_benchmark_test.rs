@@ -120,7 +120,9 @@ fn write_benchmark_index(dir: &Path, docs: &[FixtureDoc<'_>]) {
         let meta = MetaRecord {
             doc_id: doc.doc_id,
             corpus_type: doc.corpus_type,
-            _pad: [0; 3],
+            _pad: [0; 7],
+            title_offset: 0,
+            title_len: 0,
             text_offset,
             text_len: text.len() as u32,
         };
@@ -133,6 +135,7 @@ fn write_benchmark_index(dir: &Path, docs: &[FixtureDoc<'_>]) {
     fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
     fs::write(dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
     fs::write(dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(dir.join("centroids.bin"), centroids.to_bytes()).unwrap();
     fs::write(dir.join("projection.bin"), projection.to_bytes()).unwrap();
 }
@@ -152,9 +155,9 @@ fn turbo_searcher_benchmark_reports_typed_512d_search_latency() {
     write_benchmark_index(&dir, &docs);
 
     let index = Box::new(MmapIndex::load(&dir).unwrap());
-    assert_eq!(index.layout(), KnownRecordLayout::V1Dim512);
+    assert_eq!(index.layout(), KnownRecordLayout::V2Dim512);
     match index.records() {
-        TurboRecordSlice::V1Dim512(records) => assert_eq!(records.len(), docs.len()),
+        TurboRecordSlice::V2Dim512(records) => assert_eq!(records.len(), docs.len()),
     }
     let searcher = TurboQuantSearcher::new(Box::leak(index));
     let query = padded_embedding(0);

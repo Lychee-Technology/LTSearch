@@ -8,7 +8,7 @@ use ltsearch::index::{
 };
 use ltsearch::models::{CorpusType, SearchSource};
 use ltsearch::models::{IndexManifest, ShardManifest};
-use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
+use ltsearch::query::{ContextBuilder, StaticRetriever, TurboQuantSearcher};
 use ltsearch::storage::{ActiveManifest, ManifestHead};
 
 fn stub_manifest() -> ActiveManifest {
@@ -74,6 +74,7 @@ struct FixtureDoc<'a> {
     doc_id: u64,
     corpus_type: u8,
     text: &'a str,
+    title: Option<&'a str>,
     embedding: Vec<f32>,
 }
 
@@ -90,6 +91,7 @@ fn write_test_index(dir: &Path, dim: u32, docs: &[FixtureDoc<'_>]) {
     let mut bin_data = header.to_bytes();
     let mut meta_data = Vec::new();
     let mut text_blob = Vec::new();
+    let mut title_blob = Vec::new();
 
     for doc in docs {
         let encoded = encode_vector(&doc.embedding, &centroids, &projection).unwrap();
@@ -110,12 +112,22 @@ fn write_test_index(dir: &Path, dim: u32, docs: &[FixtureDoc<'_>]) {
 
         let text_offset = text_blob.len() as u64;
         text_blob.extend_from_slice(doc.text.as_bytes());
+        let title_offset = title_blob.len() as u64;
+        let title_len = match doc.title {
+            Some(title) => {
+                title_blob.extend_from_slice(title.as_bytes());
+                title.len() as u32
+            }
+            None => 0,
+        };
         let meta = MetaRecord {
             doc_id: doc.doc_id,
             corpus_type: doc.corpus_type,
-            _pad: [0; 3],
+            _pad: [0; 7],
             text_offset,
             text_len: doc.text.len() as u32,
+            title_offset,
+            title_len,
         };
         let meta_bytes: &[u8] = unsafe {
             std::slice::from_raw_parts(&meta as *const MetaRecord as *const u8, META_RECORD_SIZE)
@@ -126,6 +138,7 @@ fn write_test_index(dir: &Path, dim: u32, docs: &[FixtureDoc<'_>]) {
     fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
     fs::write(dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
     fs::write(dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), &title_blob).unwrap();
     fs::write(dir.join("centroids.bin"), centroids.to_bytes()).unwrap();
     fs::write(dir.join("projection.bin"), projection.to_bytes()).unwrap();
 }
@@ -146,18 +159,21 @@ fn turbo_searcher_returns_static_results_with_corpus_mapping_and_stable_tie_brea
                 doc_id: 20,
                 corpus_type: 2,
                 text: "rfc twenty",
+                title: None,
                 embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 10,
                 corpus_type: 0,
                 text: "legal ten",
+                title: None,
                 embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 30,
                 corpus_type: 1,
                 text: "contract thirty",
+                title: None,
                 embedding: padded_embedding(&[0.0, 0.0, 0.0, 0.0]),
             },
         ],
@@ -199,6 +215,7 @@ fn turbo_searcher_rejects_query_embeddings_with_wrong_dimension() {
             doc_id: 1,
             corpus_type: 0,
             text: "legal one",
+            title: None,
             embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
         }],
     );
@@ -226,6 +243,7 @@ fn turbo_searcher_rejects_top_k_out_of_range() {
             doc_id: 1,
             corpus_type: 0,
             text: "legal one",
+            title: None,
             embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
         }],
     );
@@ -263,18 +281,21 @@ fn turbo_searcher_allows_top_k_at_the_maximum_and_returns_all_available_docs() {
                 doc_id: 10,
                 corpus_type: 0,
                 text: "legal ten",
+                title: None,
                 embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 20,
                 corpus_type: 1,
                 text: "contract twenty",
+                title: None,
                 embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
             },
             FixtureDoc {
                 doc_id: 30,
                 corpus_type: 2,
                 text: "rfc thirty",
+                title: None,
                 embedding: padded_embedding(&[0.8, -0.8, 0.0, 0.8]),
             },
         ],
@@ -310,6 +331,7 @@ fn turbo_searcher_returns_stable_single_document_results_and_scores() {
             doc_id: 42,
             corpus_type: 1,
             text: "contract forty-two",
+            title: None,
             embedding: query.clone(),
         }],
     );
@@ -352,24 +374,28 @@ fn turbo_searcher_returns_best_top_k_without_leaking_lower_ranked_hits() {
                 doc_id: 5,
                 corpus_type: 0,
                 text: "best",
+                title: None,
                 embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
             },
             FixtureDoc {
                 doc_id: 4,
                 corpus_type: 1,
                 text: "second",
+                title: None,
                 embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
             },
             FixtureDoc {
                 doc_id: 3,
                 corpus_type: 2,
                 text: "third",
+                title: None,
                 embedding: padded_embedding(&[0.8, -0.8, 0.0, 0.8]),
             },
             FixtureDoc {
                 doc_id: 2,
                 corpus_type: 0,
                 text: "fourth",
+                title: None,
                 embedding: padded_embedding(&[0.0, 0.0, 0.0, 0.0]),
             },
         ],
@@ -395,4 +421,102 @@ fn turbo_searcher_returns_best_top_k_without_leaking_lower_ranked_hits() {
     );
     assert!(results[0].score >= results[1].score);
     assert!(results[1].score >= results[2].score);
+}
+
+#[test]
+fn turbo_searcher_populates_citation_from_title_and_leaves_untitled_bare() {
+    let dir = temp_dir("citation-from-title");
+    write_test_index(
+        &dir,
+        512,
+        &[
+            FixtureDoc {
+                doc_id: 10,
+                corpus_type: 0,
+                text: "legal ten",
+                title: Some("民法典"),
+                embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            },
+            FixtureDoc {
+                doc_id: 20,
+                corpus_type: 2,
+                text: "rfc twenty",
+                title: None,
+                embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
+            },
+        ],
+    );
+
+    let searcher = load_searcher(&dir);
+    let results = searcher
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            2,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    let titled = &results[0];
+    assert_eq!(titled.doc_id, "10");
+    let citation = titled
+        .citation
+        .as_ref()
+        .expect("titled static chunk must carry a citation");
+    assert_eq!(citation.title.as_deref(), Some("民法典"));
+    // source_type reuses the shared corpus label mapping (context_builder).
+    assert_eq!(citation.source_type, "法规");
+    assert_eq!(citation.resource_id, "10");
+    assert_eq!(citation.source_ref, "10");
+    assert_eq!(citation.url, None);
+
+    let untitled = &results[1];
+    assert_eq!(untitled.doc_id, "20");
+    assert!(untitled.citation.is_none());
+}
+
+/// End-to-end: a static index built with a `metadata["title"]` renders the
+/// enriched `[法规 #1] <title>` label through the real searcher → ContextBuilder
+/// pipeline, while an untitled chunk keeps a bare label.
+#[test]
+fn static_title_renders_into_assembled_context_end_to_end() {
+    let dir = temp_dir("context-e2e");
+    write_test_index(
+        &dir,
+        512,
+        &[
+            FixtureDoc {
+                doc_id: 10,
+                corpus_type: 0,
+                text: "民法典正文",
+                title: Some("民法典"),
+                embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            },
+            FixtureDoc {
+                doc_id: 20,
+                corpus_type: 0,
+                text: "无标题条文",
+                title: None,
+                embedding: padded_embedding(&[1.0, -1.0, 0.0, 1.0]),
+            },
+        ],
+    );
+
+    let searcher = load_searcher(&dir);
+    let results = searcher
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            2,
+        )
+        .unwrap();
+    assert_eq!(results[0].doc_id, "10");
+
+    let context = ContextBuilder::build_context(&results, &[], "民法典是什么?");
+
+    // The titled top chunk carries its title into the label; the untitled chunk
+    // renders a bare label with no title text.
+    assert!(context.contains("[法规 #1] 民法典\n民法典正文"));
+    assert!(context.contains("[法规 #2]\n无标题条文"));
 }

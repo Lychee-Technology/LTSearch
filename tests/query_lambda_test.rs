@@ -263,7 +263,9 @@ fn write_static_fixture(root: &Path, docs: &[StaticFixtureDoc<'_>]) {
         let meta = MetaRecord {
             doc_id: doc.doc_id,
             corpus_type: doc.corpus_type,
-            _pad: [0; 3],
+            _pad: [0; 7],
+            title_offset: 0,
+            title_len: 0,
             text_offset,
             text_len: doc.text.len() as u32,
         };
@@ -276,6 +278,7 @@ fn write_static_fixture(root: &Path, docs: &[StaticFixtureDoc<'_>]) {
     fs::write(static_dir.join("turbo_static.bin"), &bin_data).unwrap();
     fs::write(static_dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
     fs::write(static_dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(static_dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(static_dir.join("centroids.bin"), centroids.to_bytes()).unwrap();
     fs::write(static_dir.join("projection.bin"), projection.to_bytes()).unwrap();
 }
