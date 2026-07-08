@@ -1,6 +1,6 @@
 # LTSearch
 
-Serverless hybrid search engine for RAG retrieval, combining vector similarity (LanceDB) with BM25 keyword search (Tantivy) via Reciprocal Rank Fusion. Runs on AWS Lambda + S3.
+Hybrid search engine for RAG retrieval, combining a static TurboQuant index with vector similarity (LanceDB) and BM25 keyword search (Tantivy) via Reciprocal Rank Fusion. Ships as container images on AWS Lambda + S3 today; Fargate support is planned (see [`docs/deployment.md`](docs/deployment.md)).
 
 ## Project Status
 
@@ -202,4 +202,4 @@ sam local invoke BuildFunction \
 
 ## Architecture
 
-See [`docs/arch.md`](docs/arch.md) for system architecture and [`docs/design.md`](docs/design.md) for the detailed design specification.
+See [`docs/arch.md`](docs/arch.md) for system architecture and [`docs/design.md`](docs/design.md) for the detailed design specification. Deployment (unified Docker image for Fargate + Lambda) is documented in [`docs/deployment.md`](docs/deployment.md).

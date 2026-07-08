@@ -4,21 +4,30 @@
 
 # **1\. Overview**
 
-This document describes the architecture of a **serverless hybrid search system** built using:
+This document describes the architecture of a **hybrid search system** built using:
 
-* **Rust runtime**  
-* **AWS Lambda (compute)**  
-* **Amazon S3 (storage)**  
-* **LanceDB (vector search)**  
-* **Tantivy (BM25 keyword search**
+* **Rust runtime**
+* **Docker container images** on **AWS Lambda** today; **AWS Fargate** is the planned target (see [§22](#22-deployment-topology-docker-fargate--lambda))
+* **Amazon S3 (storage)**
+* **TurboQuant** — a custom zero-copy mmap index for the **static** authoritative corpus (see `docs/TurboQuant.md`)
+* **LanceDB** — vector search for the **dynamic** user corpus
+* **Tantivy** — BM25 keyword search
+* **jina-embeddings-v5-text-nano-retrieval** — a local ONNX embedding model (512-dim), baked into the image
 
 The system is designed for **RAG retrieval and document search workloads** with moderate traffic and burst elasticity.
 
 The architecture emphasizes:
 
-* **low infrastructure cost**  
-* **serverless scalability**  
+* **low infrastructure cost**
+* **elastic scalability** (event-driven on Lambda today; always-on on Fargate is the planned target)
 * **simplified operational management**
+
+> **Note on "serverless" and deployment status.** The original design targeted a Lambda-only,
+> fan-out-per-retriever topology. The implemented system is a single-process engine that runs all
+> retrieval in-process, packaged as a **container image deployed on AWS Lambda today**. Running the
+> *same* image on AWS Fargate is a **planned target, not yet implemented** (tracked in #103); it is
+> described under [§22 Deployment Topology](#22-deployment-topology-docker-fargate--lambda). Except
+> for that §22 material, sections below reflect the current implementation.
 
 ---
 
@@ -71,10 +80,11 @@ The system follows three design principles.
 
 Data stored in **S3 object storage**.
 
-Compute provided by **stateless Lambda functions**.
+Compute provided by **stateless container images** — deployed as Lambda functions today; the same
+image is intended to run as always-on Fargate services/tasks (planned, see §22).
 
 Storage → persistent  
-Compute → ephemeral
+Compute → ephemeral (Lambda) or long-lived (planned Fargate)
 
 Advantages:
 
@@ -90,7 +100,8 @@ All search operations execute on demand.
 
 request → Lambda invocation
 
-No always-running infrastructure.
+No always-running infrastructure in the current (Lambda) deployment. The planned Fargate path (§22)
+deliberately trades this for an always-on service that keeps the embedding model warm.
 
 ---
 
@@ -107,37 +118,51 @@ Expected update latency:
 
 # **4\. System Architecture**
 
-High-level architecture:
+High-level architecture. Retrieval is **not** a per-retriever Lambda fan-out; a single
+query binary runs three retrievers in parallel **in-process** (`std::thread::scope`,
+`src/query/router.rs`) and returns two result groups.
 
-               \+--------------------+  
-                |        Client      |  
-                \+---------+----------+  
-                          |  
-                     Query API  
-                          |  
-                  \+-------v--------+  
-                  | Query Router   |  
-                  | Rust Lambda    |  
-                  \+-------+--------+  
-                          |  
-        \+-----------------+-----------------+  
-        |                                   |  
-   Vector Search Lambda              Keyword Search Lambda  
-       (LanceDB)                         (Tantivy)  
-        |                                   |  
-        \+-----------------+-----------------+  
-                          |  
-                    Hybrid Ranker  
-                          |  
-                       Response
+```
+                +--------------------+
+                |        Client      |
+                +---------+----------+
+                          |
+                     Query API / HTTP
+                          |
+                  +-------v--------+
+                  |  QueryRouter   |   one process (query image)
+                  |  (Rust)        |   runs on Lambda OR Fargate
+                  +-------+--------+
+                          |
+     +--------------------+--------------------+
+     |                    |                    |   in-process parallel
+ Static path         Vector path          Keyword path
+ TurboQuant mmap      LanceDB              Tantivy (BM25)
+ (authoritative)      (user corpus)        (user corpus)
+     |                    |                    |
+     |                    +---------+----------+
+     |                              |
+     |                        RRF fusion (rrf_k=60)
+     |                              |
+ static_chunks                 dynamic_chunks
+     +--------------+---------------+
+                    |
+        SearchResponse { static_chunks, dynamic_chunks, ... }
+```
 
-Storage layer:
+The static path is returned separately; **RRF fuses only the vector + keyword (dynamic)
+results**. Both groups return up to the retrieval window (`3 * top_k`) per path so an
+upstream caller can assemble the designed `6 * top_k` LLM context.
 
-               \+------------------+  
-                |        S3        |  
-                \+------------------+  
-                 |              |  
-            Lance dataset   Tantivy index  
+Storage layer (Amazon S3):
+
+```
+index/_head                         # active version pointer (ETag CAS)
+index/versions/<v>/manifest.json    # per-version manifest
+lance/<v>/...                       # LanceDB dynamic dataset (per shard)
+static/...                          # TurboQuant static index files
+wal/YYYY/MM/DD/*.jsonl              # write-ahead log
+```
 ---
 
 # **5\. Storage Layout (S3)**
@@ -146,96 +171,112 @@ All persistent data resides in **Amazon S3**.
 
 Example layout:
 
+```
 s3://search-system/
-
-  index/  
-      \_head  
-      v42/  
-      v43/
-
-  lance/  
-      v42/
-
-  wal/  
-      000001.log  
-      000002.log
-
-  docs/  
-      documents.parquet
+  index/
+      _head                          # active version pointer (JSON)
+      versions/
+          42/manifest.json           # per-version manifest
+          43/manifest.json
+  lance/
+      42/shard_0/ ...                # LanceDB dynamic dataset per shard
+  static/
+      turbo_static.bin               # TurboRecord512 records (mmap)
+      turbo_static_meta.bin
+      turbo_static_text.bin
+      turbo_static_title.bin
+      centroids.bin                  # quantization centroids
+      projection.bin                 # JL projection matrix
+  wal/
+      2026/07/08/<segment>.jsonl     # write-ahead log (JSONL)
+```
 
 Components:
 
-| Path | Purpose |
-| ----- | ----- |
-| index | Tantivy keyword index |
-| lance | vector dataset |
-| wal | ingestion log |
-| docs | metadata storage |
+| Path | Purpose | Code |
+| ----- | ----- | ----- |
+| `index/_head` | Active index version pointer; updated via **ETag compare-and-swap** | `src/storage/head.rs`, `src/indexing/publisher.rs` |
+| `index/versions/<v>/manifest.json` | Per-version manifest (`embedding_dim`, `document_count`, shards) | `src/models/index.rs` |
+| `lance/<v>/` | LanceDB dynamic vector dataset (per shard) | `src/query/vector_searcher.rs` |
+| `static/` | TurboQuant static index (mmap-loaded) | `src/index/mmap_index.rs`, `docs/TurboQuant.md` |
+| `wal/` | Write-ahead log (JSONL, date-partitioned) | `src/write/wal.rs` |
+
+The `_head` document (`ManifestHead`) holds `{ version_id, manifest_path, updated_at }`, where
+`manifest_path` is the bucket-relative key `index/versions/<version_id>/manifest.json`, derived
+from `version_id` and validated on both read and write.
 
 ---
 
 # **6\. Query Execution Pipeline**
 
-Search pipeline:
+Search pipeline (`src/query/router.rs`):
 
-client query  
-   |  
-embedding generation  
-   |  
-parallel retrieval  
-   |  
-vector results  
-keyword results  
-   |  
-fusion ranking  
-   |  
-response  
+```
+client query
+   |
+embedding generation (512-dim; 2 retries, keyword-only fallback on failure)
+   |
+parallel retrieval (in-process, 3 threads)
+   |-- static:  TurboQuant mmap scan  -> static results
+   |-- vector:  LanceDB ANN           -> vector results  --\
+   |-- keyword: Tantivy BM25          -> keyword results --+-- RRF fuse
+   |                                                          |
+   |                                                     dynamic_chunks
+static_chunks <---------------------------------------------/
+   |
+optional filtering + metadata strip; truncate each group to 3*top_k
+   |
+SearchResponse { static_chunks, dynamic_chunks, counts, latency_ms, index_version }
+```
+
+When filters are present, the router **iteratively widens** the retrieval window (doubling
+`top_k` up to 100) until enough post-filter dynamic results exist.
 ---
 
 # **7\. Hybrid Retrieval**
 
-The system performs two retrieval steps.
+The system runs **three** retrievers in parallel and returns two result groups: a **static**
+group (authoritative corpus) and a **dynamic** group (user corpus, RRF-fused).
 
 ---
 
-## **Vector Search**
+## **Static Search (TurboQuant)**
 
-Implemented using **LanceDB**.
+Implemented as a custom **zero-copy memory-mapped** index (`src/query/turbo_searcher.rs`),
+not a database. Fixed-size `TurboRecord512` records (512-dim, quantized to ~208 bytes each) are
+`mmap`-ed and brute-force scanned in parallel (`rayon`) with a bounded top-K heap. See
+[`docs/TurboQuant.md`](TurboQuant.md) for the compression and scoring math.
 
-Dataset schema:
+Returns `static_chunks` (with `Citation` titles from the index).
 
-doc\_id  
-embedding  
-text  
-metadata
-
-Vector search returns:
-
-top\_k\_vector\_results  
 ---
 
-## **Keyword Search**
+## **Vector Search (LanceDB)**
 
-Implemented using **Tantivy**.
+Implemented using **LanceDB** over the dynamic user corpus (`src/query/vector_searcher.rs`).
 
-Uses BM25 scoring.
+Dataset table `documents` schema: `doc_id`, `embedding` (`FixedSizeList<Float32>`), `text`,
+`metadata`. ANN query uses `DistanceType::Dot`. Returns `top_k` vector results.
 
-Example query:
+---
 
-"vector database lambda"
+## **Keyword Search (Tantivy)**
 
-Returns:
+Implemented using **Tantivy** with default **BM25** scoring (`src/query/keyword_searcher.rs`).
+Fields: `doc_id`, `text` (indexed + stored), `metadata` (stored). Returns `top_k` keyword results.
+Requires a single shard.
 
-top\_k\_keyword\_results  
 ---
 
 # **8\. Hybrid Ranking**
 
-Results are merged using **Reciprocal Rank Fusion (RRF)**.
+The **vector** and **keyword** results are merged using **Reciprocal Rank Fusion (RRF)** into
+`dynamic_chunks` (`src/query/ranker.rs`, `rrf_k = 60`). The **static** TurboQuant results are
+**not** RRF-fused — they are returned as `static_chunks` unchanged.
 
 Formula:
 
-score \= Σ 1 / (k \+ rank)
+score \= Σ 1 / (k \+ rank)     // rank is 1-based; k = 60
 
 Advantages:
 
@@ -290,10 +331,10 @@ Typical configuration:
 
 N \= 8–16 shards
 
-Shard layout:
+Shard layout (shards are recorded in the per-version manifest; see §5):
 
-index/  
-  v42/  
+lance/  
+  42/  
     shard\_0  
     shard\_1
 
@@ -352,19 +393,19 @@ Batch window:
 
 # **13\. Versioned Index Publishing**
 
-Indexes are versioned.
+Indexes are versioned (see §5 for the canonical layout).
 
 Structure:
 
 index/  
-   \_head  
-   v42  
-   v43
+   \_head                          # active pointer (ManifestHead)  
+   versions/42/manifest.json  
+   versions/43/manifest.json
 
 Publishing process:
 
-upload new version  
-update \_head
+upload new version artifacts + manifest  
+update \_head via **ETag compare-and-swap**
 
 Advantages:
 
@@ -606,4 +647,67 @@ With `ltembed`, embedding generation adds latency versus the fixed stub:
 | Embedding generation | ~0 ms | 20–40 ms |
 | Total query latency | 50–150 ms (warm) | 70–190 ms (warm) |
 
-The model is loaded once per Lambda container lifetime (warm path reuse).
+The model is loaded once per container lifetime (warm path reuse). On Fargate this is once per
+task; on Lambda, once per warm container.
+
+---
+
+# **22\. Deployment Topology (Docker: Fargate + Lambda)**
+
+> **Status: target/planned.** The serving path already ships as a Lambda **container image**.
+> This section documents the intended unified topology so one image per component runs unchanged
+> on **both AWS Fargate and AWS Lambda**. The concrete runbook lives in
+> [`docs/deployment.md`](deployment.md); the code/Dockerfile/template changes are follow-up work.
+
+## Why Docker for both
+
+The embedding model assets (~140 MB: `model.ort` ~118 MB + `tokenizer.json` ~16 MB +
+`libonnxruntime.so` ~4.6 MB) exceed the Lambda **Layer** limit, so they are baked into a
+**container image** (already the case). Running the same image on **Fargate** additionally gives
+an always-on service that loads the model once (no per-invoke cold start) and sidesteps Lambda's
+15-minute / 10 GB `/tmp` limits for the index builder.
+
+## One image, two runtimes — via the Lambda Web Adapter
+
+Each component's binary becomes a plain **HTTP server** on `0.0.0.0:8080`
+(query → `POST /query` + `GET /health`; write → `POST /write`, `POST /delete`;
+index_builder → `POST /build` + health). The transport-agnostic cores already exist
+(`handle_search_request`, `handle_write_request`, `handle_build_request`), so this is a thin
+transport swap.
+
+The [**AWS Lambda Web Adapter**](https://github.com/awslabs/aws-lambda-web-adapter) is baked in as
+a Lambda extension:
+
+```dockerfile
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.x /lambda-adapter /opt/extensions/lambda-adapter
+```
+
+* On **Lambda**, the extension boots the app and bridges API-Gateway / SQS events to
+  `http://localhost:8080`.
+* On **Fargate/ECS**, the extension file is inert; the container simply runs the HTTP server.
+
+Relevant env knobs: `AWS_LWA_PORT=8080`, `AWS_LWA_READINESS_CHECK_PATH=/health`, plus event
+pass-through config for the SQS-driven builder.
+
+## Image base and unification
+
+Move each runtime image from `public.ecr.aws/lambda/provided:al2023-arm64` to a plain
+`public.ecr.aws/amazonlinux/amazonlinux:2023` (arm64) base, reusing the existing multi-stage
+`sam/builder.Dockerfile` compile stage. The divergent top-level `Dockerfile` (x86, bakes `static/`
++ `CMD [bootstrap]`) is folded into this arm64 lineage so the static-index baking
+(`/app/static`, `LTSEARCH_QUERY_STATIC_DIR`) has a single source of truth.
+
+## Platform mapping (all three components)
+
+| Component | Fargate | Lambda |
+| --- | --- | --- |
+| query | ECS service (always-on, behind ALB) | Function behind API Gateway |
+| write | ECS service | Function behind API Gateway |
+| index_builder | ECS task (queue-driven) | Function with SQS EventSource |
+
+## Architecture portability caveat
+
+`ort` is built with `load-dynamic`, so the compiled binary + `libonnxruntime.so` are decoupled and
+portable **as long as the CPU architecture matches**. The pinned bundle is `linux-arm64`, so both
+Fargate and Lambda must run on **arm64 (Graviton)**. Targeting x86_64 Fargate would require an
+x86_64 `minimal-ort-builder` bundle and a matching `LTEMBED_BUNDLE_URL`.
