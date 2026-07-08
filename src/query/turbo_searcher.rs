@@ -92,13 +92,16 @@ impl StaticRetriever for TurboQuantSearcher {
                 // A title makes the chunk citable: ContextBuilder reads
                 // `citation.title` to render `[法规 #1] <title>`. Without one,
                 // `citation` stays None and the bare label is rendered.
-                let citation = self.index.title(candidate.record_index).map(|title| Citation {
-                    resource_id: doc_id.clone(),
-                    source_type: corpus_type_label(Some(&corpus_type)).to_string(),
-                    source_ref: doc_id.clone(),
-                    title: Some(title.to_string()),
-                    url: None,
-                });
+                let citation = self
+                    .index
+                    .title(candidate.record_index)
+                    .map(|title| Citation {
+                        resource_id: doc_id.clone(),
+                        source_type: corpus_type_label(Some(&corpus_type)).to_string(),
+                        source_ref: doc_id.clone(),
+                        title: Some(title.to_string()),
+                        url: None,
+                    });
                 SearchResult {
                     doc_id,
                     score: candidate.score,

@@ -313,7 +313,10 @@ fn write_static_files(
     write_file(&staged_dir.join("turbo_static.bin"), turbo_static)?;
     write_file(&staged_dir.join("turbo_static_meta.bin"), turbo_static_meta)?;
     write_file(&staged_dir.join("turbo_static_text.bin"), turbo_static_text)?;
-    write_file(&staged_dir.join("turbo_static_title.bin"), turbo_static_title)
+    write_file(
+        &staged_dir.join("turbo_static_title.bin"),
+        turbo_static_title,
+    )
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), IndexError> {
