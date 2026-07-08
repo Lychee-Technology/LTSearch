@@ -202,4 +202,4 @@ sam local invoke BuildFunction \
 
 ## Architecture
 
-See [`docs/arch.md`](docs/arch.md) for system architecture and [`docs/design.md`](docs/design.md) for the detailed design specification.
+See [`docs/arch.md`](docs/arch.md) for system architecture and [`docs/design.md`](docs/design.md) for the detailed design specification. Deployment (unified Docker image for Fargate + Lambda) is documented in [`docs/deployment.md`](docs/deployment.md).
