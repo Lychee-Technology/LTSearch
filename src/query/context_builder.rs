@@ -121,7 +121,7 @@ fn weight_instruction(weights: Option<&CorpusWeights>) -> &'static str {
     }
 }
 
-fn corpus_type_label(ct: Option<&CorpusType>) -> &'static str {
+pub(crate) fn corpus_type_label(ct: Option<&CorpusType>) -> &'static str {
     match ct {
         Some(CorpusType::Legal) => "法规",
         Some(CorpusType::Contract) => "合同",

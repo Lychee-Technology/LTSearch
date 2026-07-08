@@ -235,6 +235,25 @@ fn mmap_index_accepts_known_v1_dim_512_layout() {
 }
 
 #[test]
+fn mmap_index_rejects_legacy_v1_image_before_touching_title_blob() {
+    // A real pre-title (v1) image on disk has turbo_static.bin with version=1
+    // and no turbo_static_title.bin. Load must fail through the header version
+    // check, not with an I/O error on the missing title blob.
+    let dir = temp_dir("legacy-v1-image");
+    let mut header_bytes = TurboHeader::new(512, 1).to_bytes();
+    header_bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+    fs::write(dir.join("turbo_static.bin"), &header_bytes).unwrap();
+    // Deliberately omit turbo_static_title.bin (and the other blobs): the header
+    // rejection must happen first.
+
+    let err = MmapIndex::load(&dir).unwrap_err();
+    assert!(
+        err.to_string().contains("unsupported version"),
+        "expected an unsupported-version header error, got: {err}"
+    );
+}
+
+#[test]
 fn mmap_index_rejects_unknown_record_layout() {
     let dir = temp_dir("unknown-layout");
     write_unknown_layout_index(&dir, 384, 1);

@@ -103,10 +103,11 @@ impl MmapIndex {
         let centroids_path = dir.join("centroids.bin");
         let projection_path = dir.join("projection.bin");
 
+        // Parse the header (and reject unsupported versions/layouts) before
+        // touching the other blobs, so a legacy v1 image — which has no
+        // `turbo_static_title.bin` — fails through `TurboHeader::from_bytes`
+        // with `UnsupportedVersion`, not an I/O error on the missing title file.
         let bin_mmap = mmap_file(&bin_path)?;
-        let meta_mmap = mmap_file(&meta_path)?;
-        let text_mmap = mmap_file(&text_path)?;
-        let title_mmap = mmap_file(&title_path)?;
         if bin_mmap.len() < TurboHeader::SIZE {
             return Err(MmapIndexError::FileSizeMismatch {
                 file: "turbo_static.bin",
@@ -117,6 +118,10 @@ impl MmapIndex {
 
         let header = TurboHeader::from_bytes(&bin_mmap[..TurboHeader::SIZE])?;
         let layout = KnownRecordLayout::from_header(&header)?;
+
+        let meta_mmap = mmap_file(&meta_path)?;
+        let text_mmap = mmap_file(&text_path)?;
+        let title_mmap = mmap_file(&title_path)?;
 
         let expected_bin_size =
             TurboHeader::SIZE as u64 + header.record_count() * layout.record_size() as u64;

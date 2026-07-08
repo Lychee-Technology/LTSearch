@@ -6,8 +6,33 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
 use ltsearch::index::{MmapIndex, StaticChunk, StaticIndexBuilder, TurboHeader, TurboRecord512};
-use ltsearch::models::CorpusType;
+use ltsearch::models::{CorpusType, IndexManifest, ShardManifest};
+use ltsearch::query::{ContextBuilder, StaticRetriever, TurboQuantSearcher};
+use ltsearch::storage::{ActiveManifest, ManifestHead};
 use serde_json::json;
+
+fn stub_manifest() -> ActiveManifest {
+    ActiveManifest {
+        head: ManifestHead {
+            version_id: 1,
+            manifest_path: "m.json".into(),
+            updated_at: 0,
+        },
+        manifest: IndexManifest {
+            version_id: 1,
+            created_at: 0,
+            embedding_dim: 512,
+            document_count: 0,
+            num_shards: 0,
+            shards: vec![ShardManifest {
+                shard_id: 0,
+                document_count: 0,
+                lance_path: String::new(),
+                tantivy_path: String::new(),
+            }],
+        },
+    }
+}
 
 type EmbeddingResponses = VecDeque<(String, Vec<f32>)>;
 
@@ -213,5 +238,53 @@ fn static_index_builder_writes_aligned_turbo_record_512_layout() {
     assert_eq!(
         bytes.len(),
         TurboHeader::SIZE + std::mem::size_of::<TurboRecord512>()
+    );
+}
+
+/// Full-stack acceptance: a title provided via `metadata["title"]` at build time
+/// survives StaticIndexBuilder → MmapIndex → TurboQuantSearcher → ContextBuilder
+/// and renders as `[法规 #1] <title>`, while an untitled chunk stays bare.
+#[test]
+fn static_title_flows_from_builder_into_assembled_context() {
+    let output = temp_fixture_dir("static-index-builder-context-e2e");
+
+    StaticIndexBuilder::new()
+        .build(
+            &output,
+            &[
+                StaticChunk {
+                    doc_id: "law-1".into(),
+                    text: "民法典正文".into(),
+                    metadata: HashMap::from([("title".into(), json!("民法典"))]),
+                    corpus_type: CorpusType::Legal,
+                },
+                StaticChunk {
+                    doc_id: "law-2".into(),
+                    text: "无标题条文".into(),
+                    metadata: HashMap::new(),
+                    corpus_type: CorpusType::Legal,
+                },
+            ],
+            // Distinct embeddings so the query deterministically ranks law-1 first.
+            &[Some(vec![0.5; 512]), Some(vec![-0.5; 512])],
+            &StubEmbeddingGenerator::from_pairs(vec![]),
+        )
+        .unwrap();
+
+    let index: &'static MmapIndex = Box::leak(Box::new(MmapIndex::load(&output).unwrap()));
+    let searcher = TurboQuantSearcher::new(index);
+    let results = searcher
+        .search(&stub_manifest(), &vec![0.5; 512], 2)
+        .unwrap();
+    assert_eq!(results[0].doc_id, index.meta(0).doc_id.to_string());
+
+    let context = ContextBuilder::build_context(&results, &[], "民法典是什么?");
+    assert!(
+        context.contains("[法规 #1] 民法典\n民法典正文"),
+        "assembled context missing enriched title label:\n{context}"
+    );
+    assert!(
+        context.contains("[法规 #2]\n无标题条文"),
+        "untitled chunk should render a bare label:\n{context}"
     );
 }

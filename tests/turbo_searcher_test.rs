@@ -465,7 +465,8 @@ fn turbo_searcher_populates_citation_from_title_and_leaves_untitled_bare() {
         .as_ref()
         .expect("titled static chunk must carry a citation");
     assert_eq!(citation.title.as_deref(), Some("民法典"));
-    assert_eq!(citation.source_type, "legal");
+    // source_type reuses the shared corpus label mapping (context_builder).
+    assert_eq!(citation.source_type, "法规");
     assert_eq!(citation.resource_id, "10");
     assert_eq!(citation.source_ref, "10");
     assert_eq!(citation.url, None);
