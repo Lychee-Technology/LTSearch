@@ -7,7 +7,7 @@
 This document describes the architecture of a **hybrid search system** built using:
 
 * **Rust runtime**
-* **Docker container images** deployable to **AWS Lambda and AWS Fargate** (compute)
+* **Docker container images** on **AWS Lambda** today; **AWS Fargate** is the planned target (see [§22](#22-deployment-topology-docker-fargate--lambda))
 * **Amazon S3 (storage)**
 * **TurboQuant** — a custom zero-copy mmap index for the **static** authoritative corpus (see `docs/TurboQuant.md`)
 * **LanceDB** — vector search for the **dynamic** user corpus
@@ -19,14 +19,15 @@ The system is designed for **RAG retrieval and document search workloads** with 
 The architecture emphasizes:
 
 * **low infrastructure cost**
-* **elastic scalability** (event-driven on Lambda, always-on on Fargate)
+* **elastic scalability** (event-driven on Lambda today; always-on on Fargate is the planned target)
 * **simplified operational management**
 
-> **Note on "serverless".** The original design targeted a Lambda-only, fan-out-per-retriever
-> topology. The implemented system is a single-process engine that runs all retrieval in-process,
-> packaged as a **container image that runs unchanged on both Lambda and Fargate**. Sections below
-> reflect the implemented system; the deployment topology is covered in
-> [§22 Deployment Topology](#22-deployment-topology-docker-fargate--lambda).
+> **Note on "serverless" and deployment status.** The original design targeted a Lambda-only,
+> fan-out-per-retriever topology. The implemented system is a single-process engine that runs all
+> retrieval in-process, packaged as a **container image deployed on AWS Lambda today**. Running the
+> *same* image on AWS Fargate is a **planned target, not yet implemented** (tracked in #103); it is
+> described under [§22 Deployment Topology](#22-deployment-topology-docker-fargate--lambda). Except
+> for that §22 material, sections below reflect the current implementation.
 
 ---
 
@@ -79,10 +80,11 @@ The system follows three design principles.
 
 Data stored in **S3 object storage**.
 
-Compute provided by **stateless Lambda functions**.
+Compute provided by **stateless container images** — deployed as Lambda functions today; the same
+image is intended to run as always-on Fargate services/tasks (planned, see §22).
 
 Storage → persistent  
-Compute → ephemeral
+Compute → ephemeral (Lambda) or long-lived (planned Fargate)
 
 Advantages:
 
@@ -98,7 +100,8 @@ All search operations execute on demand.
 
 request → Lambda invocation
 
-No always-running infrastructure.
+No always-running infrastructure in the current (Lambda) deployment. The planned Fargate path (§22)
+deliberately trades this for an always-on service that keeps the embedding model warm.
 
 ---
 
@@ -328,10 +331,10 @@ Typical configuration:
 
 N \= 8–16 shards
 
-Shard layout:
+Shard layout (shards are recorded in the per-version manifest; see §5):
 
-index/  
-  v42/  
+lance/  
+  42/  
     shard\_0  
     shard\_1
 
@@ -390,19 +393,19 @@ Batch window:
 
 # **13\. Versioned Index Publishing**
 
-Indexes are versioned.
+Indexes are versioned (see §5 for the canonical layout).
 
 Structure:
 
 index/  
-   \_head  
-   v42  
-   v43
+   \_head                          # active pointer (ManifestHead)  
+   versions/42/manifest.json  
+   versions/43/manifest.json
 
 Publishing process:
 
-upload new version  
-update \_head
+upload new version artifacts + manifest  
+update \_head via **ETag compare-and-swap**
 
 Advantages:
 

@@ -12,8 +12,10 @@ high-quality retrieval for RAG pipelines and document search workloads:
 
 All three retrievers run **in-process, in parallel** inside one query binary — there is no
 per-retriever Lambda fan-out. The response is returned as two groups, `static_chunks` and
-`dynamic_chunks`. Compute is packaged as **Docker container images that run on both AWS Lambda and
-AWS Fargate**; storage is S3.
+`dynamic_chunks`. Compute is packaged as **Docker container images deployed on AWS Lambda today**;
+running the *same* image on **AWS Fargate is a planned target** (not yet implemented — see
+[`docs/deployment.md`](deployment.md) and [Known Gaps](#known-gaps-and-current-limitations)).
+Storage is S3.
 
 The architecture supports moderate traffic (~20 QPS average, burst to 500 QPS) with sub-300ms
 latency SLA, handling datasets up to 10M documents. Updates are processed through near-real-time
@@ -265,11 +267,17 @@ pub struct IndexBuilder {
 }
 
 impl IndexBuilder {
-    pub async fn build_index(&self, documents: Vec<Document>) -> Result<IndexVersion, IndexError>;
-    pub async fn publish_index(&self, version: IndexVersion) -> Result<(), PublishError>;
-    pub async fn rollback_index(&self, version: IndexVersion) -> Result<(), PublishError>;
+    pub async fn build_index(&self, documents: Vec<Document>) -> Result<IndexManifest, IndexError>;
+    pub async fn publish_index(&self, manifest: IndexManifest) -> Result<(), PublishError>;
+    pub async fn rollback_index(&self, version_id: u64) -> Result<(), PublishError>;
 }
 ```
+
+> **Naming note.** The illustrative interfaces and pseudocode in this and the following sections use
+> `IndexVersion` as a stand-in for the concrete version contract, which is actually the pair
+> **`ManifestHead` + `IndexManifest`** documented in [Model 4](#model-4-manifesthead--indexmanifest).
+> Publishing writes the per-version `IndexManifest` and swaps `index/_head` (a `ManifestHead`) via an
+> ETag compare-and-swap; there is no single `IndexVersion` struct in the code.
 
 **Responsibilities**:
 - Consume document batches from SQS queue
@@ -901,12 +909,21 @@ async fn load_index_with_cache(version: IndexVersion) -> Result<(), IndexError> 
 ## Example Usage
 
 ```rust
-// Example 1: Basic hybrid search query
-// (QueryRouter is constructed from its collaborators; see src/query_lambda.rs bootstrap.)
+// Example 1: Basic hybrid search query.
+// `router` is a fully-wired QueryRouter<M, E, K, V, S, W>; see the bootstrap in
+// src/query_lambda.rs for how its collaborators are constructed.
 use ltsearch::models::SearchRequest;
 
-fn run(router: &Router, request: &SearchRequest) {
-    let response = router.search(request).expect("search");
+fn run<M, E, K, V, S, W>(router: &QueryRouter<M, E, K, V, S, W>) {
+    let request = SearchRequest {
+        query: "serverless vector database".to_string(),
+        top_k: 10,
+        filters: None,
+        include_metadata: true,
+        corpus_weights: None,
+    };
+
+    let response = router.search(&request).expect("search");
 
     // Two groups: authoritative (static) and user corpus (dynamic, RRF-fused).
     for group in [&response.static_chunks, &response.dynamic_chunks] {
@@ -915,15 +932,6 @@ fn run(router: &Router, request: &SearchRequest) {
                 result.doc_id, result.score, result.source, result.chunk_source);
         }
     }
-
-    let request = SearchRequest {
-        query: "serverless vector database".to_string(),
-        top_k: 10,
-        filters: None,
-        include_metadata: true,
-        corpus_weights: None,
-    };
-    let _ = request;
 }
 ```
 
@@ -1234,9 +1242,9 @@ Property-based tests verify correctness properties hold for all valid inputs.
 **Property Test Library**: proptest (Rust property testing framework)
 
 **Key Properties to Test**:
-1. Search result uniqueness (no duplicate doc_ids)
-2. Result ordering (descending score)
-3. Top-K constraint (result count <= top_k)
+1. Search result uniqueness (no duplicate doc_ids within a group)
+2. Result ordering (descending score within a group)
+3. Retrieval-window constraint (each group <= `3 * top_k`, not `top_k`)
 4. RRF score correctness (matches formula)
 5. Cache size constraint (never exceeds 10 GB)
 6. Embedding dimension consistency (always 512)
@@ -1441,10 +1449,12 @@ Target latency budget (300ms SLA):
 ### AWS Services
 
 **Compute**:
-- Container images (`PackageType: Image`, arm64) run on **AWS Lambda** (custom-runtime base) and
-  **AWS Fargate/ECS** (plain al2023 base + Lambda Web Adapter). See `docs/deployment.md`.
-- Lambda function memory: 1-10 GB; Fargate task sized per corpus
-- Lambda timeout: 30 seconds (query), up to 15 minutes (indexing); Fargate has no such limit
+- Container images (`PackageType: Image`, arm64) run on **AWS Lambda** today (custom-runtime base).
+  Running the same image on **AWS Fargate/ECS** (plain al2023 base + Lambda Web Adapter) is the
+  planned target — see `docs/deployment.md`.
+- Lambda function memory: 1-10 GB; (planned) Fargate task sized per corpus
+- Lambda timeout: 30 seconds (query), up to 15 minutes (indexing); a Fargate service would have no
+  such limit
 
 **Storage**:
 - Amazon S3 (Standard storage class)
