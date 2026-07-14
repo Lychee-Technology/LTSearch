@@ -2,6 +2,7 @@
 //! 见 docs/deployment.md「Mechanism: AWS Lambda Web Adapter」。
 
 pub mod query;
+pub mod write;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
