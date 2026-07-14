@@ -6,12 +6,21 @@
 //! 轮询循环本身依赖真实 SQS，留给 Task 7 的 compose e2e；本模块把可测逻辑
 //! （消息解析、版本分配）拆成独立函数以便不依赖 AWS 单测。
 
+use std::sync::Arc;
+
+use futures::future::BoxFuture;
 use serde::Deserialize;
 
-use crate::build_lambda::{BuildLambdaError, BuildRequest};
-use crate::http::build::{run_build, BuildServerState};
+use crate::build_lambda::BuildLambdaError;
+use crate::http::build::{run_build, BuildServerState, SnapshotBuildRequest};
 use crate::indexing::PublishStorage;
 use crate::storage::{ManifestHead, INDEX_HEAD_KEY};
+
+/// 列出 `wal/` 前缀下全部 WAL 段的闭包：bin 侧接 S3 ListObjectsV2，测试注入
+/// 内存 stub。每个版本都是全量快照，worker 必须基于**全部**段构建；只用消息里
+/// 的单段会让后续 write 发布的新 head 丢掉先前批次的文档。
+pub type ListWalKeysFn =
+    Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<String>, String>> + Send + Sync>;
 
 /// 对应 `AwsSqsBuildQueue` 发出的 `QueueBatch` body；worker 只关心这两个字段，
 /// serde 默认忽略多余字段（accepted_count / wal_event_ids 等）。
@@ -57,20 +66,40 @@ fn is_publish_cas_conflict(error: &BuildLambdaError) -> bool {
     error.error_type == "publish_error" && error.message.contains("publish conflict")
 }
 
-/// 处理单条消息：解析 → 分配版本 → `run_build`（expected=旧 head）。CAS 冲突
-/// 时重读 head 再试一次；其余错误直接返回。返回值供调用方落日志，消息删除与否
-/// 与成败无关（本地单用户不做重投）。
+/// 合并快照输入：list 结果 + 消息自带段（防御 list 遗漏触发段的情况），排序去
+/// 重。段名为 `wal/YYYY/MM/DD/batch-<uuid>.jsonl`，字典序保证跨天有序；同日段
+/// 间顺序由 uuid 决定，但快照重放（`materialize_latest_snapshot`）按记录
+/// timestamp 取最新，段间顺序只影响同毫秒写同 doc_id 的平局——本地单用户场景
+/// 可接受。
+pub fn snapshot_wal_keys(mut listed: Vec<String>, message_wal_key: &str) -> Vec<String> {
+    if !listed.iter().any(|key| key == message_wal_key) {
+        listed.push(message_wal_key.to_string());
+    }
+    listed.sort();
+    listed.dedup();
+    listed
+}
+
+/// 处理单条消息：解析 → list 全部 WAL 段 → 分配版本 → `run_build`（expected=
+/// 旧 head）。CAS 冲突时重读 head 再试一次；其余错误直接返回。返回值供调用方
+/// 落日志，消息删除与否与成败无关（本地单用户不做重投）。
 pub async fn process_queue_message<S: PublishStorage>(
     state: &BuildServerState,
     storage: &S,
+    list_wal_keys: &ListWalKeysFn,
     body: &str,
 ) -> Result<u64, String> {
     let message: QueueBuildMessage = serde_json::from_str(body)
         .map_err(|error| format!("failed to parse queue message: {error}"))?;
     let embedding_dim = embedding_dim_from_env()?;
 
+    let listed = list_wal_keys()
+        .await
+        .map_err(|error| format!("failed to list WAL segments: {error}"))?;
+    let wal_keys = snapshot_wal_keys(listed, &message.wal_key);
+
     let (version_id, expected) = next_version_id(storage).await?;
-    let request = build_request(&message, version_id, embedding_dim);
+    let request = build_request(&message, &wal_keys, version_id, embedding_dim);
 
     match run_build(state, request, expected).await {
         Ok(response) => Ok(response.activated_version_id),
@@ -80,7 +109,7 @@ pub async fn process_queue_message<S: PublishStorage>(
                 message.batch_id
             );
             let (version_id, expected) = next_version_id(storage).await?;
-            let request = build_request(&message, version_id, embedding_dim);
+            let request = build_request(&message, &wal_keys, version_id, embedding_dim);
             run_build(state, request, expected)
                 .await
                 .map(|response| response.activated_version_id)
@@ -92,12 +121,13 @@ pub async fn process_queue_message<S: PublishStorage>(
 
 fn build_request(
     message: &QueueBuildMessage,
+    wal_keys: &[String],
     version_id: u64,
     embedding_dim: usize,
-) -> BuildRequest {
-    BuildRequest {
+) -> SnapshotBuildRequest {
+    SnapshotBuildRequest {
         batch_id: message.batch_id.clone(),
-        wal_key: message.wal_key.clone(),
+        wal_keys: wal_keys.to_vec(),
         version_id,
         embedding_dim,
     }
@@ -111,6 +141,7 @@ pub async fn run_sqs_worker_loop<S: PublishStorage>(
     queue_url: String,
     state: BuildServerState,
     storage: S,
+    list_wal_keys: ListWalKeysFn,
 ) {
     loop {
         let received = sqs
@@ -131,7 +162,7 @@ pub async fn run_sqs_worker_loop<S: PublishStorage>(
 
         for message in messages {
             let body = message.body().unwrap_or_default();
-            match process_queue_message(&state, &storage, body).await {
+            match process_queue_message(&state, &storage, &list_wal_keys, body).await {
                 Ok(version_id) => {
                     eprintln!("build worker: published index version {version_id}");
                 }

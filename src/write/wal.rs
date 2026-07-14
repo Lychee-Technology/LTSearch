@@ -59,12 +59,16 @@ where
     }
 }
 
+/// 全部 WAL 段共享的对象 key 前缀；`segment_key` 生成的 key 都落在其下，
+/// 快照构建方按此前缀列举全部段。
+pub const WAL_PREFIX: &str = "wal/";
+
 pub fn segment_key(timestamp_millis: i64, segment_id: &str) -> Result<String, IngestError> {
     validate_segment_id(segment_id)?;
     let days_since_epoch = timestamp_millis.div_euclid(86_400_000);
     let (year, month, day) = civil_from_days(days_since_epoch);
     Ok(format!(
-        "wal/{year:04}/{month:02}/{day:02}/{segment_id}.jsonl"
+        "{WAL_PREFIX}{year:04}/{month:02}/{day:02}/{segment_id}.jsonl"
     ))
 }
 

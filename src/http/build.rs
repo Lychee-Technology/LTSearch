@@ -20,10 +20,24 @@ use crate::models::IndexManifest;
 
 const COMPONENT: &str = "ltsearch-index-builder";
 
-/// build 闭包读取 WAL、构建 embedding 引擎并生成分片索引，签名与核心
-/// `handle_build_request` 的 `build_handler` 对齐。
+/// 快照构建输入：`wal_keys` 是本次快照要重放的**全部** WAL 段。HTTP `/build`
+/// 显式指定单段（与 Lambda `BuildRequest` 契约一致，编排方负责段选择）；SQS
+/// worker 传 `wal/` 前缀下的全部段——每个版本都是全量快照，只用触发消息里的
+/// 单段会把先前批次的文档挤出新版本。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SnapshotBuildRequest {
+    pub batch_id: String,
+    pub wal_keys: Vec<String>,
+    pub version_id: u64,
+    pub embedding_dim: usize,
+}
+
+/// build 闭包读取全部 `wal_keys`、构建 embedding 引擎并生成分片索引，签名与
+/// 核心 `handle_build_request` 的 `build_handler` 对齐。
 pub type BuildFn = Arc<
-    dyn Fn(BuildRequest) -> BoxFuture<'static, Result<BuildIndexResult, IndexError>> + Send + Sync,
+    dyn Fn(SnapshotBuildRequest) -> BoxFuture<'static, Result<BuildIndexResult, IndexError>>
+        + Send
+        + Sync,
 >;
 /// publish 闭包额外携带 `expected_current_version`：HTTP 侧传 `None`，worker
 /// 侧传观测到的 head，从而复用同一发布路径而 CAS 语义各自正确。
@@ -53,7 +67,7 @@ pub fn build_router(state: BuildServerState) -> Router {
 /// publish 闭包按调用方意图注入 `expected_current_version`。
 pub async fn run_build(
     state: &BuildServerState,
-    request: BuildRequest,
+    request: SnapshotBuildRequest,
     expected_current_version: Option<u64>,
 ) -> Result<BuildResponse, BuildLambdaError> {
     let build = state.build.clone();
@@ -77,8 +91,14 @@ async fn handle_build(State(state): State<BuildServerState>, body: axum::body::B
         }
     };
 
-    // HTTP 侧显式 build（行为同 Lambda）：不做 head 乐观校验，publish 的 ETag
-    // CAS 仍保证指针交换原子、且新版本必须大于当前活动版本。
+    // HTTP 侧显式 build（行为同 Lambda）：单 WAL 段、不做 head 乐观校验，publish
+    // 的 ETag CAS 仍保证指针交换原子、且新版本必须大于当前活动版本。
+    let request = SnapshotBuildRequest {
+        batch_id: request.batch_id,
+        wal_keys: vec![request.wal_key],
+        version_id: request.version_id,
+        embedding_dim: request.embedding_dim,
+    };
     match run_build(&state, request, None).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => error_response(error.error_type, error.message),

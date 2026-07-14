@@ -1,0 +1,6 @@
+{
+  "query": "golang concurrency",
+  "top_k": 3,
+  "filters": null,
+  "include_metadata": true
+}

@@ -14,10 +14,9 @@ use ltsearch::bootstrap::{
     build_embedding_generator_from_env, build_embedding_provider_from_env,
     probe_build_embedding_from_env, s3_client_from_env, sqs_client_from_env, BuildConfig,
 };
-use ltsearch::build_lambda::BuildRequest;
-use ltsearch::build_worker::run_sqs_worker_loop;
+use ltsearch::build_worker::{run_sqs_worker_loop, ListWalKeysFn};
 use ltsearch::error::IndexError;
-use ltsearch::http::build::{build_router, BuildServerState};
+use ltsearch::http::build::{build_router, BuildServerState, SnapshotBuildRequest};
 use ltsearch::http::{port_from_env, serve};
 use ltsearch::indexing::{BuildIndexRequest, IndexPublisher, LocalIndexBuilder, PublishRequest};
 use ltsearch::write::WriteAheadLog;
@@ -49,6 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     queue_url,
                     worker_state,
                     publish_storage,
+                    list_wal_keys_closure(config.s3_bucket.clone(), s3_client.clone()),
                 ));
             }
         }
@@ -60,24 +60,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
 }
 
-/// build 闭包：读 WAL → 构建 embedding 引擎 → LocalIndexBuilder（spawn_blocking）。
-/// 照抄 src/bin/index_builder_lambda.rs:51-86。
+/// build 闭包：按序读取全部 `wal_keys` → 构建 embedding 引擎 →
+/// LocalIndexBuilder（spawn_blocking）。WAL 读取路径与
+/// src/bin/index_builder_lambda.rs:51-86 一致，仅从单段扩展为多段拼接——快照
+/// 重放的 last-wins 语义由 `materialize_latest_snapshot` 按记录 timestamp 保证。
 fn build_closure(
     config: BuildConfig,
     s3_client: aws_sdk_s3::Client,
 ) -> ltsearch::http::build::BuildFn {
-    Arc::new(move |request: BuildRequest| {
+    Arc::new(move |request: SnapshotBuildRequest| {
         let config = config.clone();
         let s3_client = s3_client.clone();
         async move {
             let wal_storage = AwsS3WalStorage::new(config.s3_bucket.clone(), s3_client.clone());
             let wal = WriteAheadLog::new(wal_storage);
-            let records =
-                wal.read(&request.wal_key)
+            let mut records = Vec::new();
+            for wal_key in &request.wal_keys {
+                let segment = wal
+                    .read(wal_key)
                     .await
                     .map_err(|error| IndexError::Operation {
-                        message: format!("failed to read WAL records: {error}"),
+                        message: format!("failed to read WAL records from {wal_key}: {error}"),
                     })?;
+                records.extend(segment);
+            }
 
             let provider =
                 build_embedding_provider_from_env().map_err(|error| IndexError::Operation {
@@ -129,6 +135,35 @@ fn publish_closure(
                     updated_at: current_time_millis(),
                 })
                 .await
+        }
+        .boxed()
+    })
+}
+
+/// WAL 段列举闭包：ListObjectsV2 分页列出 `wal/` 前缀下全部对象 key，供 worker
+/// 在每次构建前取得完整快照输入。单用户规模段数有限，不做增量/缓存。
+fn list_wal_keys_closure(bucket: String, s3_client: aws_sdk_s3::Client) -> ListWalKeysFn {
+    Arc::new(move || {
+        let bucket = bucket.clone();
+        let s3_client = s3_client.clone();
+        async move {
+            let mut keys = Vec::new();
+            let mut paginator = s3_client
+                .list_objects_v2()
+                .bucket(&bucket)
+                .prefix(ltsearch::write::WAL_PREFIX)
+                .into_paginator()
+                .send();
+            while let Some(page) = paginator.next().await {
+                let page = page
+                    .map_err(|error| format!("failed to list WAL objects in {bucket}: {error}"))?;
+                for object in page.contents() {
+                    if let Some(key) = object.key() {
+                        keys.push(key.to_string());
+                    }
+                }
+            }
+            Ok(keys)
         }
         .boxed()
     })
