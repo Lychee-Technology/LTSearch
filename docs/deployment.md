@@ -51,25 +51,27 @@ COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.x /lambda-adapter /opt
 | `AWS_LWA_PORT` | `8080` | Port the app listens on |
 | `AWS_LWA_READINESS_CHECK_PATH` | `/health` | Adapter waits for 200 before serving |
 | `AWS_LWA_INVOKE_MODE` | `buffered` | `response_stream` only if streaming is added |
-| `AWS_LWA_PASS_THROUGH_PATH` | `/build` | For SQS-triggered builder: raw event POSTed here |
+| `AWS_LWA_PASS_THROUGH_PATH` | `/build` | Target design for the Lambda SQS EventSource column: raw event POSTed here. **Not set in the published images** — `/build` does not decode SQS event envelopes yet; today's automatic build path is the Fargate-side SQS worker loop (`LTSEARCH_BUILD_SQS_QUEUE_URL`) |
 
 ## Image structure
 
 Reuse the existing multi-stage build (`sam/builder.Dockerfile` as the shared compile stage), and
-change only the runtime base and entrypoint:
+change only the runtime base and entrypoint. This is implemented as
+`sam/{query,write,index_builder}_server.Dockerfile`:
 
 ```dockerfile
 # --- runtime (per component), replacing public.ecr.aws/lambda/provided:al2023-arm64 ---
 FROM --platform=linux/arm64 public.ecr.aws/amazonlinux/amazonlinux:2023
-COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.x /lambda-adapter /opt/extensions/lambda-adapter
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.1 /lambda-adapter /opt/extensions/lambda-adapter
 COPY --from=builder /<component>_server /app/server        # HTTP server binary
-COPY --from=builder /ltembed-assets   /ltembed-assets      # query + index_builder only
-# query image also bakes the static TurboQuant index:
-# COPY static/ /app/static/     ;  ENV LTSEARCH_QUERY_STATIC_DIR=/app
-ENV AWS_LWA_PORT=8080 AWS_LWA_READINESS_CHECK_PATH=/health
+ENV AWS_LWA_PORT=8080 AWS_LWA_READINESS_CHECK_PATH=/health LTSEARCH_HTTP_PORT=8080
 EXPOSE 8080
 CMD ["/app/server"]
 ```
+
+Unlike the Lambda lineage (`sam/{query,index_builder}_lambda.Dockerfile`), the HTTP server images
+do **not** bake `/ltembed-assets` (or the static TurboQuant index): model assets are mounted at
+runtime — see "Model assets" below.
 
 This also **unifies the two divergent Dockerfiles** that exist today: the top-level `Dockerfile`
 (x86, bakes `static/`, `CMD [bootstrap]`) is folded into the arm64 `sam/` lineage so static-index
@@ -87,13 +89,21 @@ The **same image** is deployed in either column; only the surrounding infrastruc
 
 ## Model assets and architecture portability
 
-- Assets are baked at build time via `sam/builder.Dockerfile` build args:
-  `LTEMBED_MODE=real` and `LTEMBED_BUNDLE_URL` (pinned default: `minimal-ort-builder` **v1.0.9**,
-  `jina-embeddings-v5-text-nano-retrieval` q4f16 **linux-arm64**). The default `LTEMBED_MODE=stub`
-  builds the `fixed` provider with no model (CI default).
-- Runtime lookup is via env: `LTSEARCH_{QUERY,BUILD}_LTEMBED_BUNDLE_DIR=/ltembed-assets` and
-  `LTSEARCH_{QUERY,BUILD}_LTEMBED_MODEL_PATH=/ltembed-assets/model.ort`. `libonnxruntime.so` is
-  resolved from the bundle dir (or `ORT_DYLIB_PATH`).
+The two image lineages handle model assets differently; the binary/bundle build is shared
+(`sam/builder.Dockerfile` build args `LTEMBED_MODE=real` + `LTEMBED_BUNDLE_URL`, pinned default:
+`minimal-ort-builder` **v1.0.9**, `jina-embeddings-v5-text-nano-retrieval` q4f16 **linux-arm64**;
+the default `LTEMBED_MODE=stub` builds the `fixed` provider with no model — CI default):
+
+- **Lambda images** (`sam/{query,index_builder}_lambda.Dockerfile`) bake the bundle into the image
+  (`COPY --from=builder /ltembed-assets /ltembed-assets`) and point
+  `LTSEARCH_{QUERY,BUILD}_LTEMBED_BUNDLE_DIR=/ltembed-assets` /
+  `LTSEARCH_{QUERY,BUILD}_LTEMBED_MODEL_PATH=/ltembed-assets/model.ort` at the baked path.
+- **HTTP server images** (`sam/*_server.Dockerfile`, published to GHCR) do **not** contain model
+  assets. Operators mount an LTEmbed bundle (model.ort / tokenizer.json / build-info.json /
+  libonnxruntime.so, from a `minimal-ort-builder` release) into the container and set
+  `LTSEARCH_{QUERY,BUILD}_LTEMBED_BUNDLE_DIR` / `LTSEARCH_{QUERY,BUILD}_LTEMBED_MODEL_PATH` to the
+  mount path. A missing/corrupt bundle surfaces as `GET /health` → 503 with a repair hint.
+- In both lineages `libonnxruntime.so` is resolved from the bundle dir (or `ORT_DYLIB_PATH`).
 - **Architecture must match.** `ort` uses `load-dynamic`, so the compiled binary + the bundled
   `.so` are portable **only within the same CPU arch**. The pinned bundle is arm64, so both Fargate
   and Lambda must run on **arm64 (Graviton)**. Targeting x86_64 Fargate requires an x86_64
