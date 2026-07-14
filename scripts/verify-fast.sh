@@ -5,6 +5,11 @@ cargo build --bin query_lambda --bin write_lambda --bin index_builder_lambda
 cargo test --lib --bins
 
 test_targets=(
+  build_worker_test
+  http_build_test
+  http_common_test
+  http_query_test
+  http_write_test
   index_builder_lambda_test
   index_builder_test
   keyword_searcher_test
@@ -14,6 +19,7 @@ test_targets=(
   publisher_test
   query_flow_test
   query_lambda_test
+  query_service_test
   ranker_test
   router_test
   vector_searcher_test

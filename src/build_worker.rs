@@ -138,7 +138,7 @@ pub async fn run_sqs_worker_loop<S: PublishStorage>(
                 Err(error) => {
                     // 本地单用户场景不做毒消息隔离：记录完整失败详情后照常删消息。
                     eprintln!(
-                        "build worker: build failed (message dropped after logging): {error}"
+                        "build worker: message processing failed (message dropped after logging): {error}"
                     );
                 }
             }
