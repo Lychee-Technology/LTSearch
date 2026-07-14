@@ -1,6 +1,7 @@
 //! HTTP 服务模式的公共骨架：错误信封映射、健康响应、监听与优雅退出。
 //! 见 docs/deployment.md「Mechanism: AWS Lambda Web Adapter」。
 
+pub mod build;
 pub mod query;
 pub mod write;
 

@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod bootstrap;
 pub mod build_lambda;
+pub mod build_worker;
 pub mod embedding;
 pub mod error;
 pub mod http;
