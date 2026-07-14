@@ -22,10 +22,12 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertNotIn("deploy", content.lower())
 
         jobs = self._parse_jobs(lines)
-        self.assertEqual(set(jobs.keys()), {"fast", "integration", "sam-e2e"})
+        self.assertEqual(
+            set(jobs.keys()), {"fast", "integration", "sam-e2e", "http-e2e"}
+        )
 
         fast = jobs["fast"]
-        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", fast)
+        self.assertIn("runs-on: ubuntu-24.04-arm", fast)
         self.assertIn("timeout-minutes: 30", fast)
         self.assertIn("uses: actions/checkout@v6", fast)
         self.assertIn(
@@ -41,7 +43,7 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertNotIn("docker compose -f docker-compose.moto.yml up -d", fast)
 
         integration = jobs["integration"]
-        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", integration)
+        self.assertIn("runs-on: ubuntu-24.04-arm", integration)
         self.assertIn("timeout-minutes: 30", integration)
         self.assertIn("uses: actions/checkout@v6", integration)
         self.assertNotIn("github.event.pull_request.head.sha", integration)
@@ -59,7 +61,7 @@ class CiWorkflowTest(unittest.TestCase):
 
         sam_e2e = jobs["sam-e2e"]
         self.assertIn("needs: integration", sam_e2e)
-        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", sam_e2e)
+        self.assertIn("runs-on: ubuntu-24.04-arm", sam_e2e)
         self.assertIn("timeout-minutes: 120", sam_e2e)
         self.assertIn("uses: actions/checkout@v6", sam_e2e)
         self.assertIn("uses: actions/setup-python@v6", sam_e2e)
@@ -73,6 +75,25 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn(
             "if: always()\n        run: docker compose -f docker-compose.moto.yml down -v",
             sam_e2e,
+        )
+
+        http_e2e = jobs["http-e2e"]
+        self.assertIn("needs: integration", http_e2e)
+        self.assertIn("runs-on: ubuntu-24.04-arm", http_e2e)
+        self.assertIn("timeout-minutes: 120", http_e2e)
+        self.assertIn("uses: actions/checkout@v6", http_e2e)
+        self.assertIn("uses: actions/setup-python@v6", http_e2e)
+        self.assertIn(
+            "docker build -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=stub .",
+            http_e2e,
+        )
+        self.assertIn(
+            "docker compose -f docker-compose.http.yml up -d --wait", http_e2e
+        )
+        self.assertIn("bash scripts/e2e/run-http-server-flow.sh", http_e2e)
+        self.assertIn(
+            "if: always()\n        run: docker compose -f docker-compose.http.yml down -v",
+            http_e2e,
         )
 
     def _parse_jobs(self, lines: list[str]) -> dict[str, str]:

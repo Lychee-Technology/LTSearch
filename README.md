@@ -200,6 +200,25 @@ sam local invoke BuildFunction \
   --docker-network ltsearch-e2e
 ```
 
+## HTTP Server Mode
+
+除 Lambda 二进制外，三个组件还各有一个长驻 HTTP 服务二进制（`src/bin/{query,write,index_builder}_server.rs`），复用同一批 `handle_*` 请求核心，监听 `0.0.0.0:8080`，供 Fargate/ECS、本地 Compose 或 im4pe 侧编排直接以 HTTP 调用。
+
+| Image (ghcr.io/lychee-technology/…) | Endpoints | Key env |
+| --- | --- | --- |
+| ltsearch-query-server | POST /query, GET /health | LTSEARCH_QUERY_{EMBEDDING_PROVIDER,S3_BUCKET,ARTIFACT_ROOT,LTEMBED_BUNDLE_DIR,LTEMBED_MODEL_PATH} |
+| ltsearch-write-server | POST /write, POST /delete, GET /health | LTSEARCH_WRITE_{S3_BUCKET,SQS_QUEUE_URL} |
+| ltsearch-index-builder-server | POST /build, GET /health（设 LTSEARCH_BUILD_SQS_QUEUE_URL 后自动轮询建索引） | LTSEARCH_BUILD_{S3_BUCKET,SQS_QUEUE_URL,ARTIFACT_ROOT,EMBEDDING_PROVIDER,EMBEDDING_DIM,LTEMBED_BUNDLE_DIR,LTEMBED_MODEL_PATH} |
+
+镜像为 arm64、不内置 embedding 模型：`ltembed` 模式需把 LTEmbed bundle（model.ort / tokenizer.json /
+build-info.json / libonnxruntime.so，来自 minimal-ort-builder release）挂载进容器并用
+`*_LTEMBED_BUNDLE_DIR` / `*_LTEMBED_MODEL_PATH` 指向挂载路径；模型缺失或损坏时
+`GET /health` 返回 503 并附修复提示（query/index-builder 探测模型完整性，write 无模型依赖故 `/health` 恒 200；query 在无 `_head`
+的空索引下仍返回 200 且 `index_version` 为 null）。index-builder 设 `LTSEARCH_BUILD_SQS_QUEUE_URL` 后自动轮询
+构建队列（head+1 版本分配 + CAS 发布 `_head`），无需显式 POST /build；每次构建都列举 `wal/` 前缀下
+全部 WAL 段做全量快照重放，多次 write 的历史批次不会被新版本挤掉。本地全链路验证（write → SQS → 自动 build → query 命中）：
+`docker compose -f docker-compose.http.yml up -d --wait && bash scripts/e2e/run-http-server-flow.sh`
+
 ## Architecture
 
 See [`docs/arch.md`](docs/arch.md) for system architecture and [`docs/design.md`](docs/design.md) for the detailed design specification. Deployment (unified Docker image for Fargate + Lambda) is documented in [`docs/deployment.md`](docs/deployment.md).

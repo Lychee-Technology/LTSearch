@@ -139,6 +139,20 @@ pub fn build_embedding_generator_from_env(
     }
 }
 
+/// 构建侧健康探针：按 `LTSEARCH_BUILD_*` 构建 embedding 引擎并对
+/// `"healthcheck"` 生成一次向量（Document kind，同构建路径），返回维度。任一
+/// 步失败即回错误字符串，供 `/health` 以 503 报告细节。语义同 query 侧的
+/// `probe_query_embedding_from_env`。
+pub fn probe_build_embedding_from_env() -> Result<usize, String> {
+    let provider = build_embedding_provider_from_env().map_err(|error| error.to_string())?;
+    let embedding_generator =
+        build_embedding_generator_from_env(provider).map_err(|error| error.to_string())?;
+    let embedding = embedding_generator
+        .generate("healthcheck")
+        .map_err(|error| error.to_string())?;
+    Ok(embedding.len())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;

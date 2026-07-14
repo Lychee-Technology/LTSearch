@@ -55,13 +55,13 @@ impl From<PublishError> for BuildLambdaError {
     }
 }
 
-pub async fn handle_build_request<B, P>(
+pub async fn handle_build_request<R, B, P>(
     build_handler: B,
     publish_handler: P,
-    request: BuildRequest,
+    request: R,
 ) -> Result<BuildResponse, BuildLambdaError>
 where
-    B: AsyncFnOnce(BuildRequest) -> Result<BuildIndexResult, IndexError>,
+    B: AsyncFnOnce(R) -> Result<BuildIndexResult, IndexError>,
     P: AsyncFnOnce(IndexManifest) -> Result<PublishResult, PublishError>,
 {
     let build_result = build_handler(request)

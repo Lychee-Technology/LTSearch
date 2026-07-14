@@ -1498,7 +1498,7 @@ time only.)
 - Moto (3.0+): Local AWS service emulation
 
 **CI/CD**:
-- GitHub Actions (self-hosted ARM64 runners): fast checks → Moto integration → SAM local e2e
+- GitHub Actions (GitHub-hosted `ubuntu-24.04-arm` runners): fast checks → Moto integration → SAM local e2e
 - `scripts/verify-fast.sh` (build all bins + non-Moto tests + fmt + clippy), `scripts/verify-moto.sh`
 
 ## Known Gaps and Current Limitations

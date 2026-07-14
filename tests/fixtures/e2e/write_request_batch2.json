@@ -1,0 +1,15 @@
+{
+  "operation": "ingest",
+  "documents": [
+    {
+      "doc_id": "doc-golang-batch2",
+      "text": "golang concurrency with channels and goroutine scheduler",
+      "metadata": {
+        "lang": "go",
+        "category": "batch2",
+        "tenant": "tenant-a"
+      },
+      "timestamp": 1700000001000
+    }
+  ]
+}
