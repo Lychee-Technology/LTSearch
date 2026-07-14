@@ -76,6 +76,38 @@ pub fn load_active_query_version_from_env() -> Result<u64, QueryLambdaError> {
         .map_err(|source| bootstrap_error(format!("failed to load active version: {source}")))
 }
 
+/// 与 `load_active_query_version_from_env` 相同，但把「`_head` 尚不存在」
+/// （空索引 / 新装）与「读取失败」区分开：前者返回 `Ok(None)`，供健康检查
+/// 判定为「模型可用、等待首次导入」的健康态；其余读取错误照常返回 `Err`。
+pub fn load_active_query_version_from_env_opt() -> Result<Option<u64>, QueryLambdaError> {
+    let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
+        .map(PathBuf::from)
+        .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_ARTIFACT_ROOT"))?;
+    let manifest_store = LocalManifestStore::new(&artifact_root);
+
+    match manifest_store.load_active_version() {
+        Ok(version) => Ok(Some(version)),
+        Err(ManifestStoreError::MissingHead { .. }) => Ok(None),
+        Err(source) => Err(bootstrap_error(format!(
+            "failed to load active version: {source}"
+        ))),
+    }
+}
+
+/// 模型完整性探针：按 `LTSEARCH_QUERY_EMBEDDING_PROVIDER` 构建 embedding
+/// 引擎并做一次 `generate` 探测，返回向量维度。与查询 bootstrap 复用同一段
+/// provider 选择/引擎构建逻辑，失败信息保留底层 `LTEmbed bootstrap failed: …`
+/// 文本，供 HTTP `/health` 以 503 报告模型不可用的细节。
+pub fn probe_query_embedding_from_env() -> Result<usize, String> {
+    let provider = required_provider_from_env("LTSEARCH_QUERY_EMBEDDING_PROVIDER")
+        .map_err(|error| error.to_string())?;
+    let (embedding_generator, _, _) = build_query_embedding_generator(provider)?;
+    let embedding = embedding_generator
+        .generate("healthcheck")
+        .map_err(|error| error.to_string())?;
+    Ok(embedding.len())
+}
+
 pub fn is_retriable_bootstrap_version_change(error: &QueryLambdaError) -> bool {
     error.error_type == "execution_error"
         && error
@@ -102,41 +134,8 @@ fn bootstrap_query_embedding_handler(
             )));
         }
     }
-    let (embedding_generator, dim_mismatch_name, dim_mismatch_message): (
-        Box<dyn EmbeddingGenerator>,
-        &str,
-        &str,
-    ) = match provider {
-        EmbeddingProvider::Fixed => (
-            Box::new(
-                fixed_generator_from_env("LTSEARCH_QUERY_FIXED_EMBEDDING", None)
-                    .map_err(|error| bootstrap_error(error.to_string()))?,
-            ),
-            "LTSEARCH_QUERY_FIXED_EMBEDDING",
-            "dimension",
-        ),
-        #[cfg(feature = "ltembed")]
-        EmbeddingProvider::LTEmbed => {
-            let config = ltembed_config_from_env(
-                "LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR",
-                "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
-            )
-            .map_err(|error| bootstrap_error(error.to_string()))?;
-            (
-                // Query side embeds user queries — the engine prepends the
-                // model's query prefix itself.
-                Box::new(
-                    LTEmbedEmbeddingGenerator::from_config(
-                        &config,
-                        ltembed::engine::EmbeddingInputKind::Query,
-                    )
-                    .map_err(|error| bootstrap_error(error.to_string()))?,
-                ),
-                "LTSEARCH_QUERY_LTEMBED",
-                "embedding dimension",
-            )
-        }
-    };
+    let (embedding_generator, dim_mismatch_name, dim_mismatch_message) =
+        build_query_embedding_generator(provider).map_err(bootstrap_error)?;
     let embedding = embedding_generator
         .generate("ignored")
         .map_err(|error| bootstrap_error(error.to_string()))?;
@@ -165,6 +164,47 @@ fn bootstrap_query_embedding_handler(
     let router = router.with_static_retriever(static_retriever);
 
     Ok(Box::new(move |request| router.search(&request)))
+}
+
+/// 按 provider 构建 embedding 引擎，并返回其维度不匹配诊断所用的 env 名与
+/// 字段描述。查询 bootstrap 与健康探针共用此段：provider=fixed 读固定向量，
+/// provider=ltembed 由 ONNX bundle 构建引擎。错误以 `String` 冒泡，由各调用点
+/// 决定包装成 `QueryLambdaError`（bootstrap）还是原样返回（health probe）。
+#[allow(clippy::type_complexity)]
+fn build_query_embedding_generator(
+    provider: EmbeddingProvider,
+) -> Result<(Box<dyn EmbeddingGenerator>, &'static str, &'static str), String> {
+    match provider {
+        EmbeddingProvider::Fixed => Ok((
+            Box::new(
+                fixed_generator_from_env("LTSEARCH_QUERY_FIXED_EMBEDDING", None)
+                    .map_err(|error| error.to_string())?,
+            ),
+            "LTSEARCH_QUERY_FIXED_EMBEDDING",
+            "dimension",
+        )),
+        #[cfg(feature = "ltembed")]
+        EmbeddingProvider::LTEmbed => {
+            let config = ltembed_config_from_env(
+                "LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR",
+                "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
+            )
+            .map_err(|error| error.to_string())?;
+            Ok((
+                // Query side embeds user queries — the engine prepends the
+                // model's query prefix itself.
+                Box::new(
+                    LTEmbedEmbeddingGenerator::from_config(
+                        &config,
+                        ltembed::engine::EmbeddingInputKind::Query,
+                    )
+                    .map_err(|error| error.to_string())?,
+                ),
+                "LTSEARCH_QUERY_LTEMBED",
+                "embedding dimension",
+            ))
+        }
+    }
 }
 
 pub fn handle_search_request<H>(
