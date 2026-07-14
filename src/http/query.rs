@@ -67,6 +67,15 @@ async fn handle_query(State(state): State<QueryServerState>, body: axum::body::B
 
 async fn handle_health(State(state): State<QueryServerState>) -> Response {
     if let Err(detail) = (state.embedding_probe)() {
+        // 底层 LTEmbed 错误只在「文件缺失 / build-info 读取解析失败」时才带 bundle
+        // 路径；ORT runtime、配置校验、pooling/input_kind 不支持等失败并不含目录。
+        // 若配置了 bundle dir，显式前缀之，便于定位到挂载目录。
+        let detail = match std::env::var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR") {
+            Ok(bundle_dir) if !bundle_dir.is_empty() => {
+                format!("bundle_dir={bundle_dir}：{detail}")
+            }
+            _ => detail,
+        };
         return unavailable(
             None,
             format!("{detail}；请重新拉取 LTEmbed bundle 到挂载目录后重启容器"),

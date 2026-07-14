@@ -30,10 +30,15 @@ async fn body_json(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&body).unwrap()
 }
 
+// 探针失败分支会读取 LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR 前缀化 detail，故串行化。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn health_returns_503_with_detail_when_embedding_probe_fails() {
+    let _guard = common::ENV_LOCK.lock().unwrap();
+    // 配置 bundle dir：底层错误未必带目录，/health 应显式前缀出来。
+    std::env::set_var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR", "/models");
     let app = query_router(state_with_probe(|| {
-        Err("LTEmbed bootstrap failed: model.ort missing at /models".into())
+        Err("LTEmbed bootstrap failed: unsupported pooling".into())
     }));
     let response = app
         .oneshot(Request::get("/health").body(Body::empty()).unwrap())
@@ -42,10 +47,74 @@ async fn health_returns_503_with_detail_when_embedding_probe_fails() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let json = body_json(response).await;
     assert_eq!(json["status"], "unavailable");
+    let detail = json["detail"].as_str().unwrap();
+    assert!(detail.contains("bundle_dir=/models"), "detail: {detail}");
+    assert!(detail.contains("unsupported pooling"), "detail: {detail}");
+    std::env::remove_var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR");
+}
+
+// probe 通过、`_head` 指向某版本，但 handler bootstrap 失败（此处用 fixed
+// embedding 维度与 manifest 不符触发）→ 503 且携带该版本号。
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn health_returns_503_with_version_when_head_present_but_bootstrap_fails() {
+    let _guard = common::ENV_LOCK.lock().unwrap();
+    let root = common::temp_fixture_dir("http-query-router-bootstrap-fail");
+    common::write_fixture(&root, INDEX_HEAD_KEY, &common::sample_head_json(7));
+    common::write_fixture(
+        &root,
+        &version_manifest_key(7),
+        &common::sample_manifest_json(7),
+    );
+
+    std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "fixed");
+    std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
+    // manifest embedding_dim 为 3，此处固定向量维度为 2 → bootstrap 维度校验失败。
+    std::env::set_var("LTSEARCH_QUERY_FIXED_EMBEDDING", "0.1,0.2");
+    std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
+    std::env::remove_var("LTSEARCH_QUERY_STATIC_DIR");
+
+    let app = query_router(state_with_probe(|| Ok(3)));
+    let response = app
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let json = body_json(response).await;
+    assert_eq!(json["status"], "unavailable");
+    assert_eq!(json["index_version"], 7);
     assert!(json["detail"]
         .as_str()
         .unwrap()
-        .contains("model.ort missing"));
+        .contains("does not match manifest embedding_dim"));
+}
+
+// probe 通过，但 `_head` 读取失败且非 MissingHead（此处写入非法 JSON）→ 503、
+// index_version 为 null（区别于「无 _head」的 200 健康态）。
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn health_returns_503_when_head_read_fails_with_invalid_json() {
+    let _guard = common::ENV_LOCK.lock().unwrap();
+    let root = common::temp_fixture_dir("http-query-router-invalid-head");
+    // _head 存在但内容不是合法 JSON → InvalidHead（非 MissingHead）。
+    common::write_fixture(&root, INDEX_HEAD_KEY, "{ this is not valid json");
+
+    std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
+    std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
+
+    let app = query_router(state_with_probe(|| Ok(3)));
+    let response = app
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let json = body_json(response).await;
+    assert_eq!(json["status"], "unavailable");
+    assert!(json["index_version"].is_null());
+    assert!(json["detail"]
+        .as_str()
+        .unwrap()
+        .contains("failed to load active version"));
 }
 
 #[tokio::test]

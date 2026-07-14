@@ -3,6 +3,10 @@
 //! 与 `tests/query_lambda_test.rs` 中的 fixture 搭建方式保持一致：写出
 //! `_head`、版本化 manifest、tantivy 关键词索引与 lance 向量分片，供 router
 //! 级端到端测试直接驱动 `bootstrap_query_handler_from_env` 的成功路径。
+//!
+//! 该模块被多个测试二进制以 `mod common;` 各自编译，不同二进制只用到其中一
+//! 部分构建器，故整体豁免 `dead_code`。
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -76,7 +80,15 @@ pub fn write_index(root: &Path, relative_path: &str, documents: &[(&str, &str)])
 }
 
 pub fn write_lance_fixture(root: &Path, relative_path: &str, rows: &[serde_json::Value]) {
-    let embedding_dim = 3;
+    write_lance_fixture_with_dim(root, relative_path, rows, 3);
+}
+
+pub fn write_lance_fixture_with_dim(
+    root: &Path,
+    relative_path: &str,
+    rows: &[serde_json::Value],
+    embedding_dim: i32,
+) {
     let shard_dir = root.join(relative_path);
     fs::create_dir_all(&shard_dir).unwrap();
 
@@ -161,11 +173,15 @@ pub fn sample_head_json(version_id: u64) -> String {
 }
 
 pub fn sample_manifest_json(version_id: u64) -> String {
+    sample_manifest_json_with_dim(version_id, 3)
+}
+
+pub fn sample_manifest_json_with_dim(version_id: u64, embedding_dim: usize) -> String {
     format!(
         r#"{{
   "version_id": {version_id},
   "created_at": 1700000000000,
-  "embedding_dim": 3,
+  "embedding_dim": {embedding_dim},
   "document_count": 2,
   "num_shards": 1,
   "shards": [
