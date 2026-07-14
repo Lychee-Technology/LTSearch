@@ -3,6 +3,7 @@ pub mod bootstrap;
 pub mod build_lambda;
 pub mod embedding;
 pub mod error;
+pub mod http;
 pub mod index;
 pub mod indexing;
 pub mod models;
