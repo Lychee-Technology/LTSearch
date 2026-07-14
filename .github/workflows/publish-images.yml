@@ -1,0 +1,37 @@
+name: Publish Images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: [self-hosted, Linux, ARM64]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Stage LTEmbed checkout for real-mode build
+        run: git clone --depth 1 https://github.com/Lychee-Technology/LTEmbed .sam-local-deps/LTEmbed
+      - name: Build builder image (real embeddings, arm64)
+        run: docker build -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=real .
+      - name: Build server images
+        run: |
+          docker build -f sam/query_server.Dockerfile -t ghcr.io/lychee-technology/ltsearch-query-server:latest .
+          docker build -f sam/write_server.Dockerfile -t ghcr.io/lychee-technology/ltsearch-write-server:latest .
+          docker build -f sam/index_builder_server.Dockerfile -t ghcr.io/lychee-technology/ltsearch-index-builder-server:latest .
+      - name: Login GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Tag with sha and push
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          for name in query write index-builder; do
+            image="ghcr.io/lychee-technology/ltsearch-${name}-server"
+            docker tag "$image:latest" "$image:sha-$SHORT_SHA"
+            docker push "$image:latest"
+            docker push "$image:sha-$SHORT_SHA"
+          done
