@@ -12,7 +12,7 @@ on:
 
 jobs:
   fast:
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -31,7 +31,7 @@ jobs:
 
   integration:
     needs: fast
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -45,7 +45,7 @@ jobs:
 
   sam-e2e:
     needs: integration
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
@@ -64,7 +64,7 @@ jobs:
 
   http-e2e:
     needs: integration
-    runs-on: [self-hosted, Linux, ARM64]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6

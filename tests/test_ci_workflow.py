@@ -27,7 +27,7 @@ class CiWorkflowTest(unittest.TestCase):
         )
 
         fast = jobs["fast"]
-        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", fast)
+        self.assertIn("runs-on: ubuntu-24.04-arm", fast)
         self.assertIn("timeout-minutes: 30", fast)
         self.assertIn("uses: actions/checkout@v6", fast)
         self.assertIn(
@@ -43,7 +43,7 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertNotIn("docker compose -f docker-compose.moto.yml up -d", fast)
 
         integration = jobs["integration"]
-        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", integration)
+        self.assertIn("runs-on: ubuntu-24.04-arm", integration)
         self.assertIn("timeout-minutes: 30", integration)
         self.assertIn("uses: actions/checkout@v6", integration)
         self.assertNotIn("github.event.pull_request.head.sha", integration)
@@ -61,7 +61,7 @@ class CiWorkflowTest(unittest.TestCase):
 
         sam_e2e = jobs["sam-e2e"]
         self.assertIn("needs: integration", sam_e2e)
-        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", sam_e2e)
+        self.assertIn("runs-on: ubuntu-24.04-arm", sam_e2e)
         self.assertIn("timeout-minutes: 120", sam_e2e)
         self.assertIn("uses: actions/checkout@v6", sam_e2e)
         self.assertIn("uses: actions/setup-python@v6", sam_e2e)
@@ -79,7 +79,7 @@ class CiWorkflowTest(unittest.TestCase):
 
         http_e2e = jobs["http-e2e"]
         self.assertIn("needs: integration", http_e2e)
-        self.assertIn("runs-on: [self-hosted, Linux, ARM64]", http_e2e)
+        self.assertIn("runs-on: ubuntu-24.04-arm", http_e2e)
         self.assertIn("timeout-minutes: 120", http_e2e)
         self.assertIn("uses: actions/checkout@v6", http_e2e)
         self.assertIn("uses: actions/setup-python@v6", http_e2e)
