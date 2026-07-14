@@ -1,10 +1,12 @@
 # Deployment: One Docker Image, Two Runtimes (Fargate + Lambda)
 
-> **Status: target / planned design.** LTSearch already ships its serving path as a **Lambda
-> container image**. This document specifies the intended unified topology so that **one image per
-> component runs unchanged on both AWS Lambda and AWS Fargate**. It is documentation of the target;
-> the code, Dockerfile, and infrastructure-template changes are follow-up work and are not yet
-> implemented. See `docs/arch.md` §22 for the architectural summary.
+> **Status: HTTP server mode 已实现（本地 / Compose）；Fargate + Lambda 双运行时部署仍为规划。**
+> 三个组件的 HTTP 服务二进制（`src/bin/{query,write,index_builder}_server.rs`）、各自的
+> `sam/*_server.Dockerfile`、GHCR 镜像发布（`.github/workflows/publish-images.yml`）与本地
+> Compose 全链路冒烟（`docker-compose.http.yml` + `scripts/e2e/run-http-server-flow.sh`）均已落地，
+> index-builder 已接入 SQS→build 自动触发与版本分配。本文档描述的**统一镜像同时不变地跑在 AWS
+> Lambda 与 AWS Fargate** 这一目标拓扑中，ECS 任务定义 / Lambda SAM 资源等基础设施模板仍是后续工作，
+> 尚未落地。See `docs/arch.md` §22 for the architectural summary.
 
 ## Why Docker, and why both runtimes
 
@@ -110,7 +112,7 @@ artifacts persist for the life of the task.
 
 ## Open items before implementation
 
-- Add the HTTP server entrypoints (thin axum wrappers around the existing `handle_*` cores).
-- Wire the SQS → build trigger and version allocation (see `docs/design.md` → Known Gaps #1).
+- ~~Add the HTTP server entrypoints (thin axum wrappers around the existing `handle_*` cores).~~ **Done** — `src/bin/{query,write,index_builder}_server.rs` + `src/http/`.
+- ~~Wire the SQS → build trigger and version allocation (see `docs/design.md` → Known Gaps #1).~~ **Done** — index-builder auto-polls `LTSEARCH_BUILD_SQS_QUEUE_URL`, allocates head+1 version and CAS-publishes `_head`.
 - Provide the ECS task definitions / Lambda SAM resources for both columns.
-- Publish images to ECR (no push/deploy job exists in CI today — everything is local `sam local`).
+- Publish images to ECR for the AWS runtimes. HTTP server images already publish to **GHCR** via `.github/workflows/publish-images.yml`; an ECR push/deploy job for Fargate + Lambda does not exist yet.
