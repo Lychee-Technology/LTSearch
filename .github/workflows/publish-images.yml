@@ -16,7 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Stage LTEmbed checkout for real-mode build
-        run: git clone --depth 1 https://github.com/Lychee-Technology/LTEmbed .sam-local-deps/LTEmbed
+        # path patch 会绕过 Cargo.lock 的 rev 锁定，必须 checkout 与 lockfile 一致的
+        # rev（LTEmbed HEAD 已切换 llama.cpp 后端，与本仓库的 ONNX 集成不兼容）
+        run: |
+          LTEMBED_REV="$(grep -A2 'name = "ltembed"' Cargo.lock | sed -n 's/.*LTEmbed?branch=main#\([0-9a-f]*\)".*/\1/p')"
+          test -n "$LTEMBED_REV"
+          git clone https://github.com/Lychee-Technology/LTEmbed .sam-local-deps/LTEmbed
+          git -C .sam-local-deps/LTEmbed checkout "$LTEMBED_REV"
       - name: Build builder image (real embeddings, arm64)
         run: docker build -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=real .
       - name: Build server images
