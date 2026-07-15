@@ -20,8 +20,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-# Temporary permissive default during the refactor; Task 13 flips this to ["local"].
-default = ["aws", "lambda"]
+# Default to the AWS-free local profile; opt into aws/lambda/ltembed explicitly.
+default = ["local"]
 local = ["server"]
 server = ["dep:axum"]
 aws = ["server", "dep:aws-config", "dep:aws-sdk-s3", "dep:aws-sdk-sqs"]

@@ -123,7 +123,8 @@ mod parse_tests {
 
     #[test]
     fn parse_skips_blank_lines_and_applies_corpus_type() {
-        let jsonl = b"{\"doc_id\":\"d1\",\"text\":\"hello\"}\n\n{\"doc_id\":\"d2\",\"text\":\"world\"}\n";
+        let jsonl =
+            b"{\"doc_id\":\"d1\",\"text\":\"hello\"}\n\n{\"doc_id\":\"d2\",\"text\":\"world\"}\n";
         let chunks =
             parse_static_source_lines(jsonl, &CorpusType::Legal, "s3://bucket/key").unwrap();
         assert_eq!(chunks.len(), 2);

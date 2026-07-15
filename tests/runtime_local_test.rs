@@ -3,7 +3,9 @@
 #![cfg(feature = "local")]
 
 use ltsearch::contracts::{ArtifactSync, BuildJobSource, PublishStorage, WalStorage};
-use ltsearch::local::{LocalFsBuildQueue, LocalFsPublishStorage, LocalFsWalStorage, NoopArtifactSync};
+use ltsearch::local::{
+    LocalFsBuildQueue, LocalFsPublishStorage, LocalFsWalStorage, NoopArtifactSync,
+};
 use ltsearch::storage::LocalManifestStore;
 
 #[tokio::test]

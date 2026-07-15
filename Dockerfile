@@ -6,7 +6,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY vendor/ vendor/
 COPY src/ src/
 
-RUN cargo build --release --bin query_lambda
+RUN cargo build --release --no-default-features --features lambda --bin query_lambda
 
 # Runtime stage
 FROM public.ecr.aws/lambda/provided:al2023
