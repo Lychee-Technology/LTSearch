@@ -1,3 +1,4 @@
+#[cfg(feature = "aws")]
 pub mod adapters;
 pub mod bootstrap;
 pub mod build_lambda;

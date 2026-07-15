@@ -1,3 +1,4 @@
+#![cfg(feature = "aws")]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_config::BehaviorVersion;
