@@ -1,9 +1,5 @@
-use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::bootstrap::s3_client_from_env;
 use crate::query_lambda::{
     bootstrap_query_handler_for_version_from_env, is_retriable_bootstrap_version_change,
     load_active_query_version_from_env, QueryLambdaError, SharedQueryRequestHandler,
@@ -29,7 +25,27 @@ impl QueryService {
     }
 
     pub async fn sync_artifacts_if_configured(&self) -> Result<(), String> {
-        sync_query_artifacts_from_s3_if_configured().await
+        #[cfg(feature = "aws")]
+        {
+            use crate::contracts::ArtifactSync;
+            let bucket = match std::env::var("LTSEARCH_QUERY_S3_BUCKET") {
+                Ok(bucket) => bucket,
+                Err(_) => return Ok(()),
+            };
+            let artifact_root = std::env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
+                .map_err(|_| "missing LTSEARCH_QUERY_ARTIFACT_ROOT".to_string())?;
+            crate::adapters::s3_artifact_sync::S3ArtifactSync::new(bucket)
+                .sync(std::path::Path::new(&artifact_root))
+                .await
+        }
+        #[cfg(not(feature = "aws"))]
+        {
+            use crate::contracts::ArtifactSync;
+            // local profile: artifacts already on disk (mounted volume / local build)
+            crate::local::NoopArtifactSync::new()
+                .sync(std::path::Path::new("."))
+                .await
+        }
     }
 
     pub fn resolve_handler(&self) -> Result<SharedQueryRequestHandler, QueryLambdaError> {
@@ -101,105 +117,5 @@ where
             resolve_versioned_handler(cache, load_active_version, &bootstrap)
         }
         Err(error) => Err(error),
-    }
-}
-
-async fn sync_query_artifacts_from_s3_if_configured() -> Result<(), String> {
-    let bucket = match env::var("LTSEARCH_QUERY_S3_BUCKET") {
-        Ok(bucket) => bucket,
-        Err(_) => return Ok(()),
-    };
-
-    let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
-        .map_err(|_| "missing LTSEARCH_QUERY_ARTIFACT_ROOT".to_string())?;
-    let artifact_root = PathBuf::from(artifact_root);
-    fs::create_dir_all(&artifact_root)
-        .map_err(|error| format!("failed to create query artifact root: {error}"))?;
-
-    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client = s3_client_from_env(&config);
-
-    for prefix in synced_artifact_prefixes() {
-        sync_prefix(&client, &bucket, prefix, &artifact_root).await?;
-    }
-
-    Ok(())
-}
-
-fn synced_artifact_prefixes() -> Vec<&'static str> {
-    vec!["index/", "lance/", "static/"]
-}
-
-async fn sync_prefix(
-    client: &aws_sdk_s3::Client,
-    bucket: &str,
-    prefix: &str,
-    artifact_root: &Path,
-) -> Result<(), String> {
-    let mut continuation_token = None;
-
-    loop {
-        let mut request = client.list_objects_v2().bucket(bucket).prefix(prefix);
-        if let Some(token) = continuation_token.as_deref() {
-            request = request.continuation_token(token);
-        }
-
-        let response = request
-            .send()
-            .await
-            .map_err(|error| format!("failed to list {prefix} objects from S3: {error}"))?;
-
-        for object in response.contents() {
-            let Some(key) = object.key() else {
-                continue;
-            };
-            if key.ends_with('/') {
-                continue;
-            }
-
-            let body = client
-                .get_object()
-                .bucket(bucket)
-                .key(key)
-                .send()
-                .await
-                .map_err(|error| format!("failed to download {key} from S3: {error}"))?
-                .body
-                .collect()
-                .await
-                .map_err(|error| format!("failed to read {key} body from S3: {error}"))?
-                .into_bytes();
-
-            let destination = artifact_root.join(key);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).map_err(|error| {
-                    format!("failed to create local artifact directories: {error}")
-                })?;
-            }
-            fs::write(&destination, body)
-                .map_err(|error| format!("failed to write local artifact {key}: {error}"))?;
-        }
-
-        if !response.is_truncated().unwrap_or(false) {
-            break;
-        }
-        continuation_token = response
-            .next_continuation_token()
-            .map(|value| value.to_string());
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn synced_artifact_prefixes_include_static_artifacts() {
-        assert_eq!(
-            synced_artifact_prefixes(),
-            vec!["index/", "lance/", "static/"]
-        );
     }
 }

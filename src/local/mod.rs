@@ -5,7 +5,9 @@
 pub mod fs_build_queue;
 pub mod fs_publish;
 pub mod fs_wal;
+pub mod noop_sync;
 
 pub use fs_build_queue::LocalFsBuildQueue;
 pub use fs_publish::LocalFsPublishStorage;
 pub use fs_wal::LocalFsWalStorage;
+pub use noop_sync::NoopArtifactSync;
