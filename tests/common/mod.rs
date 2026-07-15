@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{
+    FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, RecordBatchReader,
+    StringArray,
+};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use ltsearch::storage::version_manifest_key;
 use serde_json::json;
@@ -149,7 +152,10 @@ pub fn write_lance_fixture_with_dim(
         Runtime::new().unwrap().block_on(async move {
             let conn = lancedb::connect(&shard_dir_string).execute().await.unwrap();
             let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
-            let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+            let batches: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+                vec![Ok(batch)].into_iter(),
+                schema,
+            ));
 
             conn.create_table("documents", batches)
                 .execute()

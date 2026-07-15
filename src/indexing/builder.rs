@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::thread;
 
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{
+    FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, RecordBatchReader,
+    StringArray,
+};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use serde::Serialize;
 use tantivy::doc;
@@ -271,7 +274,13 @@ where
                     shard_dir.display()
                 ),
             })?;
-            let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+            // lancedb 0.31 requires `create_table` inputs to implement `Scannable`;
+            // a bare `RecordBatchIterator` no longer qualifies, so box it as a
+            // `RecordBatchReader` (which does) while preserving the explicit schema.
+            let batches: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+                vec![Ok(batch)].into_iter(),
+                schema,
+            ));
 
             conn.create_table(LANCE_TABLE_NAME, batches)
                 .execute()

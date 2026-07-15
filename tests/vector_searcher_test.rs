@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{
+    FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, RecordBatchReader,
+    StringArray,
+};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use ltsearch::error::{SearchError, ValidationError};
 use ltsearch::models::CacheStats;
@@ -113,7 +116,10 @@ fn write_lance_fixture_with_dim(
             ],
         )
         .unwrap();
-        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        let batches: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+            vec![Ok(batch)].into_iter(),
+            schema,
+        ));
 
         conn.create_table("documents", batches)
             .execute()

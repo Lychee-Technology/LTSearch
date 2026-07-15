@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
-use arrow_array::{FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, StringArray};
+use arrow_array::{
+    FixedSizeListArray, Int64Array, RecordBatch, RecordBatchIterator, RecordBatchReader,
+    StringArray,
+};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
 use ltsearch::models::{IndexManifest, SearchRequest, ShardManifest};
@@ -191,7 +194,10 @@ fn write_lance_fixture(root: &Path, relative_path: &str, rows: &[serde_json::Val
             ],
         )
         .unwrap();
-        let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        let batches: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+            vec![Ok(batch)].into_iter(),
+            schema,
+        ));
 
         conn.create_table("documents", batches)
             .execute()
