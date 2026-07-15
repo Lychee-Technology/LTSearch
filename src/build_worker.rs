@@ -1,10 +1,12 @@
-//! SQS 轮询 worker：从构建队列长轮询取消息，按 `_head` 分配 head+1 版本，复用
+//! 构建 worker：从构建作业源长轮询取作业，按 `_head` 分配 head+1 版本，复用
 //! `POST /build` 的 `run_build` 执行「读 WAL → 建索引 → CAS 发布」。本地单用户
-//! 场景不做毒消息隔离：无论成功失败都 `delete_message` 并把失败详情完整落
+//! 场景不做毒消息隔离：无论成功失败都 `ack`（删除）并把失败详情完整落
 //! stderr。发布 CAS 冲突（并发别处推进了 head）时重读 head 重试一次。
 //!
-//! 轮询循环本身依赖真实 SQS，留给 Task 7 的 compose e2e；本模块把可测逻辑
-//! （消息解析、版本分配）拆成独立函数以便不依赖 AWS 单测。
+//! 轮询循环 [`run_build_job_loop`] 只依赖供应商中立的 [`BuildJobSource`]，不再
+//! 直接触碰 SQS：AWS 实现见 `#[cfg(feature = "aws")]` 的 `SqsBuildJobSource`，
+//! `run_sqs_worker_loop` 是保留原签名的薄封装。可测逻辑（消息解析、版本分配、
+//! 有界的 [`run_build_job_loop_once`]）拆成独立函数以便不依赖 AWS 单测。
 
 use std::sync::Arc;
 
@@ -12,6 +14,7 @@ use futures::future::BoxFuture;
 use serde::Deserialize;
 
 use crate::build_lambda::BuildLambdaError;
+use crate::contracts::BuildJobSource;
 use crate::http::build::{run_build, BuildServerState, SnapshotBuildRequest};
 use crate::indexing::PublishStorage;
 use crate::storage::{ManifestHead, INDEX_HEAD_KEY};
@@ -133,9 +136,65 @@ fn build_request(
     }
 }
 
-/// 长轮询循环：`receive_message`（wait 10s、每次 1 条）→ 处理 → 无论成败都
-/// `delete_message`，失败大声打 stderr。receive 出错时退避 5s 再试，避免打爆
-/// SQS。`storage` 用于版本分配（读 head），`state` 提供 build/publish 接线。
+/// 供应商中立的构建作业循环：只依赖 [`BuildJobSource`]，不再直接触碰 SQS。
+/// `receive` 出错时退避 5s 再试，避免打爆后端；`storage` 用于版本分配（读 head），
+/// `state` 提供 build/publish 接线。无限循环，交由调用方 `tokio::spawn`。
+pub async fn run_build_job_loop<C: BuildJobSource, S: PublishStorage>(
+    source: C,
+    state: BuildServerState,
+    storage: S,
+    list_wal_keys: ListWalKeysFn,
+) {
+    loop {
+        let _ = run_build_job_loop_once(&source, &state, &storage, &list_wal_keys).await;
+    }
+}
+
+/// 有界的一趟：`receive` → 逐条 `process_queue_message` → **无论成败都 `ack`**，
+/// 返回已 ack 的作业数。`ack` 永远执行（本地单用户不做毒消息隔离）是 load-bearing
+/// 不变式：处理失败仅落 stderr，作业照常确认。`receive` 失败时退避 5s 并返回 0。
+pub async fn run_build_job_loop_once<C: BuildJobSource, S: PublishStorage>(
+    source: &C,
+    state: &BuildServerState,
+    storage: &S,
+    list_wal_keys: &ListWalKeysFn,
+) -> usize {
+    let jobs = match source.receive().await {
+        Ok(jobs) => jobs,
+        Err(error) => {
+            eprintln!("build worker: receive failed: {error}");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            return 0;
+        }
+    };
+
+    let mut acked = 0;
+    for job in jobs {
+        match process_queue_message(state, storage, list_wal_keys, &job.body).await {
+            Ok(version_id) => {
+                eprintln!("build worker: published index version {version_id}");
+            }
+            Err(error) => {
+                // 本地单用户场景不做毒消息隔离：记录完整失败详情后照常 ack。
+                eprintln!(
+                    "build worker: message processing failed (job acked after logging): {error}"
+                );
+            }
+        }
+
+        // 不变式：无论处理成败都 ack。
+        if let Err(error) = source.ack(&job).await {
+            eprintln!("build worker: ack failed: {error}");
+        } else {
+            acked += 1;
+        }
+    }
+    acked
+}
+
+/// SQS worker 的薄封装：保持原公开签名（bin 侧无需改动），构造
+/// [`SqsBuildJobSource`] 后委托给供应商中立的 [`run_build_job_loop`]。
+#[cfg(feature = "aws")]
 pub async fn run_sqs_worker_loop<S: PublishStorage>(
     sqs: aws_sdk_sqs::Client,
     queue_url: String,
@@ -143,48 +202,6 @@ pub async fn run_sqs_worker_loop<S: PublishStorage>(
     storage: S,
     list_wal_keys: ListWalKeysFn,
 ) {
-    loop {
-        let received = sqs
-            .receive_message()
-            .queue_url(&queue_url)
-            .max_number_of_messages(1)
-            .wait_time_seconds(10)
-            .send()
-            .await;
-        let messages = match received {
-            Ok(output) => output.messages.unwrap_or_default(),
-            Err(error) => {
-                eprintln!("build worker: receive_message failed: {error}");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        for message in messages {
-            let body = message.body().unwrap_or_default();
-            match process_queue_message(&state, &storage, &list_wal_keys, body).await {
-                Ok(version_id) => {
-                    eprintln!("build worker: published index version {version_id}");
-                }
-                Err(error) => {
-                    // 本地单用户场景不做毒消息隔离：记录完整失败详情后照常删消息。
-                    eprintln!(
-                        "build worker: message processing failed (message dropped after logging): {error}"
-                    );
-                }
-            }
-
-            if let Some(handle) = message.receipt_handle() {
-                if let Err(error) = sqs
-                    .delete_message()
-                    .queue_url(&queue_url)
-                    .receipt_handle(handle)
-                    .send()
-                    .await
-                {
-                    eprintln!("build worker: delete_message failed: {error}");
-                }
-            }
-        }
-    }
+    let source = crate::adapters::sqs_job_source::SqsBuildJobSource::new(sqs, queue_url);
+    run_build_job_loop(source, state, storage, list_wal_keys).await;
 }

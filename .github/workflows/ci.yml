@@ -29,6 +29,29 @@ jobs:
       - run: python3 -B tests/test_readme_workflow.py
       - run: bash scripts/verify-fast.sh
 
+  feature-matrix:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: local profile builds AWS-free
+        run: |
+          cargo build --no-default-features --features local
+          for pkg in aws-config aws-sdk-s3 aws-sdk-sqs lambda_runtime; do
+            if cargo tree --no-default-features --features local -i "$pkg" >/dev/null 2>&1; then
+              echo "::error::$pkg leaked into the local build graph"; exit 1
+            fi
+          done
+      - name: local profile tests
+        run: cargo test --no-default-features --features local --lib --tests
+      - name: aws profile builds + tests
+        run: |
+          cargo build --no-default-features --features aws
+          cargo test --no-default-features --features aws --lib --test runtime_aws_test
+      - name: lambda profile builds
+        run: cargo build --no-default-features --features lambda --bin query_lambda --bin write_lambda --bin index_builder_lambda
+
   integration:
     needs: fast
     runs-on: ubuntu-24.04-arm

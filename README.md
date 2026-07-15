@@ -58,6 +58,15 @@ CI mirrors the same split:
 - a fast Docker-free verification path for build, non-Moto tests, formatting, linting, and workflow guard checks
 - a Moto-backed integration path for `tests/write_build_publish_test.rs`
 
+## Build Profiles
+
+AWS is an optional cargo feature (see [`docs/adr/0001-aws-optional-runtime-profiles.md`](docs/adr/0001-aws-optional-runtime-profiles.md)). The crate defaults to the AWS-free `local` profile (`default = ["local"]`), so a bare `cargo build` / `cargo test` pulls in **no** AWS SDK or Lambda runtime and produces no AWS/Lambda binary. Name a profile to build the cloud binaries:
+
+- Lambda handlers (`query_lambda`, `write_lambda`, `index_builder_lambda`) require `--features lambda`.
+- Server + offline binaries (`query_server`, `write_server`, `index_builder_server`, `turbo_index_builder`) require `--features aws`.
+
+AWS-free local server binaries are deferred to #108.
+
 ## Lambda Binaries
 
 All binaries are auto-discovered from `src/bin/` — no `[[bin]]` entries in `Cargo.toml` needed.
@@ -67,7 +76,7 @@ All binaries are auto-discovered from `src/bin/` — no `[[bin]]` entries in `Ca
 Handles search requests against the active index version.
 
 ```bash
-cargo build --bin query_lambda
+cargo build --features lambda --bin query_lambda
 ```
 
 | Env Var | Description |
@@ -84,7 +93,7 @@ cargo build --bin query_lambda
 Accepts ingest/delete requests, persists to WAL (S3), and enqueues build jobs (SQS).
 
 ```bash
-cargo build --bin write_lambda
+cargo build --features lambda --bin write_lambda
 ```
 
 | Env Var | Description |
@@ -97,7 +106,7 @@ cargo build --bin write_lambda
 Reads WAL records, builds Tantivy + LanceDB indexes, and publishes new index versions via atomic `_head` update.
 
 ```bash
-cargo build --bin index_builder_lambda
+cargo build --features lambda --bin index_builder_lambda
 ```
 
 | Env Var | Description |
@@ -115,7 +124,7 @@ cargo build --bin index_builder_lambda
 Offline static index builder for TurboQuant (laws, contracts, RFCs). Writes compressed binary index files for bundling into the query Lambda Docker image.
 
 ```bash
-cargo build --bin turbo_index_builder
+cargo build --features aws --bin turbo_index_builder
 ```
 
 | Env Var | Description |

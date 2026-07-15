@@ -64,6 +64,7 @@ impl BuildConfig {
 
 /// Builds an S3 client, honouring the `AWS_ENDPOINT_URL_S3` override used by
 /// Moto/LocalStack test environments (which also require path-style access).
+#[cfg(feature = "aws")]
 pub fn s3_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client {
     match env::var("AWS_ENDPOINT_URL_S3") {
         Ok(endpoint_url) => {
@@ -78,6 +79,7 @@ pub fn s3_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client 
 }
 
 /// Builds an SQS client, honouring the `AWS_ENDPOINT_URL_SQS` override.
+#[cfg(feature = "aws")]
 pub fn sqs_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_sqs::Client {
     match env::var("AWS_ENDPOINT_URL_SQS") {
         Ok(endpoint_url) => {
@@ -167,6 +169,7 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner())
     }
 
+    #[cfg(feature = "aws")]
     #[test]
     fn endpoint_overrides_are_applied_without_panicking() {
         let _guard = env_guard();

@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ltsearch::error::{IngestError, ValidationError};
+use ltsearch::local::LocalFsWalStorage;
 use ltsearch::models::{Document, WalOperation, WalRecord};
 use ltsearch::write::{segment_key, WalStorage, WriteAheadLog};
 
@@ -104,6 +105,24 @@ async fn append_writes_jsonl_records_in_order_and_read_returns_them() {
     assert_eq!(lines[1], serde_json::to_string(&second).unwrap());
     assert_eq!(read_back, vec![first, second]);
     assert!(contents.ends_with('\n'));
+}
+
+#[tokio::test]
+async fn local_fs_wal_preserves_prior_records_across_appends() {
+    // Regression: LocalFsWalStorage::append must accumulate, not truncate.
+    // A second append to the same segment key previously overwrote the first
+    // record because it used tokio::fs::write.
+    let dir = tempfile::tempdir().unwrap();
+    let wal = WriteAheadLog::new(LocalFsWalStorage::new(dir.path()));
+    let key = segment_key(1_700_000_000_000, "segment-000042").unwrap();
+    let first = sample_record("evt-1", "doc-1");
+    let second = sample_record("evt-2", "doc-2");
+
+    wal.append(&key, &first).await.unwrap();
+    wal.append(&key, &second).await.unwrap();
+
+    let read_back = wal.read(&key).await.unwrap();
+    assert_eq!(read_back, vec![first, second]);
 }
 
 #[tokio::test]

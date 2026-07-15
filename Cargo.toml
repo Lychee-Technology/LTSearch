@@ -20,22 +20,27 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+# Default to the AWS-free local profile; opt into aws/lambda/ltembed explicitly.
+default = ["local"]
+local = ["server"]
+server = ["dep:axum"]
+aws = ["server", "dep:aws-config", "dep:aws-sdk-s3", "dep:aws-sdk-sqs"]
+lambda = ["aws", "dep:lambda_runtime"]
 ltembed = ["dep:ltembed"]
 
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-axum = "0.8"
-aws-config = "1"
-aws-sdk-s3 = "1"
-aws-sdk-sqs = "1"
+axum = { version = "0.8", optional = true }
+aws-config = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", optional = true }
+aws-sdk-sqs = { version = "1", optional = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 futures = "0.3"
 lance = { workspace = true }
 lancedb = { workspace = true }
-lambda_runtime = "0.13"
+lambda_runtime = { version = "0.13", optional = true }
 ltembed = { git = "https://github.com/Lychee-Technology/LTEmbed", branch = "main", optional = true }
 memmap2 = "0.9"
 rand = "0.8"
@@ -61,3 +66,34 @@ path = "src/lib.rs"
 [[bin]]
 name = "turbo_index_builder"
 path = "src/bin/turbo_index_builder.rs"
+required-features = ["aws"]
+
+[[bin]]
+name = "query_lambda"
+path = "src/bin/query_lambda.rs"
+required-features = ["lambda"]
+
+[[bin]]
+name = "write_lambda"
+path = "src/bin/write_lambda.rs"
+required-features = ["lambda"]
+
+[[bin]]
+name = "index_builder_lambda"
+path = "src/bin/index_builder_lambda.rs"
+required-features = ["lambda"]
+
+[[bin]]
+name = "query_server"
+path = "src/bin/query_server.rs"
+required-features = ["aws"]
+
+[[bin]]
+name = "write_server"
+path = "src/bin/write_server.rs"
+required-features = ["aws"]
+
+[[bin]]
+name = "index_builder_server"
+path = "src/bin/index_builder_server.rs"
+required-features = ["aws"]

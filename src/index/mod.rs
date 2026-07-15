@@ -13,7 +13,9 @@ pub use meta::{CorpusTypeId, MetaRecord, META_RECORD_SIZE};
 pub use mmap_index::MmapIndex;
 pub use record::{TurboRecord512, TurboRecordRef, TurboRecordSlice, TypedTurboRecordRef};
 pub use static_builder::{StaticChunk, StaticIndexBuildResult, StaticIndexBuilder};
-pub use static_source::{load_static_chunks_from_s3, StaticSourceConfig, TurboBuildConfig};
+#[cfg(feature = "aws")]
+pub use static_source::load_static_chunks_from_s3;
+pub use static_source::{parse_static_source_lines, StaticSourceConfig, TurboBuildConfig};
 pub use turbo_codec::{
     encode_vector, score_query_against_record, score_query_against_record_512,
     score_query_against_record_512_breakdown, EncodedTurboVector, TurboScoreBreakdown,

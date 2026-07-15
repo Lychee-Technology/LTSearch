@@ -33,18 +33,20 @@ RUN --mount=type=cache,id=ltsearch-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=ltsearch-cargo-git,target=/root/.cargo/git \
     --mount=type=cache,id=ltsearch-cargo-target,target=/src/target \
     if [ "$LTEMBED_MODE" = "stub" ]; then \
-      cargo build --release --no-default-features \
+      cargo build --release --no-default-features --features lambda \
           --bin write_lambda \
           --bin index_builder_lambda \
-          --bin query_lambda \
+          --bin query_lambda && \
+      cargo build --release --no-default-features --features aws \
           --bin write_server \
           --bin index_builder_server \
           --bin query_server; \
     else \
-      cargo build --release --features ltembed \
+      cargo build --release --no-default-features --features lambda,ltembed \
           --bin write_lambda \
           --bin index_builder_lambda \
-          --bin query_lambda \
+          --bin query_lambda && \
+      cargo build --release --no-default-features --features aws,ltembed \
           --bin write_server \
           --bin index_builder_server \
           --bin query_server; \

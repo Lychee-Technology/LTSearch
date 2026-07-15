@@ -23,7 +23,8 @@ class CiWorkflowTest(unittest.TestCase):
 
         jobs = self._parse_jobs(lines)
         self.assertEqual(
-            set(jobs.keys()), {"fast", "integration", "sam-e2e", "http-e2e"}
+            set(jobs.keys()),
+            {"fast", "feature-matrix", "integration", "sam-e2e", "http-e2e"},
         )
 
         fast = jobs["fast"]
@@ -41,6 +42,45 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("run: python3 -B tests/test_readme_workflow.py", fast)
         self.assertIn("run: bash scripts/verify-fast.sh", fast)
         self.assertNotIn("docker compose -f docker-compose.moto.yml up -d", fast)
+
+        feature_matrix = jobs["feature-matrix"]
+        self.assertIn("runs-on: ubuntu-24.04-arm", feature_matrix)
+        self.assertIn("timeout-minutes: 45", feature_matrix)
+        self.assertIn("uses: actions/checkout@v4", feature_matrix)
+        self.assertIn(
+            "uses: actions-rust-lang/setup-rust-toolchain@v1", feature_matrix
+        )
+        # The local profile must build AWS-free and prove no AWS/Lambda crate
+        # leaked into its dependency graph.
+        self.assertIn(
+            "cargo build --no-default-features --features local", feature_matrix
+        )
+        for pkg in ("aws-config", "aws-sdk-s3", "aws-sdk-sqs", "lambda_runtime"):
+            self.assertIn(pkg, feature_matrix)
+        self.assertIn(
+            'cargo tree --no-default-features --features local -i "$pkg"',
+            feature_matrix,
+        )
+        self.assertIn("leaked into the local build graph", feature_matrix)
+        self.assertIn("::error::", feature_matrix)
+        self.assertIn(
+            "cargo test --no-default-features --features local --lib --tests",
+            feature_matrix,
+        )
+        self.assertIn(
+            "cargo build --no-default-features --features aws", feature_matrix
+        )
+        self.assertIn(
+            "cargo test --no-default-features --features aws --lib", feature_matrix
+        )
+        # the aws construction proof (runtime_aws_test) must run continuously,
+        # not just the lib unit tests
+        self.assertIn("--test runtime_aws_test", feature_matrix)
+        self.assertIn(
+            "cargo build --no-default-features --features lambda "
+            "--bin query_lambda --bin write_lambda --bin index_builder_lambda",
+            feature_matrix,
+        )
 
         integration = jobs["integration"]
         self.assertIn("runs-on: ubuntu-24.04-arm", integration)

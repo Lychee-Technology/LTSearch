@@ -1,12 +1,15 @@
+#[cfg(feature = "aws")]
 pub mod adapters;
 pub mod bootstrap;
 pub mod build_lambda;
 pub mod build_worker;
+pub mod contracts;
 pub mod embedding;
 pub mod error;
 pub mod http;
 pub mod index;
 pub mod indexing;
+pub mod local;
 pub mod models;
 pub mod query;
 pub mod query_lambda;
