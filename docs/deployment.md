@@ -53,6 +53,19 @@ COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.x /lambda-adapter /opt
 | `AWS_LWA_INVOKE_MODE` | `buffered` | `response_stream` only if streaming is added |
 | `AWS_LWA_PASS_THROUGH_PATH` | `/build` | Target design for the Lambda SQS EventSource column: raw event POSTed here. **Not set in the published images** — `/build` does not decode SQS event envelopes yet; today's automatic build path is the Fargate-side SQS worker loop (`LTSEARCH_BUILD_SQS_QUEUE_URL`) |
 
+## Cargo build profiles (AWS is optional)
+
+The AWS SDK and the Lambda runtime are now **optional cargo features**, not baked into every build
+(ADR-0001, `docs/adr/0001-aws-optional-runtime-profiles.md`). The domain core compiles AWS-free by
+default (`default = ["local"]`):
+
+- **Server images** compile under `--features aws` (server binaries `query_server` / `write_server`
+  / `index_builder_server` require the `aws` profile).
+- **Lambda images** compile under `--features lambda` (the `query_lambda` / `write_lambda` /
+  `index_builder_lambda` handlers require the `lambda` profile, which implies `aws`).
+- A bare `cargo build` (the `local` profile) pulls in **no** AWS SDK or Lambda runtime and produces
+  **no** AWS/Lambda binary. AWS-free local server binaries are deferred to #108.
+
 ## Image structure
 
 Reuse the existing multi-stage build (`sam/builder.Dockerfile` as the shared compile stage), and

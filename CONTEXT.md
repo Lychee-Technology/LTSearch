@@ -11,3 +11,15 @@ Current architecture work makes AWS optional: local deployment uses SQLite for d
 jobs, and active-release coordination, while AWS remains an adapter implementation. Static corpora
 are built from immutable Lance releases into versioned TurboQuant v3 releases and are activated
 separately from dynamic indexes.
+
+## Build profiles
+
+AWS is an optional cargo feature, not a compile-time requirement (ADR-0001). Four runtime features:
+`local` (the default — `default = ["local"]`, AWS-free), `server` (shared axum HTTP layer, pulled by
+`local` and `aws`), `aws` (adds the AWS SDK adapters), and `lambda` (adds the Lambda runtime and the
+handler binaries); `ltembed` is orthogonal. A bare `cargo build` is AWS-free; AWS/Lambda binaries
+must name their profile (`--features aws` / `--features lambda`). The domain core depends only on the
+provider-neutral contracts in `src/contracts.rs`, each with a local and an AWS impl: document events →
+`WalStorage`; build jobs → `BuildQueue` + `BuildJobSource`; artifact access → `PublishStorage` +
+`ArtifactSync`; active-release coordination → `ManifestStore`. AWS-free local server binaries are
+deferred to #108.
