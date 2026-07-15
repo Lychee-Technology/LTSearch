@@ -9,9 +9,11 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::future::FutureExt;
 use ltsearch::build_worker::{
-    next_version_id, process_queue_message, snapshot_wal_keys, ListWalKeysFn, QueueBuildMessage,
+    next_version_id, process_queue_message, run_build_job_loop_once, snapshot_wal_keys,
+    ListWalKeysFn, QueueBuildMessage,
 };
-use ltsearch::error::PublishError;
+use ltsearch::contracts::{BuildJob, BuildJobSource};
+use ltsearch::error::{IndexError, PublishError};
 use ltsearch::http::build::{BuildServerState, SnapshotBuildRequest};
 use ltsearch::indexing::{
     BuildIndexResult, PublishResult, PublishStorage, UploadMode, VersionedObject,
@@ -59,6 +61,72 @@ impl PublishStorage for StubHeadStorage {
     ) -> Result<bool, PublishError> {
         unreachable!("next_version_id must not compare-and-swap")
     }
+}
+
+/// 内存 `BuildJobSource`：`receive` 一次性吐出预置作业，之后为空（保证 `_once`
+/// 有界终止）；`ack` 记录被确认的作业，供断言「无论处理成败都确认」的核心不变式。
+struct FakeJobSource {
+    pending: Mutex<Vec<BuildJob>>,
+    acked: Arc<Mutex<Vec<BuildJob>>>,
+}
+
+#[async_trait]
+impl BuildJobSource for FakeJobSource {
+    async fn receive(&self) -> Result<Vec<BuildJob>, String> {
+        Ok(std::mem::take(&mut *self.pending.lock().unwrap()))
+    }
+
+    async fn ack(&self, job: &BuildJob) -> Result<(), String> {
+        self.acked.lock().unwrap().push(job.clone());
+        Ok(())
+    }
+}
+
+// 核心不变式：处理失败也必须 ack。喂入 body 非法 JSON 的作业，process_queue_message
+// 在解析阶段即失败，build/publish 闭包永不触达；断言 fake source 恰好记录一次 ack。
+#[tokio::test]
+async fn run_build_job_loop_once_acks_even_when_processing_fails() {
+    std::env::set_var("LTSEARCH_BUILD_EMBEDDING_DIM", "3");
+
+    let acked = Arc::new(Mutex::new(Vec::new()));
+    let source = FakeJobSource {
+        pending: Mutex::new(vec![BuildJob {
+            receipt: "r-1".to_string(),
+            body: "not-json".to_string(),
+        }]),
+        acked: acked.clone(),
+    };
+    let state = BuildServerState {
+        build: Arc::new(|_request: SnapshotBuildRequest| {
+            async {
+                Err(IndexError::Operation {
+                    message: "build closure must not run for a bad-body job".into(),
+                })
+            }
+            .boxed()
+        }),
+        publish: Arc::new(|_manifest: IndexManifest, _expected| {
+            async {
+                Err(PublishError::Operation {
+                    message: "publish closure must not run for a bad-body job".into(),
+                })
+            }
+            .boxed()
+        }),
+        embedding_probe: Arc::new(|| Ok(3)),
+    };
+    let storage = StubHeadStorage { head: None };
+    let list_wal_keys: ListWalKeysFn = Arc::new(|| async { Ok(vec![]) }.boxed());
+
+    let acked_count = run_build_job_loop_once(&source, &state, &storage, &list_wal_keys).await;
+
+    assert_eq!(
+        acked_count, 1,
+        "ack 必须在处理失败时依然发生（load-bearing 不变式）"
+    );
+    let recorded = acked.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "恰好确认一条作业");
+    assert_eq!(recorded[0].receipt, "r-1");
 }
 
 fn head_object(version_id: u64) -> VersionedObject {
