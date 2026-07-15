@@ -73,6 +73,9 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn(
             "cargo test --no-default-features --features aws --lib", feature_matrix
         )
+        # the aws construction proof (runtime_aws_test) must run continuously,
+        # not just the lib unit tests
+        self.assertIn("--test runtime_aws_test", feature_matrix)
         self.assertIn(
             "cargo build --no-default-features --features lambda "
             "--bin query_lambda --bin write_lambda --bin index_builder_lambda",

@@ -48,7 +48,7 @@ jobs:
       - name: aws profile builds + tests
         run: |
           cargo build --no-default-features --features aws
-          cargo test --no-default-features --features aws --lib
+          cargo test --no-default-features --features aws --lib --test runtime_aws_test
       - name: lambda profile builds
         run: cargo build --no-default-features --features lambda --bin query_lambda --bin write_lambda --bin index_builder_lambda
 

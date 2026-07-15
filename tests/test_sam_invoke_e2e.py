@@ -145,7 +145,10 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("ARG LTEMBED_MODE=stub", content)
         self.assertIn("ltembed-stub", content)
         self.assertIn(".sam-local-deps/LTEmbed", content)
-        self.assertIn("--features ltembed", content)
+        # real mode enables ltembed per profile (lambda bins vs server bins);
+        # the feature is composed with the profile, not passed bare.
+        self.assertIn("--features lambda,ltembed", content)
+        self.assertIn("--features aws,ltembed", content)
         self.assertIn("/ltembed-assets", content)
         self.assertNotIn("stage_ltembed_assets", content)
         self.assertNotIn(".sam-local-deps/ltembed-assets", content)

@@ -6,9 +6,11 @@ use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sqs::Client as SqsClient;
+use ltsearch::adapters::s3_artifact_sync::S3ArtifactSync;
 use ltsearch::adapters::s3_publish::AwsPublishStorage;
 use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::adapters::sqs_build_queue::AwsSqsBuildQueue;
+use ltsearch::adapters::sqs_job_source::SqsBuildJobSource;
 
 #[tokio::test]
 async fn aws_profile_constructs_all_adapter_types() {
@@ -21,7 +23,12 @@ async fn aws_profile_constructs_all_adapter_types() {
     let s3 = S3Client::new(&shared_config);
     let sqs = SqsClient::new(&shared_config);
 
+    // document events + artifact access (read/write)
     let _wal = AwsS3WalStorage::new("bucket", s3.clone());
     let _publish = AwsPublishStorage::new("bucket", s3);
-    let _queue = AwsSqsBuildQueue::new("http://queue", sqs);
+    // build jobs: producer + consumer
+    let _queue = AwsSqsBuildQueue::new("http://queue", sqs.clone());
+    let _job_source = SqsBuildJobSource::new(sqs, "http://queue");
+    // artifact access: query-side download
+    let _artifact_sync = S3ArtifactSync::new("bucket");
 }
