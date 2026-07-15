@@ -12,6 +12,10 @@ tokio = "1.35"
 arrow-array = "58"
 arrow-schema = "58"
 lance = { version = "=8.0.0", default-features = false, features = ["protoc"] }
+# lance 8.0.0's top-level `protoc` feature does not forward to lance-datafusion,
+# whose build script needs protoc. Enable it directly so the vendored protobuf-src
+# (see [patch.crates-io]) supplies protoc without a system install.
+lance-datafusion = { version = "=8.0.0", features = ["protoc"] }
 lancedb = "0.31.0"
 
 [package]
@@ -39,6 +43,7 @@ arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 futures = "0.3"
 lance = { workspace = true }
+lance-datafusion = { workspace = true }
 lancedb = { workspace = true }
 lambda_runtime = { version = "0.13", optional = true }
 ltembed = { git = "https://github.com/Lychee-Technology/LTEmbed", branch = "main", optional = true }
