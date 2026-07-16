@@ -33,6 +33,22 @@ atomic event+job write), no `RETURNING`/row-lock claim primitive, and version/ma
 bloat under frequent small mutations. Design principle: use each engine where it fits —
 SQLite for the control plane, LanceDB for the vector artifacts.
 
+### Considered alternatives for the SQLite driver (rusqlite vs Turso)
+
+**Turso Database** (`tursodatabase/turso`, the Rust rewrite of SQLite formerly "Limbo";
+v0.7.0 as of 2026-07) was evaluated. Appeal: async-native (no `spawn_blocking` wrapper),
+pure Rust, `BEGIN CONCURRENT`/MVCC, SQLite-compatible file format. **Rejected for now**
+because the substrate's acceptance criteria are precisely durability and crash/restart
+correctness, and Turso is pre-1.0 with <100% SQLite compatibility and some experimental
+features — the wrong place to take engine-maturity risk. Our multi-process shared-volume
+topology (write + builder containers writing one `.db`) further stresses a young engine's
+file-locking, where real SQLite's multi-process WAL is battle-tested. The "pure Rust /
+no C compile" advantage is muted here (the build already carries a gcc/g++ toolchain for
+lance/datafusion/onnxruntime), and `BEGIN CONCURRENT`'s concurrent-write benefit is
+marginal at this workload's tiny write volume. Because the driver lives behind the
+provider-neutral contracts (`src/local/sqlite/*` only), swapping to Turso later — once it
+reaches 1.0 with full SQLite compatibility — is low blast-radius. **Revisit at Turso 1.0.**
+
 ## Approved decisions
 
 1. **rusqlite** with the `bundled` feature (compiles SQLite from source — no system
