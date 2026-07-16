@@ -1,54 +1,57 @@
 use lambda_runtime::{service_fn, Error, LambdaEvent};
-use ltsearch::models::{SearchRequest, SearchResponse};
-use ltsearch::query_lambda::{handle_search_request, QueryLambdaError};
+use ltsearch::lambda_events::{ApiGatewayV2Request, ApiGatewayV2Response};
+use ltsearch::models::SearchRequest;
+use ltsearch::query_lambda::handle_search_request;
 use ltsearch::query_service::QueryService;
-use serde::Serialize;
 use serde_json::Value;
 use std::sync::OnceLock;
 
 static QUERY_SERVICE: OnceLock<QueryService> = OnceLock::new();
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum QueryLambdaPayload {
-    Success(SearchResponse),
-    Error(QueryLambdaError),
-}
-
-fn decode_request_payload(payload: Value) -> Result<SearchRequest, QueryLambdaPayload> {
-    serde_json::from_value(payload).map_err(|source| {
-        QueryLambdaPayload::Error(QueryLambdaError {
-            error_type: "validation_error".into(),
-            message: format!("failed to deserialize search request: {source}"),
-        })
+/// 事件 → SearchRequest：信封解析失败与 body 反序列化失败都折叠成 400 响应。
+fn decode_search_request(payload: Value) -> Result<SearchRequest, ApiGatewayV2Response> {
+    let event: ApiGatewayV2Request = serde_json::from_value(payload).map_err(|source| {
+        ApiGatewayV2Response::error(
+            "validation_error",
+            format!("failed to deserialize API Gateway event: {source}"),
+        )
+    })?;
+    let bytes = event
+        .body_bytes()
+        .map_err(|error| ApiGatewayV2Response::error("validation_error", error))?;
+    serde_json::from_slice(&bytes).map_err(|source| {
+        ApiGatewayV2Response::error(
+            "validation_error",
+            format!("failed to deserialize search request: {source}"),
+        )
     })
 }
 
-async fn function_handler(event: LambdaEvent<Value>) -> Result<QueryLambdaPayload, Error> {
+async fn function_handler(event: LambdaEvent<Value>) -> Result<ApiGatewayV2Response, Error> {
     let (payload, _) = event.into_parts();
-    let request = match decode_request_payload(payload) {
+    let request = match decode_search_request(payload) {
         Ok(request) => request,
-        Err(payload) => return Ok(payload),
+        Err(response) => return Ok(response),
     };
 
     let service = QUERY_SERVICE.get_or_init(QueryService::new);
 
     if let Err(error) = service.sync_artifacts_if_configured().await {
-        return Ok(QueryLambdaPayload::Error(QueryLambdaError {
-            error_type: "execution_error".into(),
-            message: format!("query lambda bootstrap failed: {error}"),
-        }));
+        return Ok(ApiGatewayV2Response::error(
+            "execution_error",
+            format!("query lambda bootstrap failed: {error}"),
+        ));
     }
 
-    let payload = match service.resolve_handler() {
+    let response = match service.resolve_handler() {
         Ok(handler) => match handle_search_request(handler.as_ref(), request) {
-            Ok(response) => QueryLambdaPayload::Success(response),
-            Err(error) => QueryLambdaPayload::Error(error),
+            Ok(response) => ApiGatewayV2Response::json(200, &response),
+            Err(error) => ApiGatewayV2Response::error(&error.error_type, error.message),
         },
-        Err(error) => QueryLambdaPayload::Error(error),
+        Err(error) => ApiGatewayV2Response::error(&error.error_type, error.message),
     };
 
-    Ok(payload)
+    Ok(response)
 }
 
 fn main() -> Result<(), Error> {
@@ -59,24 +62,38 @@ fn main() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn malformed_event_payload_returns_typed_error_envelope() {
-        let payload = decode_request_payload(serde_json::json!({"top_k": "wrong"}));
+    fn valid_apigw_event_decodes_search_request() {
+        let payload = json!({
+            "version": "2.0",
+            "rawPath": "/query",
+            "body": "{\"query\":\"rust retrieval\",\"top_k\":3,\"filters\":null,\"include_metadata\":true}",
+            "isBase64Encoded": false
+        });
 
-        match payload {
-            Ok(_) => panic!("expected malformed payload to return an error envelope"),
-            Err(payload) => match payload {
-                QueryLambdaPayload::Success(_) => {
-                    panic!("expected malformed payload to produce an error envelope")
-                }
-                QueryLambdaPayload::Error(error) => {
-                    assert_eq!(error.error_type, "validation_error");
-                    assert!(error
-                        .message
-                        .contains("failed to deserialize search request"));
-                }
-            },
-        }
+        let request = decode_search_request(payload).expect("valid event should decode");
+        assert_eq!(request.query, "rust retrieval");
+        assert_eq!(request.top_k, 3);
+    }
+
+    #[test]
+    fn malformed_body_returns_400_envelope() {
+        let payload = json!({"rawPath": "/query", "body": "{\"top_k\": \"wrong\"}"});
+
+        let response = decode_search_request(payload).expect_err("must produce error envelope");
+        assert_eq!(response.status_code, 400);
+        assert!(response.body.contains("validation_error"));
+        assert!(response.body.contains("failed to deserialize search request"));
+    }
+
+    #[test]
+    fn non_apigw_event_returns_400_envelope() {
+        // 直调裸 JSON（旧契约）不再被接受：信封字段类型不匹配 → 400。
+        let response = decode_search_request(json!({"body": 42}))
+            .expect_err("bare payload must be rejected");
+        assert_eq!(response.status_code, 400);
+        assert!(response.body.contains("failed to deserialize API Gateway event"));
     }
 }
