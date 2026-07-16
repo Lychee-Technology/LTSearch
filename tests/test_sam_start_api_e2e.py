@@ -24,6 +24,7 @@ class SamStartApiE2ETest(unittest.TestCase):
         self.assertIn("sam-api.pid", content)
         self.assertIn("http://localhost:3000", content)
         self.assertIn("e2e-state.json", content)
+        self.assertIn("LTSEARCH_BUILD_EMBEDDING_DIM", content)
         self.assertNotIn("host.docker.internal", content)
 
     def test_http_flow_script_runs_write_build_query(self) -> None:

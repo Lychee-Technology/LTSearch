@@ -50,6 +50,7 @@ env = {
     'BuildFunction': {
         'LTSEARCH_BUILD_S3_BUCKET': bucket,
         'LTSEARCH_BUILD_ARTIFACT_ROOT': '/tmp/ltsearch-e2e-artifacts',
+        'LTSEARCH_BUILD_EMBEDDING_DIM': '3',
         'AWS_ENDPOINT_URL_S3': moto,
     },
     'QueryFunction': {
