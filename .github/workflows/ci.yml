@@ -96,10 +96,14 @@ jobs:
           python-version: '3.x'
       - name: Build server images (stub embeddings)
         run: |
-          docker build -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=stub .
-          docker build -f sam/write_server.Dockerfile -t ltsearch-write-server:dev .
-          docker build -f sam/index_builder_server.Dockerfile -t ltsearch-index-builder-server:dev .
-          docker build -f sam/query_server.Dockerfile -t ltsearch-query-server:dev .
+          docker build --platform linux/arm64 -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=stub .
+          docker build --platform linux/arm64 -f sam/write_server.Dockerfile -t ltsearch-write-server:dev .
+          docker build --platform linux/arm64 -f sam/index_builder_server.Dockerfile -t ltsearch-index-builder-server:dev .
+          docker build --platform linux/arm64 -f sam/query_server.Dockerfile -t ltsearch-query-server:dev .
+          for img in ltsearch-write-server:dev ltsearch-index-builder-server:dev ltsearch-query-server:dev; do
+            arch=$(docker inspect --format '{{.Architecture}}' "$img")
+            [ "$arch" = arm64 ] || { echo "::error::$img is $arch, expected arm64"; exit 1; }
+          done
       - name: Run HTTP flow
         run: |
           docker compose -f docker-compose.http.yml up -d --wait
@@ -118,7 +122,10 @@ jobs:
         with:
           python-version: '3.x'
       - name: Build single local image (self-contained, AWS-free)
-        run: docker build -f sam/local.Dockerfile -t ltsearch-local:dev .
+        run: |
+          docker build --platform linux/arm64 -f sam/local.Dockerfile -t ltsearch-local:dev .
+          arch=$(docker inspect --format '{{.Architecture}}' ltsearch-local:dev)
+          [ "$arch" = arm64 ] || { echo "::error::ltsearch-local:dev is $arch, expected arm64"; exit 1; }
       - name: Run moto-free restart flow
         run: |
           docker compose -f docker-compose.local.yml up -d --wait

@@ -22,6 +22,7 @@ BUILDER_LOG="$E2E_OUTPUT_DIR/ltsearch-builder.log"
 BUILDER_DOCKER_EVENTS_LOG="$E2E_OUTPUT_DIR/ltsearch-builder-docker-events.log"
 run_with_heartbeat "docker build ltsearch-e2e-builder" "$BUILDER_LOG" "$BUILDER_DOCKER_EVENTS_LOG" \
   env DOCKER_BUILDKIT=1 docker build \
+    --platform linux/arm64 \
     --tag ltsearch-e2e-builder \
     --file "$REPO_ROOT/sam/builder.Dockerfile" \
     "$REPO_ROOT"
@@ -131,6 +132,7 @@ if [[ "${LTSEARCH_E2E_LTEMBED:-}" == "true" ]]; then
   LTEMBED_BUILDER_DOCKER_EVENTS_LOG="$E2E_OUTPUT_DIR/ltsearch-builder-ltembed-docker-events.log"
   run_with_heartbeat "docker build ltsearch-e2e-builder (ltembed)" "$LTEMBED_BUILDER_LOG" "$LTEMBED_BUILDER_DOCKER_EVENTS_LOG" \
     env DOCKER_BUILDKIT=1 docker build \
+      --platform linux/arm64 \
       --build-arg LTEMBED_MODE=real \
       --build-arg "LTEMBED_BUNDLE_URL=${LTEMBED_BUNDLE_URL}" \
       --tag ltsearch-e2e-builder \

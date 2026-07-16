@@ -24,12 +24,12 @@ jobs:
           git clone https://github.com/Lychee-Technology/LTEmbed .sam-local-deps/LTEmbed
           git -C .sam-local-deps/LTEmbed checkout "$LTEMBED_REV"
       - name: Build builder image (real embeddings, arm64)
-        run: docker build -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=real .
+        run: docker build --platform linux/arm64 -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=real .
       - name: Build server images
         run: |
-          docker build -f sam/query_server.Dockerfile -t ghcr.io/lychee-technology/ltsearch-query-server:latest .
-          docker build -f sam/write_server.Dockerfile -t ghcr.io/lychee-technology/ltsearch-write-server:latest .
-          docker build -f sam/index_builder_server.Dockerfile -t ghcr.io/lychee-technology/ltsearch-index-builder-server:latest .
+          docker build --platform linux/arm64 -f sam/query_server.Dockerfile -t ghcr.io/lychee-technology/ltsearch-query-server:latest .
+          docker build --platform linux/arm64 -f sam/write_server.Dockerfile -t ghcr.io/lychee-technology/ltsearch-write-server:latest .
+          docker build --platform linux/arm64 -f sam/index_builder_server.Dockerfile -t ghcr.io/lychee-technology/ltsearch-index-builder-server:latest .
       - name: Login GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Tag with sha and push

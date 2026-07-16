@@ -607,7 +607,8 @@ Model files are too large for Lambda Layers and impractical to download at cold-
 Build flow:
 
 ```
-docker build --build-arg LTEMBED_MODE=real \
+docker build --platform linux/arm64 \
+             --build-arg LTEMBED_MODE=real \
              --build-arg LTEMBED_BUNDLE_URL=<ort-bundle tarball> \
              sam/builder.Dockerfile
   → downloads and unpacks the bundle into /ltembed-assets/
