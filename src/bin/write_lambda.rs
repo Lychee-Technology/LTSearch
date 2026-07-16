@@ -2,38 +2,67 @@ use lambda_runtime::{service_fn, Error, LambdaEvent};
 use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::adapters::sqs_build_queue::AwsSqsBuildQueue;
 use ltsearch::bootstrap::{s3_client_from_env, sqs_client_from_env, WriteConfig};
+use ltsearch::lambda_events::{ApiGatewayV2Request, ApiGatewayV2Response};
 use ltsearch::write::api::WriteApi;
 use ltsearch::write::wal::WriteAheadLog;
-use ltsearch::write_lambda::{handle_write_request, WriteLambdaError, WriteRequest, WriteResponse};
-use serde::Serialize;
+use ltsearch::write_lambda::{handle_write_request, WriteRequest};
+use serde::Deserialize;
 use serde_json::Value;
 
 type ProdWriteApi = WriteApi<AwsS3WalStorage, AwsSqsBuildQueue>;
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum WriteLambdaPayload {
-    Success(WriteResponse),
-    Error(WriteLambdaError),
+/// `/delete` 的请求体（与 `src/http/write.rs` 的 `DeleteBody` 同构）。
+#[derive(Debug, Deserialize)]
+struct DeleteBody {
+    doc_ids: Vec<String>,
 }
 
-fn decode_request_payload(payload: Value) -> Result<WriteRequest, WriteLambdaPayload> {
-    serde_json::from_value(payload).map_err(|source| {
-        WriteLambdaPayload::Error(WriteLambdaError {
-            error_type: "validation_error".into(),
-            message: format!("failed to deserialize write request: {source}"),
+/// 事件 → WriteRequest：按 rawPath 分派 `/write`（tagged WriteRequest）与
+/// `/delete`（doc_ids 包装为 Delete），与 HTTP 服务模式的双路由契约对齐。
+fn decode_write_request(payload: Value) -> Result<WriteRequest, ApiGatewayV2Response> {
+    let event: ApiGatewayV2Request = serde_json::from_value(payload).map_err(|source| {
+        ApiGatewayV2Response::error(
+            "validation_error",
+            format!("failed to deserialize API Gateway event: {source}"),
+        )
+    })?;
+    let bytes = event
+        .body_bytes()
+        .map_err(|error| ApiGatewayV2Response::error("validation_error", error))?;
+
+    if event.raw_path.ends_with("/delete") {
+        let body: DeleteBody = serde_json::from_slice(&bytes).map_err(|source| {
+            ApiGatewayV2Response::error(
+                "validation_error",
+                format!("failed to deserialize delete request: {source}"),
+            )
+        })?;
+        Ok(WriteRequest::Delete {
+            doc_ids: body.doc_ids,
         })
-    })
+    } else if event.raw_path.ends_with("/write") {
+        serde_json::from_slice(&bytes).map_err(|source| {
+            ApiGatewayV2Response::error(
+                "validation_error",
+                format!("failed to deserialize write request: {source}"),
+            )
+        })
+    } else {
+        Err(ApiGatewayV2Response::error(
+            "not_found",
+            format!("unsupported path: {}", event.raw_path),
+        ))
+    }
 }
 
 async fn function_handler(
     write_api: ProdWriteApi,
     event: LambdaEvent<Value>,
-) -> Result<WriteLambdaPayload, Error> {
+) -> Result<ApiGatewayV2Response, Error> {
     let (payload, _) = event.into_parts();
-    let request = match decode_request_payload(payload) {
+    let request = match decode_write_request(payload) {
         Ok(request) => request,
-        Err(payload) => return Ok(payload),
+        Err(response) => return Ok(response),
     };
 
     let result = handle_write_request(
@@ -43,12 +72,12 @@ async fn function_handler(
     )
     .await;
 
-    let payload = match result {
-        Ok(response) => WriteLambdaPayload::Success(response),
-        Err(error) => WriteLambdaPayload::Error(error),
+    let response = match result {
+        Ok(response) => ApiGatewayV2Response::json(200, &response),
+        Err(error) => ApiGatewayV2Response::error(&error.error_type, error.message),
     };
 
-    Ok(payload)
+    Ok(response)
 }
 
 fn main() -> Result<(), Error> {
@@ -73,25 +102,52 @@ fn main() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn malformed_event_payload_returns_typed_error_envelope() {
-        let payload =
-            decode_request_payload(serde_json::json!({"operation":"ingest","documents":"wrong"}));
+    fn write_path_decodes_tagged_ingest_request() {
+        let payload = json!({
+            "rawPath": "/write",
+            "body": "{\"operation\":\"ingest\",\"documents\":[{\"doc_id\":\"d1\",\"text\":\"hello\",\"metadata\":{},\"timestamp\":1700000000100}]}"
+        });
 
-        match payload {
-            Ok(_) => panic!("expected malformed payload to return an error envelope"),
-            Err(payload) => match payload {
-                WriteLambdaPayload::Success(_) => {
-                    panic!("expected malformed payload to produce an error envelope")
-                }
-                WriteLambdaPayload::Error(error) => {
-                    assert_eq!(error.error_type, "validation_error");
-                    assert!(error
-                        .message
-                        .contains("failed to deserialize write request"));
-                }
-            },
+        match decode_write_request(payload).expect("valid write event should decode") {
+            WriteRequest::Ingest { documents } => assert_eq!(documents.len(), 1),
+            other => panic!("expected Ingest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn delete_path_wraps_doc_ids() {
+        let payload = json!({
+            "rawPath": "/delete",
+            "body": "{\"doc_ids\":[\"d1\",\"d2\"]}"
+        });
+
+        match decode_write_request(payload).expect("valid delete event should decode") {
+            WriteRequest::Delete { doc_ids } => assert_eq!(doc_ids, vec!["d1", "d2"]),
+            other => panic!("expected Delete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_body_returns_400_envelope() {
+        let payload = json!({
+            "rawPath": "/write",
+            "body": "{\"operation\":\"ingest\",\"documents\":\"wrong\"}"
+        });
+
+        let response = decode_write_request(payload).expect_err("must produce error envelope");
+        assert_eq!(response.status_code, 400);
+        assert!(response.body.contains("failed to deserialize write request"));
+    }
+
+    #[test]
+    fn unknown_path_returns_404_envelope() {
+        let payload = json!({"rawPath": "/nope", "body": "{}"});
+
+        let response = decode_write_request(payload).expect_err("must produce error envelope");
+        assert_eq!(response.status_code, 404);
+        assert!(response.body.contains("not_found"));
     }
 }
