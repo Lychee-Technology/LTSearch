@@ -1,174 +1,64 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+//! SQS 触发的 index builder lambda：每条记录即写路径入队的 `QueueBatch`，复用
+//! build worker 的 `process_queue_message`（list 全部 WAL 段 → head 分配版本 →
+//! run_build，CAS 冲突重试一次）。失败记录以 partial-batch failure 报告，由
+//! Lambda event source mapping 决定重投/进 DLQ——本进程绝不手动删消息。
+
+use std::sync::Arc;
 
 use lambda_runtime::{service_fn, Error, LambdaEvent};
 use ltsearch::adapters::s3_publish::AwsPublishStorage;
-use ltsearch::adapters::s3_wal::AwsS3WalStorage;
-use ltsearch::bootstrap::{
-    build_embedding_generator_from_env, build_embedding_provider_from_env, s3_client_from_env,
-    BuildConfig,
+use ltsearch::aws_wiring::{
+    build_closure, build_embedding_probe, list_wal_keys_closure, publish_closure,
 };
-use ltsearch::build_lambda::{handle_build_request, BuildLambdaError, BuildRequest, BuildResponse};
-use ltsearch::error::IndexError;
-use ltsearch::indexing::{BuildIndexRequest, LocalIndexBuilder};
-use ltsearch::indexing::{IndexPublisher, PublishRequest};
-use ltsearch::write::WriteAheadLog;
-use serde::Serialize;
+use ltsearch::bootstrap::{s3_client_from_env, BuildConfig};
+use ltsearch::build_worker::{process_queue_message, ListWalKeysFn};
+use ltsearch::http::build::BuildServerState;
+use ltsearch::lambda_events::{process_sqs_records, SqsBatchResponse, SqsEvent, SqsRecord};
 use serde_json::Value;
 
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum BuildLambdaPayload {
-    Success(BuildResponse),
-    Error(BuildLambdaError),
-}
-
-fn decode_request_payload(payload: Value) -> Result<BuildRequest, BuildLambdaPayload> {
-    serde_json::from_value(payload).map_err(|source| {
-        BuildLambdaPayload::Error(BuildLambdaError {
-            error_type: "validation_error".into(),
-            message: format!("failed to deserialize build request: {source}"),
-        })
-    })
-}
-
-#[derive(Clone)]
-struct BuildState {
-    config: BuildConfig,
-    s3_client: aws_sdk_s3::Client,
-}
-
 async fn function_handler(
-    state: BuildState,
+    state: &BuildServerState,
+    storage: &AwsPublishStorage,
+    list_wal_keys: &ListWalKeysFn,
     event: LambdaEvent<Value>,
-) -> Result<BuildLambdaPayload, Error> {
+) -> Result<SqsBatchResponse, Error> {
     let (payload, _) = event.into_parts();
-    let request = match decode_request_payload(payload) {
-        Ok(request) => request,
-        Err(payload) => return Ok(payload),
-    };
+    // 信封本身解析失败 = 非 SQS 触发的异常调用：整批报错，交给重投策略。
+    let sqs_event: SqsEvent = serde_json::from_value(payload)
+        .map_err(|source| Error::from(format!("failed to deserialize SQS event: {source}")))?;
 
-    let result = handle_build_request(
-        async |request: BuildRequest| {
-            let wal_storage =
-                AwsS3WalStorage::new(state.config.s3_bucket.clone(), state.s3_client.clone());
-            let wal = WriteAheadLog::new(wal_storage);
-            let records =
-                wal.read(&request.wal_key)
-                    .await
-                    .map_err(|error| IndexError::Operation {
-                        message: format!("failed to read WAL records: {error}"),
-                    })?;
-
-            let provider =
-                build_embedding_provider_from_env().map_err(|error| IndexError::Operation {
-                    message: error.to_string(),
-                })?;
-            let embedding_generator =
-                build_embedding_generator_from_env(provider).map_err(|error| {
-                    IndexError::Operation {
-                        message: error.to_string(),
-                    }
-                })?;
-
-            // The build is sync + CPU-heavy, so run it off the async runtime.
-            let builder = LocalIndexBuilder::new(&state.config.artifact_root, embedding_generator);
-            let build_request = BuildIndexRequest {
-                version_id: request.version_id,
-                created_at: current_time_millis(),
-                embedding_dim: request.embedding_dim,
-                records,
-            };
-            tokio::task::spawn_blocking(move || builder.build(&build_request))
-                .await
-                .map_err(|error| IndexError::Operation {
-                    message: format!("build task panicked: {error}"),
-                })?
-        },
-        async |manifest| {
-            let publish_storage =
-                AwsPublishStorage::new(state.config.s3_bucket.clone(), state.s3_client.clone());
-            let publisher = IndexPublisher::new(&state.config.artifact_root, publish_storage);
-            publisher
-                .publish(&PublishRequest {
-                    manifest,
-                    expected_current_version: None,
-                    updated_at: current_time_millis(),
-                })
-                .await
-        },
-        request,
-    )
+    let response = process_sqs_records(sqs_event, async |record: &SqsRecord| {
+        process_queue_message(state, storage, list_wal_keys, &record.body)
+            .await
+            .map(|version_id| {
+                eprintln!("index builder lambda: published index version {version_id}");
+            })
+    })
     .await;
 
-    let payload = match result {
-        Ok(response) => BuildLambdaPayload::Success(response),
-        Err(error) => BuildLambdaPayload::Error(error),
-    };
-
-    Ok(payload)
-}
-
-fn current_time_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as i64)
-        .unwrap_or_default()
+    Ok(response)
 }
 
 fn main() -> Result<(), Error> {
     tokio::runtime::Runtime::new()?.block_on(async {
         let config = BuildConfig::from_env()?;
         let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-        let state = BuildState {
-            config,
-            s3_client: s3_client_from_env(&sdk_config),
+        let s3_client = s3_client_from_env(&sdk_config);
+
+        let state = BuildServerState {
+            build: build_closure(config.clone(), s3_client.clone()),
+            publish: publish_closure(config.clone(), s3_client.clone()),
+            embedding_probe: Arc::new(build_embedding_probe()),
         };
+        let storage = AwsPublishStorage::new(config.s3_bucket.clone(), s3_client.clone());
+        let list_wal_keys = list_wal_keys_closure(config.s3_bucket.clone(), s3_client.clone());
 
         lambda_runtime::run(service_fn(move |event| {
             let state = state.clone();
-            async move { function_handler(state, event).await }
+            let storage = storage.clone();
+            let list_wal_keys = list_wal_keys.clone();
+            async move { function_handler(&state, &storage, &list_wal_keys, event).await }
         }))
         .await
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn malformed_event_payload_returns_typed_error_envelope() {
-        let payload = decode_request_payload(serde_json::json!({"version_id": "wrong"}));
-
-        match payload {
-            Ok(_) => panic!("expected malformed payload to return an error envelope"),
-            Err(payload) => match payload {
-                BuildLambdaPayload::Success(_) => {
-                    panic!("expected malformed payload to produce an error envelope")
-                }
-                BuildLambdaPayload::Error(error) => {
-                    assert_eq!(error.error_type, "validation_error");
-                    assert!(error
-                        .message
-                        .contains("failed to deserialize build request"));
-                }
-            },
-        }
-    }
-
-    #[test]
-    fn valid_build_request_deserializes_correctly() {
-        let payload = serde_json::json!({
-            "batch_id": "batch-abc",
-            "wal_key": "wal/2026/03/19/batch-abc.jsonl",
-            "version_id": 1,
-            "embedding_dim": 3,
-        });
-
-        let request = decode_request_payload(payload).expect("expected valid request to decode");
-        assert_eq!(request.batch_id, "batch-abc");
-        assert_eq!(request.wal_key, "wal/2026/03/19/batch-abc.jsonl");
-        assert_eq!(request.version_id, 1);
-        assert_eq!(request.embedding_dim, 3);
-    }
 }
