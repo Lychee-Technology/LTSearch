@@ -69,6 +69,13 @@ http-body-util = "0.1"
 [lib]
 path = "src/lib.rs"
 
+# 单二进制本地入口（#124）：组合根用 SQLite durability，因此需要完整的 local
+# feature（server 只带 axum，不带 rusqlite）。
+[[bin]]
+name = "ltsearch"
+path = "src/bin/ltsearch.rs"
+required-features = ["local"]
+
 [[bin]]
 name = "turbo_index_builder"
 path = "src/bin/turbo_index_builder.rs"

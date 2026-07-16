@@ -1,0 +1,55 @@
+# 单镜像本地（AWS-free）端到端拓扑（#125）：同一个 ltsearch-local:dev 镜像跑
+# write / build / query 三个角色（仅 command: 不同），共享一个命名卷承载 SQLite
+# 控制面（ltsearch.db：耐久事件 / 构建队列 / 活跃指针）与不可变制品
+# （lance/、index/、版本 manifest）。无 moto、无 aws-init、无任何 AWS 环境变量。
+# 重启语义：`down`（不带 -v）保留卷 → `up` 后 query 仍服务已建版本、builder 仍
+# 能从持久化队列继续消费（见 scripts/e2e/run-local-image-flow.sh）。
+services:
+  write:
+    image: ltsearch-local:dev
+    command: ["write"]
+    environment: &localenv
+      LTSEARCH_LOCAL_ROOT: /var/lib/ltsearch
+      LTSEARCH_BUILD_EMBEDDING_PROVIDER: fixed
+      LTSEARCH_BUILD_FIXED_EMBEDDING: "0.1,0.2,0.3"
+      LTSEARCH_BUILD_EMBEDDING_DIM: "3"
+      LTSEARCH_QUERY_EMBEDDING_PROVIDER: fixed
+      LTSEARCH_QUERY_FIXED_EMBEDDING: "0.1,0.2,0.3"
+    volumes:
+      - ltsearch-data:/var/lib/ltsearch
+    ports:
+      - "127.0.0.1:19081:8080" # 仅供本仓库冒烟脚本
+    healthcheck: &hc
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [ltsearch-local]
+
+  build:
+    image: ltsearch-local:dev
+    command: ["build"]
+    environment: *localenv
+    volumes:
+      - ltsearch-data:/var/lib/ltsearch
+    healthcheck: *hc
+    networks: [ltsearch-local]
+
+  query:
+    image: ltsearch-local:dev
+    command: ["query"]
+    environment: *localenv
+    volumes:
+      - ltsearch-data:/var/lib/ltsearch
+    ports:
+      - "127.0.0.1:19080:8080" # 仅供本仓库冒烟脚本
+    healthcheck: *hc
+    networks: [ltsearch-local]
+
+volumes:
+  ltsearch-data:
+    name: ltsearch-local-data
+
+networks:
+  ltsearch-local:
+    name: ltsearch-local

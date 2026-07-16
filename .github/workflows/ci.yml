@@ -107,3 +107,24 @@ jobs:
       - name: Teardown
         if: always()
         run: docker compose -f docker-compose.http.yml down -v
+
+  local-image-e2e:
+    needs: integration
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Build single local image (stub embeddings, AWS-free)
+        run: |
+          docker build -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=stub .
+          docker build -f sam/local.Dockerfile -t ltsearch-local:dev .
+      - name: Run moto-free restart flow
+        run: |
+          docker compose -f docker-compose.local.yml up -d --wait
+          bash scripts/e2e/run-local-image-flow.sh
+      - name: Teardown
+        if: always()
+        run: docker compose -f docker-compose.local.yml down -v

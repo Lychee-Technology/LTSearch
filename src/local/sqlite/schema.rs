@@ -10,9 +10,11 @@ const BUSY_TIMEOUT_MS: u64 = 5_000;
 
 /// 幂等地初始化 pragma 与全部表。可对同一连接重复调用。
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
+    // busy_timeout 必须最先设置：三个角色进程并发启动、同时切 WAL 模式/建表时，
+    // 后到者要等待而非立刻 SQLITE_BUSY 失败（首启竞态，见 #124 原生 e2e）。
+    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
     // journal_mode=WAL 返回结果行，必须用 query_row 读走，不能用 execute。
     let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS wal_segments (
             segment_key TEXT PRIMARY KEY,

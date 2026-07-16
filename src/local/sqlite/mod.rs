@@ -23,6 +23,16 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
+/// busy/locked 判定：并发初始化的可重试错误码。
+fn is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == rusqlite::ErrorCode::DatabaseBusy
+                || failure.code == rusqlite::ErrorCode::DatabaseLocked
+    )
+}
+
 /// 共享的 SQLite 连接句柄。`Clone` 后所有副本共用同一把锁与连接，满足
 /// `WalStorage`/`BuildQueue`/`PublishStorage` 的 `Clone + Send + Sync + 'static`
 /// 约束，并让多个契约实现落到同一事务边界内。
@@ -33,9 +43,23 @@ pub struct SqliteDb {
 
 impl SqliteDb {
     /// 打开（或创建）`path` 处的数据库，设置 WAL 模式并幂等建表。
+    ///
+    /// 首启竞态：三个角色进程同时启动、同时切 WAL 模式/建表时，`journal_mode=WAL`
+    /// 需要独占访问，可能绕过 busy_timeout 直接返回 busy/locked。`init` 幂等，
+    /// 因此这里做有界重试（100ms × 50 ≈ 5s），后到者等先到者初始化完成。
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
-        schema::init(&conn)?;
+        let mut attempts = 0;
+        loop {
+            match schema::init(&conn) {
+                Ok(()) => break,
+                Err(error) if is_busy(&error) && attempts < 50 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(error) => return Err(error),
+            }
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })

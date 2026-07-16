@@ -24,7 +24,14 @@ class CiWorkflowTest(unittest.TestCase):
         jobs = self._parse_jobs(lines)
         self.assertEqual(
             set(jobs.keys()),
-            {"fast", "feature-matrix", "integration", "sam-e2e", "http-e2e"},
+            {
+                "fast",
+                "feature-matrix",
+                "integration",
+                "sam-e2e",
+                "http-e2e",
+                "local-image-e2e",
+            },
         )
 
         fast = jobs["fast"]
@@ -135,6 +142,34 @@ class CiWorkflowTest(unittest.TestCase):
             "if: always()\n        run: docker compose -f docker-compose.http.yml down -v",
             http_e2e,
         )
+
+        # 单镜像 SQLite 本地链路（#125）：moto-free、无 awscli/sam，一个镜像三个
+        # 角色 + 保留卷重启断言（在 run-local-image-flow.sh 内）。
+        local_image_e2e = jobs["local-image-e2e"]
+        self.assertIn("needs: integration", local_image_e2e)
+        self.assertIn("runs-on: ubuntu-24.04-arm", local_image_e2e)
+        self.assertIn("timeout-minutes: 120", local_image_e2e)
+        self.assertIn("uses: actions/checkout@v6", local_image_e2e)
+        self.assertIn("uses: actions/setup-python@v6", local_image_e2e)
+        self.assertIn(
+            "docker build -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=stub .",
+            local_image_e2e,
+        )
+        self.assertIn(
+            "docker build -f sam/local.Dockerfile -t ltsearch-local:dev .",
+            local_image_e2e,
+        )
+        self.assertIn(
+            "docker compose -f docker-compose.local.yml up -d --wait", local_image_e2e
+        )
+        self.assertIn("bash scripts/e2e/run-local-image-flow.sh", local_image_e2e)
+        self.assertIn(
+            "if: always()\n        run: docker compose -f docker-compose.local.yml down -v",
+            local_image_e2e,
+        )
+        # moto-free：本作业不得触碰 moto compose，也不装 awscli/sam。
+        self.assertNotIn("docker-compose.moto.yml", local_image_e2e)
+        self.assertNotIn("awscli", local_image_e2e)
 
     def _parse_jobs(self, lines: list[str]) -> dict[str, str]:
         jobs: dict[str, list[str]] = {}
