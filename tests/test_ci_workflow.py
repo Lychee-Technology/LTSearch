@@ -89,6 +89,9 @@ class CiWorkflowTest(unittest.TestCase):
             "--bin query_lambda --bin write_lambda --bin index_builder_lambda",
             feature_matrix,
         )
+        self.assertIn(
+            "cargo test --no-default-features --features lambda --bins", feature_matrix
+        )
 
         integration = jobs["integration"]
         self.assertIn("runs-on: ubuntu-24.04-arm", integration)
