@@ -1,5 +1,7 @@
 #[cfg(feature = "aws")]
 pub mod adapters;
+#[cfg(feature = "local")]
+pub mod app;
 pub mod bootstrap;
 pub mod build_lambda;
 pub mod build_worker;

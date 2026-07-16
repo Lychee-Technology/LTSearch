@@ -65,11 +65,36 @@ pub fn bootstrap_query_handler_for_version_from_env(
     }
 }
 
+/// 按制品根选择活跃版本的真源：本地 profile 下若 `<root>/ltsearch.db` 存在，
+/// 活跃指针活在 SQLite 的 `active_head` 行（`index/_head` 文件已随 #123 退役），
+/// 用 `SqliteManifestStore`；否则（AWS 路径把 `_head` 从 S3 同步成文件、或纯文件
+/// 部署）回落到文件版 `LocalManifestStore`。按库文件是否存在做运行时分发，AWS
+/// 行为逐字不变。
+fn manifest_store_for(artifact_root: &Path) -> Result<Box<dyn ManifestStore>, QueryLambdaError> {
+    #[cfg(feature = "local")]
+    {
+        let db_path = artifact_root.join("ltsearch.db");
+        if db_path.exists() {
+            let db = crate::local::SqliteDb::open(&db_path).map_err(|error| {
+                bootstrap_error(format!(
+                    "failed to open local control-plane db {}: {error}",
+                    db_path.display()
+                ))
+            })?;
+            return Ok(Box::new(crate::local::SqliteManifestStore::new(
+                db,
+                artifact_root,
+            )));
+        }
+    }
+    Ok(Box::new(LocalManifestStore::new(artifact_root)))
+}
+
 pub fn load_active_query_version_from_env() -> Result<u64, QueryLambdaError> {
     let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
         .map(PathBuf::from)
         .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_ARTIFACT_ROOT"))?;
-    let manifest_store = LocalManifestStore::new(&artifact_root);
+    let manifest_store = manifest_store_for(&artifact_root)?;
 
     manifest_store
         .load_active_version()
@@ -83,7 +108,7 @@ pub fn load_active_query_version_from_env_opt() -> Result<Option<u64>, QueryLamb
     let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
         .map(PathBuf::from)
         .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_ARTIFACT_ROOT"))?;
-    let manifest_store = LocalManifestStore::new(&artifact_root);
+    let manifest_store = manifest_store_for(&artifact_root)?;
 
     match manifest_store.load_active_version() {
         Ok(version) => Ok(Some(version)),
@@ -122,7 +147,7 @@ fn bootstrap_query_embedding_handler(
     let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
         .map(PathBuf::from)
         .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_ARTIFACT_ROOT"))?;
-    let manifest_store = LocalManifestStore::new(&artifact_root);
+    let manifest_store = manifest_store_for(&artifact_root)?;
     let active_manifest = manifest_store
         .load_active_manifest()
         .map_err(|source| bootstrap_error(format!("failed to load active manifest: {source}")))?;

@@ -45,6 +45,37 @@ impl WriteConfig {
     }
 }
 
+/// Local（AWS-free）profile 的统一配置：单一 `LTSEARCH_LOCAL_ROOT` 派生 WAL 段、
+/// 制品目录与 `ltsearch.db`（三者同居一个共享卷，见 #108）。write / build / query
+/// 三个子命令共用它，因此本地部署只需要一个必填目录变量。
+#[cfg(feature = "local")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalConfig {
+    pub root: std::path::PathBuf,
+}
+
+#[cfg(feature = "local")]
+impl LocalConfig {
+    pub fn from_env() -> Result<Self, BootstrapError> {
+        Ok(Self {
+            root: required_env("LTSEARCH_LOCAL_ROOT")?.into(),
+        })
+    }
+
+    /// 控制面数据库（耐久事件 / 构建队列 / 活跃指针）的固定位置。
+    pub fn db_path(&self) -> std::path::PathBuf {
+        self.root.join("ltsearch.db")
+    }
+
+    /// builder 的暂存根。必须与发布目的地（`root` 本身）分离：`LocalIndexBuilder`
+    /// 在暂存根内生成 `lance/…`、`index/…` 后，`IndexPublisher` 以 CreateOnly 语义
+    /// 拷入 `root`——若两者同路径，发布方会撞上自己刚生成的目录（对齐 AWS 侧
+    /// 「本地 /tmp 暂存 → S3 上传」的两级结构）。
+    pub fn staging_dir(&self) -> std::path::PathBuf {
+        self.root.join("staging")
+    }
+}
+
 /// Configuration for the index-builder Lambda.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildConfig {
@@ -240,6 +271,31 @@ mod tests {
         assert_eq!(config.artifact_root, "/tmp/ltsearch");
 
         std::env::remove_var("LTSEARCH_BUILD_S3_BUCKET");
+    }
+
+    #[cfg(feature = "local")]
+    #[test]
+    fn local_config_requires_root_and_derives_db_path() {
+        let _guard = env_guard();
+        std::env::remove_var("LTSEARCH_LOCAL_ROOT");
+
+        let error = LocalConfig::from_env().unwrap_err();
+        assert_eq!(
+            error,
+            BootstrapError::MissingEnv {
+                name: "LTSEARCH_LOCAL_ROOT"
+            }
+        );
+
+        std::env::set_var("LTSEARCH_LOCAL_ROOT", "/var/lib/ltsearch");
+        let config = LocalConfig::from_env().unwrap();
+        assert_eq!(config.root, std::path::PathBuf::from("/var/lib/ltsearch"));
+        assert_eq!(
+            config.db_path(),
+            std::path::PathBuf::from("/var/lib/ltsearch/ltsearch.db")
+        );
+
+        std::env::remove_var("LTSEARCH_LOCAL_ROOT");
     }
 
     #[cfg(feature = "ltembed")]
