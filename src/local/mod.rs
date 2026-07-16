@@ -6,8 +6,15 @@ pub mod fs_build_queue;
 pub mod fs_publish;
 pub mod fs_wal;
 pub mod noop_sync;
+#[cfg(feature = "local")]
+pub mod sqlite;
 
 pub use fs_build_queue::LocalFsBuildQueue;
 pub use fs_publish::LocalFsPublishStorage;
 pub use fs_wal::LocalFsWalStorage;
 pub use noop_sync::NoopArtifactSync;
+#[cfg(feature = "local")]
+pub use sqlite::{
+    LocalPublishStorage, SqliteBuildJobSource, SqliteBuildQueue, SqliteDb, SqliteManifestStore,
+    SqliteWalStorage,
+};

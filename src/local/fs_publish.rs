@@ -35,7 +35,7 @@ impl LocalFsPublishStorage {
     }
 }
 
-fn etag_of(bytes: &[u8]) -> String {
+pub(crate) fn etag_of(bytes: &[u8]) -> String {
     // FNV-1a 64-bit: 稳定、无依赖，仅作本地 CAS 身份用途，非加密强度。
     let mut hash: u64 = 0xcbf29ce484222325;
     for &byte in bytes {

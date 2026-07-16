@@ -98,4 +98,26 @@ mod tests {
         queue.ack(&jobs[0]).await.unwrap();
         assert!(queue.receive().await.unwrap().is_empty());
     }
+
+    #[tokio::test]
+    async fn nack_defaults_to_ack() {
+        // 回归保护：BuildJobSource::nack 的默认实现等价于 ack，本地/AWS 侧失败照常删除，
+        // 行为与新增 nack 契约前逐字一致。
+        let dir = tempfile::tempdir().unwrap();
+        let queue = LocalFsBuildQueue::new(dir.path());
+        queue
+            .enqueue(QueueBatch {
+                batch_id: "batch-1".to_string(),
+                wal_key: "wal/2026/07/14/batch-1.jsonl".to_string(),
+                accepted_count: 1,
+                wal_event_ids: vec!["evt-1".to_string()],
+            })
+            .await
+            .unwrap();
+        let jobs = queue.receive().await.unwrap();
+
+        queue.nack(&jobs[0], "boom").await.unwrap();
+
+        assert!(queue.receive().await.unwrap().is_empty());
+    }
 }

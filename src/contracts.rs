@@ -30,8 +30,16 @@ pub struct BuildJob {
 pub trait BuildJobSource: Send + Sync {
     /// 拉取零个或多个待处理作业（长轮询实现可阻塞至超时）。
     async fn receive(&self) -> Result<Vec<BuildJob>, String>;
-    /// 处理完成后确认（删除）一条作业，无论处理成功与否都应调用。
+    /// 处理成功后确认（删除）一条作业。
     async fn ack(&self, job: &BuildJob) -> Result<(), String>;
+    /// 处理失败后的否定确认。默认实现等价于 `ack`——现有实现
+    /// （`LocalFsBuildQueue`、`SqsBuildJobSource`）本就不做毒消息隔离、失败照常删除，
+    /// 因此默认行为与改造前逐字一致。`SqliteBuildJobSource` override 它以实现重试退避
+    /// 与死信（dead-letter）。`error` 供实现落盘诊断信息。
+    async fn nack(&self, job: &BuildJob, error: &str) -> Result<(), String> {
+        let _ = error;
+        self.ack(job).await
+    }
 }
 
 /// 查询侧制品访问契约：把活跃版本所需的 index/lance/static 制品同步到本地

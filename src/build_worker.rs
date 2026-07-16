@@ -151,8 +151,10 @@ pub async fn run_build_job_loop<C: BuildJobSource, S: PublishStorage>(
 }
 
 /// 有界的一趟：`receive` → 逐条 `process_queue_message` → **无论成败都 `ack`**，
-/// 返回已 ack 的作业数。`ack` 永远执行（本地单用户不做毒消息隔离）是 load-bearing
-/// 不变式：处理失败仅落 stderr，作业照常确认。`receive` 失败时退避 5s 并返回 0。
+/// 返回已成功「结算」（ack 或 nack 均视为一次成功结算）的作业数。成功发布则 `ack`
+/// 删除；处理失败则 `nack`，由 [`BuildJobSource`] 决定后续——SQLite 实现做退避重试与
+/// 死信，AWS/local-fs 的默认 `nack` 等价于 `ack`（失败照常删除），因此对 AWS 侧行为
+/// 逐字不变。`receive` 失败时退避 5s 并返回 0。
 pub async fn run_build_job_loop_once<C: BuildJobSource, S: PublishStorage>(
     source: &C,
     state: &BuildServerState,
@@ -168,28 +170,28 @@ pub async fn run_build_job_loop_once<C: BuildJobSource, S: PublishStorage>(
         }
     };
 
-    let mut acked = 0;
+    let mut settled = 0;
     for job in jobs {
-        match process_queue_message(state, storage, list_wal_keys, &job.body).await {
+        let outcome = process_queue_message(state, storage, list_wal_keys, &job.body).await;
+        let signal = match outcome {
             Ok(version_id) => {
                 eprintln!("build worker: published index version {version_id}");
+                source.ack(&job).await
             }
             Err(error) => {
-                // 本地单用户场景不做毒消息隔离：记录完整失败详情后照常 ack。
-                eprintln!(
-                    "build worker: message processing failed (job acked after logging): {error}"
-                );
+                // 处理失败：交给作业源决定重试/死信（SQLite 退避+DLQ；AWS/local-fs
+                // 的默认 nack 即 ack，失败照常删除）。完整错误详情落 stderr。
+                eprintln!("build worker: message processing failed, nacking: {error}");
+                source.nack(&job, &error).await
             }
-        }
-
-        // 不变式：无论处理成败都 ack。
-        if let Err(error) = source.ack(&job).await {
-            eprintln!("build worker: ack failed: {error}");
+        };
+        if let Err(error) = signal {
+            eprintln!("build worker: outcome signaling failed: {error}");
         } else {
-            acked += 1;
+            settled += 1;
         }
     }
-    acked
+    settled
 }
 
 /// SQS worker 的薄封装：保持原公开签名（bin 侧无需改动），构造
