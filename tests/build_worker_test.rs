@@ -64,10 +64,12 @@ impl PublishStorage for StubHeadStorage {
 }
 
 /// 内存 `BuildJobSource`：`receive` 一次性吐出预置作业，之后为空（保证 `_once`
-/// 有界终止）；`ack` 记录被确认的作业，供断言「无论处理成败都确认」的核心不变式。
+/// 有界终止）；`ack`/`nack` 各自记录，以便断言「成功 ack、失败 nack」的结算语义。
+/// 覆写 `nack` 而非沿用默认（默认=ack）——这样才能区分两条结算路径。
 struct FakeJobSource {
     pending: Mutex<Vec<BuildJob>>,
     acked: Arc<Mutex<Vec<BuildJob>>>,
+    nacked: Arc<Mutex<Vec<(BuildJob, String)>>>,
 }
 
 #[async_trait]
@@ -80,21 +82,32 @@ impl BuildJobSource for FakeJobSource {
         self.acked.lock().unwrap().push(job.clone());
         Ok(())
     }
+
+    async fn nack(&self, job: &BuildJob, error: &str) -> Result<(), String> {
+        self.nacked
+            .lock()
+            .unwrap()
+            .push((job.clone(), error.to_string()));
+        Ok(())
+    }
 }
 
-// 核心不变式：处理失败也必须 ack。喂入 body 非法 JSON 的作业，process_queue_message
-// 在解析阶段即失败，build/publish 闭包永不触达；断言 fake source 恰好记录一次 ack。
+// 结算语义（失败路径）：喂入 body 非法 JSON 的作业，process_queue_message 在解析阶段
+// 即失败，build/publish 闭包永不触达；断言 worker 对失败作业调用 nack（不 ack），并带
+// 上错误详情——SQLite 侧据此做退避/死信，AWS/local-fs 默认 nack=ack 行为不变。
 #[tokio::test]
-async fn run_build_job_loop_once_acks_even_when_processing_fails() {
+async fn run_build_job_loop_once_nacks_when_processing_fails() {
     std::env::set_var("LTSEARCH_BUILD_EMBEDDING_DIM", "3");
 
     let acked = Arc::new(Mutex::new(Vec::new()));
+    let nacked = Arc::new(Mutex::new(Vec::new()));
     let source = FakeJobSource {
         pending: Mutex::new(vec![BuildJob {
             receipt: "r-1".to_string(),
             body: "not-json".to_string(),
         }]),
         acked: acked.clone(),
+        nacked: nacked.clone(),
     };
     let state = BuildServerState {
         build: Arc::new(|_request: SnapshotBuildRequest| {
@@ -118,15 +131,62 @@ async fn run_build_job_loop_once_acks_even_when_processing_fails() {
     let storage = StubHeadStorage { head: None };
     let list_wal_keys: ListWalKeysFn = Arc::new(|| async { Ok(vec![]) }.boxed());
 
-    let acked_count = run_build_job_loop_once(&source, &state, &storage, &list_wal_keys).await;
+    let settled = run_build_job_loop_once(&source, &state, &storage, &list_wal_keys).await;
 
-    assert_eq!(
-        acked_count, 1,
-        "ack 必须在处理失败时依然发生（load-bearing 不变式）"
-    );
+    assert_eq!(settled, 1, "失败作业也应完成一次结算（nack）");
+    assert!(acked.lock().unwrap().is_empty(), "失败作业不得走 ack");
+    let recorded = nacked.lock().unwrap();
+    assert_eq!(recorded.len(), 1, "恰好 nack 一条作业");
+    assert_eq!(recorded[0].0.receipt, "r-1");
+    assert!(!recorded[0].1.is_empty(), "nack 须携带错误详情");
+}
+
+// 结算语义（成功路径）：body 合法且 build/publish 成功 → worker 对该作业 ack（不 nack）。
+#[tokio::test]
+async fn run_build_job_loop_once_acks_on_success() {
+    std::env::set_var("LTSEARCH_BUILD_EMBEDDING_DIM", "3");
+
+    let acked = Arc::new(Mutex::new(Vec::new()));
+    let nacked = Arc::new(Mutex::new(Vec::new()));
+    let source = FakeJobSource {
+        pending: Mutex::new(vec![BuildJob {
+            receipt: "r-ok".to_string(),
+            body: "{\"batch_id\":\"b-1\",\"wal_key\":\"wal/2026/07/01/b-1.jsonl\"}".to_string(),
+        }]),
+        acked: acked.clone(),
+        nacked: nacked.clone(),
+    };
+    let state = BuildServerState {
+        build: Arc::new(|_request: SnapshotBuildRequest| {
+            async {
+                Ok(BuildIndexResult {
+                    manifest: sample_manifest(1),
+                    documents: vec![],
+                })
+            }
+            .boxed()
+        }),
+        publish: Arc::new(|_manifest: IndexManifest, _expected| {
+            async {
+                Ok(PublishResult {
+                    activated_version_id: 1,
+                    previous_version_id: None,
+                })
+            }
+            .boxed()
+        }),
+        embedding_probe: Arc::new(|| Ok(3)),
+    };
+    let storage = StubHeadStorage { head: None };
+    let list_wal_keys: ListWalKeysFn = Arc::new(|| async { Ok(vec![]) }.boxed());
+
+    let settled = run_build_job_loop_once(&source, &state, &storage, &list_wal_keys).await;
+
+    assert_eq!(settled, 1);
+    assert!(nacked.lock().unwrap().is_empty(), "成功作业不得走 nack");
     let recorded = acked.lock().unwrap();
-    assert_eq!(recorded.len(), 1, "恰好确认一条作业");
-    assert_eq!(recorded[0].receipt, "r-1");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].receipt, "r-ok");
 }
 
 fn head_object(version_id: u64) -> VersionedObject {
