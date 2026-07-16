@@ -117,10 +117,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
-      - name: Build single local image (stub embeddings, AWS-free)
-        run: |
-          docker build -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=stub .
-          docker build -f sam/local.Dockerfile -t ltsearch-local:dev .
+      - name: Build single local image (self-contained, AWS-free)
+        run: docker build -f sam/local.Dockerfile -t ltsearch-local:dev .
       - name: Run moto-free restart flow
         run: |
           docker compose -f docker-compose.local.yml up -d --wait

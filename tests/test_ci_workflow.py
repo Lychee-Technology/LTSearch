@@ -152,13 +152,12 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("uses: actions/checkout@v6", local_image_e2e)
         self.assertIn("uses: actions/setup-python@v6", local_image_e2e)
         self.assertIn(
-            "docker build -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=stub .",
-            local_image_e2e,
-        )
-        self.assertIn(
             "docker build -f sam/local.Dockerfile -t ltsearch-local:dev .",
             local_image_e2e,
         )
+        # #125 验收：sam/local.Dockerfile 必须自包含——CI 不得预构建 builder 镜像，
+        # 否则会掩盖 Dockerfile 对外部先决镜像的依赖（PR #129 review P1）。
+        self.assertNotIn("sam/builder.Dockerfile", local_image_e2e)
         self.assertIn(
             "docker compose -f docker-compose.local.yml up -d --wait", local_image_e2e
         )

@@ -40,10 +40,7 @@ RUN --mount=type=cache,id=ltsearch-cargo-registry,target=/root/.cargo/registry \
       cargo build --release --no-default-features --features aws \
           --bin write_server \
           --bin index_builder_server \
-          --bin query_server && \
-      cargo build --release --no-default-features --features local \
-          --bin ltsearch && \
-      cp target/release/ltsearch /ltsearch; \
+          --bin query_server; \
     else \
       cargo build --release --no-default-features --features lambda,ltembed \
           --bin write_lambda \
