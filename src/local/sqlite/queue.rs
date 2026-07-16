@@ -19,10 +19,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, TransactionBehavior};
 
+use super::wal::{append_wal_segment, op_err};
 use super::SqliteDb;
 use crate::contracts::{BuildJob, BuildJobSource};
 use crate::error::IngestError;
-use crate::write::{BuildQueue, QueueBatch};
+use crate::write::{BuildQueue, QueueBatch, WalAppend};
 
 /// 默认最大尝试次数（含首次）。达到后 `nack` 把作业移入 `dead_jobs`。
 pub(crate) const DEFAULT_MAX_ATTEMPTS: u32 = 3;
@@ -55,6 +56,25 @@ pub(crate) fn max_attempts_from_env() -> u32 {
         .unwrap_or(DEFAULT_MAX_ATTEMPTS)
 }
 
+/// 在给定连接（可为事务）上插入/更新一条就绪构建作业。不管理事务边界——供
+/// `enqueue`（独立事务）与原子写路径（并入 WAL 追加的同一事务）复用，保证两条路径
+/// 的入队语义一致。
+pub(super) fn insert_build_job(
+    conn: &rusqlite::Connection,
+    batch: &QueueBatch,
+) -> rusqlite::Result<()> {
+    let body = serde_json::to_string(batch).unwrap_or_default();
+    conn.execute(
+        "INSERT INTO build_jobs (batch_id, body, state, attempts, available_at, claimed_at)
+         VALUES (?1, ?2, 'ready', 0, 0, NULL)
+         ON CONFLICT(batch_id) DO UPDATE SET
+            body = excluded.body, state = 'ready', attempts = 0,
+            available_at = 0, claimed_at = NULL",
+        rusqlite::params![batch.batch_id, body],
+    )?;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct SqliteBuildQueue {
     db: SqliteDb,
@@ -70,23 +90,44 @@ impl SqliteBuildQueue {
 impl BuildQueue for SqliteBuildQueue {
     async fn enqueue(&self, batch: QueueBatch) -> Result<(), IngestError> {
         let batch_id = batch.batch_id.clone();
-        let body = serde_json::to_string(&batch).map_err(|error| IngestError::Operation {
-            message: format!("failed to encode queue batch: {error}"),
-        })?;
         self.db
             .call(move |conn| {
-                conn.execute(
-                    "INSERT INTO build_jobs (batch_id, body, state, attempts, available_at, claimed_at)
-                     VALUES (?1, ?2, 'ready', 0, 0, NULL)
-                     ON CONFLICT(batch_id) DO UPDATE SET
-                        body = excluded.body, state = 'ready', attempts = 0,
-                        available_at = 0, claimed_at = NULL",
-                    rusqlite::params![batch_id, body],
-                )
-                .map(|_| ())
-                .map_err(|error| IngestError::Operation {
+                insert_build_job(conn, &batch).map_err(|error| IngestError::Operation {
                     message: format!("failed to enqueue build job {batch_id}: {error}"),
                 })
+            })
+            .await
+    }
+
+    /// AC-1 原子写路径：在同一个 `BEGIN IMMEDIATE` 事务内追加 WAL 段并入队作业，任一步
+    /// 失败整体回滚——事件与作业「要么都落库、要么都不落」，在 ack 前完成。忽略 `_wal`
+    /// 参数：直接在本队列的连接上写 WAL 段（本地组合根用同一 `SqliteDb` 构造 WAL 与队列，
+    /// 见 trait 文档），从而两写共用一条连接、一个事务。
+    async fn append_and_enqueue(
+        &self,
+        _wal: &dyn WalAppend,
+        wal_key: &str,
+        wal_bytes: &[u8],
+        batch: QueueBatch,
+    ) -> Result<(), IngestError> {
+        let wal_key = wal_key.to_string();
+        let wal_bytes = wal_bytes.to_vec();
+        let batch_id = batch.batch_id.clone();
+        self.db
+            .call(move |conn| {
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(|e| op_err("failed to open atomic write tx", e))?;
+                append_wal_segment(&tx, &wal_key, &wal_bytes)
+                    .map_err(|e| op_err(&format!("failed to append WAL {wal_key} (atomic)"), e))?;
+                insert_build_job(&tx, &batch).map_err(|e| IngestError::Operation {
+                    message: format!(
+                        "failed to enqueue build job {batch_id} (atomic, wal_persisted=false): {e}"
+                    ),
+                })?;
+                tx.commit()
+                    .map_err(|e| op_err(&format!("failed to commit atomic write {batch_id}"), e))?;
+                Ok(())
             })
             .await
     }
@@ -497,5 +538,69 @@ mod tests {
         // B 自己的 nack 才真正生效（attempts→1）。
         source.nack(&delivery_b, "real").await.unwrap();
         assert_eq!(attempts_of(&db, "batch-1").await, 1);
+    }
+
+    async fn wal_segment_bytes(db: &SqliteDb, key: &str) -> Option<Vec<u8>> {
+        let key = key.to_string();
+        db.call(move |conn| {
+            conn.query_row(
+                "SELECT data FROM wal_segments WHERE segment_key = ?1",
+                [&key],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .unwrap()
+        })
+        .await
+    }
+
+    // AC-1 正路径：原子写把事件字节与作业行都落库。
+    #[tokio::test]
+    async fn atomic_append_and_enqueue_persists_both_event_and_job() {
+        use crate::local::sqlite::SqliteWalStorage;
+        use crate::write::WriteAheadLog;
+
+        let (db, _dir) = SqliteDb::open_temp();
+        let queue = SqliteBuildQueue::new(db.clone());
+        let wal = WriteAheadLog::new(SqliteWalStorage::new(db.clone()));
+        let key = "wal/2026/07/15/batch-x.jsonl";
+
+        queue
+            .append_and_enqueue(&wal, key, b"{\"e\":1}\n", sample_batch("batch-x"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            wal_segment_bytes(&db, key).await.as_deref(),
+            Some(&b"{\"e\":1}\n"[..])
+        );
+        assert_eq!(job_row_count(&db).await, 1);
+    }
+
+    // AC-1 原子性：作业入队失败时，同一事务里的 WAL 追加必须一并回滚——事件不得残留。
+    #[tokio::test]
+    async fn atomic_append_and_enqueue_rolls_back_wal_when_job_insert_fails() {
+        use crate::local::sqlite::SqliteWalStorage;
+        use crate::write::WriteAheadLog;
+
+        let (db, _dir) = SqliteDb::open_temp();
+        let queue = SqliteBuildQueue::new(db.clone());
+        let wal = WriteAheadLog::new(SqliteWalStorage::new(db.clone()));
+        let key = "wal/2026/07/15/batch-x.jsonl";
+
+        // 破坏 build_jobs，使事务内的作业插入失败。
+        db.call(|conn| conn.execute("DROP TABLE build_jobs", []).unwrap())
+            .await;
+
+        let result = queue
+            .append_and_enqueue(&wal, key, b"{\"e\":1}\n", sample_batch("batch-x"))
+            .await;
+
+        assert!(result.is_err(), "job insert failure must surface an error");
+        // 关键断言：WAL 段随失败的作业插入一起回滚，未残留半个写入。
+        assert!(
+            wal_segment_bytes(&db, key).await.is_none(),
+            "WAL append must roll back with the failed job insert"
+        );
     }
 }

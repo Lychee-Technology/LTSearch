@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ltsearch::error::{IngestError, ValidationError};
-use ltsearch::local::LocalFsWalStorage;
+#[cfg(feature = "local")]
+use ltsearch::local::{SqliteDb, SqliteWalStorage};
 use ltsearch::models::{Document, WalOperation, WalRecord};
 use ltsearch::write::{segment_key, WalStorage, WriteAheadLog};
 
@@ -107,13 +108,14 @@ async fn append_writes_jsonl_records_in_order_and_read_returns_them() {
     assert!(contents.ends_with('\n'));
 }
 
+#[cfg(feature = "local")]
 #[tokio::test]
-async fn local_fs_wal_preserves_prior_records_across_appends() {
-    // Regression: LocalFsWalStorage::append must accumulate, not truncate.
-    // A second append to the same segment key previously overwrote the first
-    // record because it used tokio::fs::write.
+async fn sqlite_wal_preserves_prior_records_across_appends() {
+    // Regression: the WAL backend's append must accumulate, not truncate — a
+    // second append to the same segment key must not overwrite the first record.
     let dir = tempfile::tempdir().unwrap();
-    let wal = WriteAheadLog::new(LocalFsWalStorage::new(dir.path()));
+    let db = SqliteDb::open(dir.path().join("ltsearch.db")).unwrap();
+    let wal = WriteAheadLog::new(SqliteWalStorage::new(db));
     let key = segment_key(1_700_000_000_000, "segment-000042").unwrap();
     let first = sample_record("evt-1", "doc-1");
     let second = sample_record("evt-2", "doc-2");
