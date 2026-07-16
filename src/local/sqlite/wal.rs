@@ -1,6 +1,6 @@
 //! SQLite 版 WAL 存储：把 `WalStorage` 的字节契约落到 `wal_segments(segment_key, data)`。
-//! `append` 对同一 `segment_key` 追加（读-拼接-写，与 `LocalFsWalStorage` 的 append 语义
-//! 一致）；`read` 读回整段字节。注意 `WalStorage` 是**字节级**契约——`append` 收到的是
+//! `append` 对同一 `segment_key` 追加（读-拼接-写，即 append 而非覆盖语义）；`read` 读回
+//! 整段字节。注意 `WalStorage` 是**字节级**契约——`append` 收到的是
 //! 已序列化的 JSONL 字节（可能一批多条），因此这里按不透明字节存储，不解构成列，避免
 //! 反序列化-再序列化带来的字节漂移。
 //!
@@ -26,6 +26,11 @@ impl SqliteWalStorage {
         Self { db }
     }
 
+    /// 底层数据库句柄，供原子写路径校验 WAL 与队列是否共库。
+    pub(super) fn db(&self) -> &SqliteDb {
+        &self.db
+    }
+
     /// 列出所有 WAL 段的 `segment_key`（升序），供 index-builder 的 worker 在每次
     /// 构建前取全量快照输入——对齐 AWS 侧 `ListObjectsV2(prefix="wal/")` 与文件型
     /// `list_local_wal_keys` 的语义。PR3 的组合根会把它包成 `ListWalKeysFn` 闭包。
@@ -46,10 +51,35 @@ impl SqliteWalStorage {
     }
 }
 
-fn op_err(context: &str, error: rusqlite::Error) -> IngestError {
+pub(super) fn op_err(context: &str, error: rusqlite::Error) -> IngestError {
     IngestError::Operation {
         message: format!("{context}: {error}"),
     }
+}
+
+/// 在给定连接（可为事务）上对 `segment_key` 追加字节：读现值、Rust 侧拼接、整体 UPSERT
+/// （避免 SQLite `||` 对 BLOB 的文本强转）。不管理事务边界——由调用方决定 autocommit
+/// 还是并入更大的事务（原子写路径复用它，确保与 `SqliteWalStorage::append` 语义一致）。
+pub(super) fn append_wal_segment(
+    conn: &rusqlite::Connection,
+    key: &str,
+    bytes: &[u8],
+) -> rusqlite::Result<()> {
+    let existing: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT data FROM wal_segments WHERE segment_key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut buf = existing.unwrap_or_default();
+    buf.extend_from_slice(bytes);
+    conn.execute(
+        "INSERT INTO wal_segments (segment_key, data) VALUES (?1, ?2)
+         ON CONFLICT(segment_key) DO UPDATE SET data = excluded.data",
+        rusqlite::params![key, buf],
+    )?;
+    Ok(())
 }
 
 #[async_trait]
@@ -60,26 +90,11 @@ impl WalStorage for SqliteWalStorage {
         self.db
             .call(move |conn| {
                 // 读-拼接-写在一个 IMMEDIATE 事务内原子完成，跨进程不丢事件（见模块注释）。
-                // Rust 侧拼接可避免 SQLite `||` 对 BLOB 的文本强转。
                 let tx = conn
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|e| op_err(&format!("failed to open WAL append tx for {key}"), e))?;
-                let existing: Option<Vec<u8>> = tx
-                    .query_row(
-                        "SELECT data FROM wal_segments WHERE segment_key = ?1",
-                        [&key],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(|e| op_err(&format!("failed to read WAL {key} for append"), e))?;
-                let mut buf = existing.unwrap_or_default();
-                buf.extend_from_slice(&bytes);
-                tx.execute(
-                    "INSERT INTO wal_segments (segment_key, data) VALUES (?1, ?2)
-                     ON CONFLICT(segment_key) DO UPDATE SET data = excluded.data",
-                    rusqlite::params![key, buf],
-                )
-                .map_err(|e| op_err(&format!("failed to append WAL {key}"), e))?;
+                append_wal_segment(&tx, &key, &bytes)
+                    .map_err(|e| op_err(&format!("failed to append WAL {key}"), e))?;
                 tx.commit()
                     .map_err(|e| op_err(&format!("failed to commit WAL append for {key}"), e))?;
                 Ok(())

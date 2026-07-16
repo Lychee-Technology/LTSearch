@@ -41,6 +41,12 @@ impl SqliteDb {
         })
     }
 
+    /// 两个句柄是否指向同一个共享连接（同一 `Arc`）。原子写路径用它强制
+    /// 「WAL 与队列共库」不变式：只有共用一个 `SqliteDb` 的构造才能在单事务内落库。
+    pub fn ptr_eq(&self, other: &SqliteDb) -> bool {
+        Arc::ptr_eq(&self.conn, &other.conn)
+    }
+
     /// 在 `spawn_blocking` 中持锁执行一段阻塞的 rusqlite 逻辑。集中封装
     /// 「clone Arc → spawn_blocking → lock → 运行闭包」这一模式，让契约实现的
     /// async 方法体保持简洁。

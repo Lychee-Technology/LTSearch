@@ -25,7 +25,7 @@ pub struct BuildJob {
 }
 
 /// 构建作业消费侧契约：worker 轮询循环只依赖它，不再直接触碰 SQS。AWS 实现见
-/// `#[cfg(feature = "aws")]` 的 `SqsBuildJobSource`，本地实现见 `LocalFsBuildQueue`。
+/// `#[cfg(feature = "aws")]` 的 `SqsBuildJobSource`，本地实现见 `SqliteBuildJobSource`。
 #[async_trait]
 pub trait BuildJobSource: Send + Sync {
     /// 拉取零个或多个待处理作业（长轮询实现可阻塞至超时）。
@@ -33,7 +33,7 @@ pub trait BuildJobSource: Send + Sync {
     /// 处理成功后确认（删除）一条作业。
     async fn ack(&self, job: &BuildJob) -> Result<(), String>;
     /// 处理失败后的否定确认。默认实现等价于 `ack`——现有实现
-    /// （`LocalFsBuildQueue`、`SqsBuildJobSource`）本就不做毒消息隔离、失败照常删除，
+    /// （`SqsBuildJobSource` 及任何不 override 的实现）本就不做毒消息隔离、失败照常删除，
     /// 因此默认行为与改造前逐字一致。`SqliteBuildJobSource` override 它以实现重试退避
     /// 与死信（dead-letter）。`error` 供实现落盘诊断信息。
     async fn nack(&self, job: &BuildJob, error: &str) -> Result<(), String> {
@@ -47,4 +47,42 @@ pub trait BuildJobSource: Send + Sync {
 #[async_trait]
 pub trait ArtifactSync: Send + Sync {
     async fn sync(&self, artifact_root: &Path) -> Result<(), String>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// 只实现 receive/ack、不 override nack 的最小 BuildJobSource，用于验证默认 nack
+    /// 行为等价于 ack（保证 AWS/其它无重投后端的失败作业照常删除，改造前后一致）。
+    #[derive(Default)]
+    struct AckOnlySource {
+        acked: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl BuildJobSource for AckOnlySource {
+        async fn receive(&self) -> Result<Vec<BuildJob>, String> {
+            Ok(vec![])
+        }
+        async fn ack(&self, job: &BuildJob) -> Result<(), String> {
+            self.acked.lock().unwrap().push(job.receipt.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_nack_delegates_to_ack() {
+        let source = AckOnlySource::default();
+        let job = BuildJob {
+            receipt: "r-1".to_string(),
+            body: "{}".to_string(),
+        };
+        source.nack(&job, "boom").await.unwrap();
+        assert_eq!(
+            source.acked.lock().unwrap().as_slice(),
+            &["r-1".to_string()]
+        );
+    }
 }

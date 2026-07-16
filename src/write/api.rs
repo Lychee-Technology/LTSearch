@@ -17,9 +17,64 @@ pub struct QueueBatch {
     pub wal_event_ids: Vec<String>,
 }
 
+/// 对象安全的 WAL 追加句柄：让 [`BuildQueue::append_and_enqueue`] 的默认实现能在不
+/// 泛型化整个 trait 的前提下回调真正的 WAL 存储。`WriteAheadLog<S>` 自动实现它。
+#[async_trait]
+pub trait WalAppend: Send + Sync {
+    async fn append_bytes(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError>;
+
+    /// 自我暴露钩子：需要校验调用方 WAL 具体类型/构造的后端（如 SQLite 队列校验
+    /// WAL 与队列共用同一个数据库句柄）经它 downcast。默认 `None`（无从校验）。
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+}
+
+#[async_trait]
+impl<S> WalAppend for WriteAheadLog<S>
+where
+    S: WalStorage,
+{
+    async fn append_bytes(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
+        WriteAheadLog::append_bytes(self, key, bytes).await
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+}
+
 #[async_trait]
 pub trait BuildQueue: Clone + Send + Sync + 'static {
     async fn enqueue(&self, batch: QueueBatch) -> Result<(), IngestError>;
+
+    /// 原子地「持久化本批 WAL 字节 + 入队构建作业」（AC-1）。
+    ///
+    /// **默认实现是非原子的**：先经 `wal` 追加、再 `enqueue`——S3+SQS / 文件系统本就
+    /// 无法跨表事务，保持改造前逐字行为（含入队失败时的 batch 上下文与 `wal_persisted`
+    /// 提示）。SQLite 后端 override 它，在同一 `BEGIN IMMEDIATE` 事务内提交事件与作业，
+    /// 任一步失败则全部回滚，从而在 ack 前原子落库。
+    ///
+    /// SQLite 的 override 在自己的连接上写 WAL 段与作业行，并**先校验** `wal` 确实是
+    /// 共用同一个 `SqliteDb` 的 `SqliteWalStorage`（经 [`WalAppend::as_any`] downcast +
+    /// 句柄同一性比对），不匹配即报错拒绝——共库不变式由 API 边界强制，而非调用方约定。
+    async fn append_and_enqueue(
+        &self,
+        wal: &dyn WalAppend,
+        wal_key: &str,
+        wal_bytes: &[u8],
+        batch: QueueBatch,
+    ) -> Result<(), IngestError> {
+        wal.append_bytes(wal_key, wal_bytes).await?;
+        let batch_id = batch.batch_id.clone();
+        self.enqueue(batch)
+            .await
+            .map_err(|error| IngestError::Operation {
+                message: format!(
+                    "{error} (batch_id={batch_id}, wal_key={wal_key}, wal_persisted=true)"
+                ),
+            })
+    }
 }
 
 #[derive(Clone)]
@@ -153,25 +208,20 @@ where
         wal_key: &str,
         records: &[WalRecord],
     ) -> Result<(), IngestError> {
-        append_records(&self.wal, wal_key, records).await?;
-
+        let bytes = serialize_records(records)?;
+        let batch = QueueBatch {
+            batch_id: batch_id.to_string(),
+            wal_key: wal_key.to_string(),
+            accepted_count: records.len(),
+            wal_event_ids: records
+                .iter()
+                .map(|record| record.event_id.clone())
+                .collect(),
+        };
+        // 委托给队列后端的合并写：默认非原子（append→enqueue），SQLite 原子（单事务）。
         self.queue
-            .enqueue(QueueBatch {
-                batch_id: batch_id.to_string(),
-                wal_key: wal_key.to_string(),
-                accepted_count: records.len(),
-                wal_event_ids: records
-                    .iter()
-                    .map(|record| record.event_id.clone())
-                    .collect(),
-            })
+            .append_and_enqueue(&self.wal, wal_key, &bytes, batch)
             .await
-            .map_err(|error| IngestError::Operation {
-                message: format!(
-                    "{} (batch_id={batch_id}, wal_key={wal_key}, wal_persisted=true)",
-                    error
-                ),
-            })
     }
 
     fn next_batch_id(&self) -> String {
@@ -179,14 +229,8 @@ where
     }
 }
 
-async fn append_records<S>(
-    wal: &WriteAheadLog<S>,
-    wal_key: &str,
-    records: &[WalRecord],
-) -> Result<(), IngestError>
-where
-    S: WalStorage,
-{
+/// 校验每条记录并拼成一段 JSONL 字节（每条一行）。
+fn serialize_records(records: &[WalRecord]) -> Result<Vec<u8>, IngestError> {
     let mut bytes = Vec::new();
     for record in records {
         record.validate()?;
@@ -196,8 +240,7 @@ where
         line.push(b'\n');
         bytes.extend_from_slice(&line);
     }
-
-    wal.append_bytes(wal_key, &bytes).await
+    Ok(bytes)
 }
 
 fn current_time_millis() -> i64 {
