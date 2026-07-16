@@ -91,9 +91,12 @@ class SamInvokeE2ETest(unittest.TestCase):
         builder_path = REPO_ROOT / "sam" / "builder.Dockerfile"
         builder_content = builder_path.read_text(encoding="utf-8")
         self.assertIn(
-            "FROM --platform=linux/arm64 public.ecr.aws/amazonlinux/amazonlinux:2023",
+            "FROM public.ecr.aws/amazonlinux/amazonlinux:2023",
             builder_content,
         )
+        # #130：FROM 不得携带常量 --platform（FromPlatformFlagConstDisallowed），
+        # arm64 由构建调用方以 `docker build --platform linux/arm64` 显式指定。
+        self.assertNotIn("--platform", builder_content)
         self.assertIn("cargo build --release --no-default-features", builder_content)
 
         for dockerfile_path in [
