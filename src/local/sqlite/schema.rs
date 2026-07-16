@@ -24,7 +24,11 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
             state        TEXT NOT NULL,
             attempts     INTEGER NOT NULL DEFAULT 0,
             available_at INTEGER NOT NULL DEFAULT 0,
-            claimed_at   INTEGER
+            claimed_at   INTEGER,
+            -- 每次领取（delivery）生成的唯一凭据。ack/nack 以它为句柄，确保租约过期后
+            -- 由他人重新领取的作业不会被上一持有者误删/误重投（对齐 SQS receipt handle
+            -- 语义：句柄标识一次投递，而非持久作业 id）。领取时置新值，重投/回收时清空。
+            claim_token  TEXT
          );
          CREATE TABLE IF NOT EXISTS dead_jobs (
             batch_id  TEXT PRIMARY KEY,

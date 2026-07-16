@@ -79,4 +79,15 @@ impl SqliteDb {
         let db = Self::open(dir.path().join("ltsearch.db")).unwrap();
         (db, dir)
     }
+
+    /// 测试辅助：对同一个 `.db` 文件打开两个**独立连接**（各自的 `Arc<Mutex>`），
+    /// 模拟多进程共享卷场景，用于跨连接并发（WAL append / head CAS）竞争测试。
+    #[cfg(test)]
+    pub(crate) fn open_two_temp() -> (Self, Self, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ltsearch.db");
+        let a = Self::open(&path).unwrap();
+        let b = Self::open(&path).unwrap();
+        (a, b, dir)
+    }
 }

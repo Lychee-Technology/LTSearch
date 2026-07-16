@@ -92,21 +92,47 @@ mod tests {
     use super::*;
     use crate::indexing::PublishStorage;
     use crate::local::sqlite::head::LocalPublishStorage;
+    use crate::storage::version_manifest_key;
 
-    #[tokio::test]
-    async fn load_head_reads_active_head_row() {
-        let (db, _dir) = SqliteDb::open_temp();
-        let publish = LocalPublishStorage::new(db.clone(), _dir.path());
-        let head = ManifestHead::new(7, 1_700_000_000_000);
+    fn sample_manifest_json(version_id: u64) -> String {
+        format!(
+            r#"{{
+  "version_id": {version_id},
+  "created_at": 1700000000000,
+  "embedding_dim": 768,
+  "document_count": 5,
+  "num_shards": 2,
+  "shards": [
+    {{ "shard_id": 0, "document_count": 2,
+       "lance_path": "s3://bucket/lance/v{version_id}/shard_0",
+       "tantivy_path": "s3://bucket/index/v{version_id}/shard_0" }},
+    {{ "shard_id": 1, "document_count": 3,
+       "lance_path": "s3://bucket/lance/v{version_id}/shard_1",
+       "tantivy_path": "s3://bucket/index/v{version_id}/shard_1" }}
+  ]
+}}"#
+        )
+    }
+
+    /// 把 head 写入 active_head 行（经发布侧 CAS）。
+    async fn seed_head(db: &SqliteDb, root: &std::path::Path, version_id: u64) {
+        let publish = LocalPublishStorage::new(db.clone(), root);
+        let head = ManifestHead::new(version_id, 1_700_000_000_000);
         assert!(publish
             .compare_and_swap(INDEX_HEAD_KEY, None, &head.to_json_pretty())
             .await
             .unwrap());
+    }
 
-        let store = SqliteManifestStore::new(db, _dir.path());
+    #[tokio::test]
+    async fn load_head_reads_active_head_row() {
+        let (db, dir) = SqliteDb::open_temp();
+        seed_head(&db, dir.path(), 7).await;
+
+        let store = SqliteManifestStore::new(db, dir.path());
         let loaded = store.load_head().unwrap();
 
-        assert_eq!(loaded, head);
+        assert_eq!(loaded, ManifestHead::new(7, 1_700_000_000_000));
     }
 
     #[tokio::test]
@@ -116,6 +142,50 @@ mod tests {
         assert!(matches!(
             store.load_head(),
             Err(ManifestStoreError::MissingHead { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn load_active_manifest_reads_parses_validates_and_version_checks() {
+        let (db, dir) = SqliteDb::open_temp();
+        seed_head(&db, dir.path(), 7).await;
+        // manifest 文件落在 head.manifest_path 指向的盘上位置。
+        let manifest_path = dir.path().join(version_manifest_key(7));
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, sample_manifest_json(7)).unwrap();
+
+        let store = SqliteManifestStore::new(db, dir.path());
+        let active = store.load_active_manifest().unwrap();
+
+        assert_eq!(active.head, ManifestHead::new(7, 1_700_000_000_000));
+        assert_eq!(active.manifest.version_id, 7);
+        assert_eq!(active.manifest.num_shards, 2);
+    }
+
+    #[tokio::test]
+    async fn load_active_manifest_missing_manifest_file_is_error() {
+        let (db, dir) = SqliteDb::open_temp();
+        seed_head(&db, dir.path(), 7).await; // head present, manifest file absent
+        let store = SqliteManifestStore::new(db, dir.path());
+        assert!(matches!(
+            store.load_active_manifest(),
+            Err(ManifestStoreError::MissingManifest { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn load_active_manifest_version_mismatch_is_error() {
+        let (db, dir) = SqliteDb::open_temp();
+        seed_head(&db, dir.path(), 7).await;
+        // head 指向 v7，但盘上写了 v8 的 manifest → 版本校验必须失败。
+        let manifest_path = dir.path().join(version_manifest_key(7));
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, sample_manifest_json(8)).unwrap();
+
+        let store = SqliteManifestStore::new(db, dir.path());
+        assert!(matches!(
+            store.load_active_manifest(),
+            Err(ManifestStoreError::InvalidManifest { .. })
         ));
     }
 }

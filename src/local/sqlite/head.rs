@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, TransactionBehavior};
 
 use super::SqliteDb;
 use crate::error::PublishError;
@@ -100,8 +100,12 @@ impl PublishStorage for LocalPublishStorage {
         let new_value = new_value.to_vec();
         self.db
             .call(move |conn| {
+                // IMMEDIATE：事务开始即取写锁，跨进程 CAS 被串行化。否则两个独立连接可能
+                // 读到同一快照，后提交者在写升级时收到 SQLITE_BUSY_SNAPSHOT——那是可重试的
+                // 忙错误，而非语义上的「etag 不符」。IMMEDIATE 让后者等前者提交、读到新值、
+                // etag 比对失败而正确返回 Ok(false)。
                 let tx = conn
-                    .transaction()
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(|e| Self::cas_err("failed to open head CAS tx", e))?;
                 // 读现值算 etag，与期望比对：不符即拒绝（Ok(false)）。
                 let current: Option<Vec<u8>> = tx
@@ -194,6 +198,37 @@ mod tests {
             }
         }
         assert_eq!(winners, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cross_connection_cas_yields_conflict_not_busy_error() {
+        // 两个独立连接（模拟多进程）对同一 seed etag 并发 CAS：恰好一个 Ok(true)，
+        // 另一个必须是 Ok(false)（etag 冲突），而不是 SQLITE_BUSY_SNAPSHOT → PublishError。
+        let (db_a, db_b, dir) = SqliteDb::open_two_temp();
+        let store_a = LocalPublishStorage::new(db_a, dir.path());
+        let store_b = LocalPublishStorage::new(db_b, dir.path());
+        assert!(store_a
+            .compare_and_swap(INDEX_HEAD_KEY, None, b"seed")
+            .await
+            .unwrap());
+        let seed_etag = store_a.read(INDEX_HEAD_KEY).await.unwrap().unwrap().etag;
+
+        let ea = seed_etag.clone();
+        let a = tokio::spawn(async move {
+            store_a
+                .compare_and_swap(INDEX_HEAD_KEY, Some(&ea), b"va")
+                .await
+        });
+        let eb = seed_etag.clone();
+        let b = tokio::spawn(async move {
+            store_b
+                .compare_and_swap(INDEX_HEAD_KEY, Some(&eb), b"vb")
+                .await
+        });
+        // 两侧都不得返回 Err（忙错误被 IMMEDIATE 消化成串行化）。
+        let ra = a.await.unwrap().expect("CAS must not surface a busy error");
+        let rb = b.await.unwrap().expect("CAS must not surface a busy error");
+        assert_eq!([ra, rb].iter().filter(|w| **w).count(), 1, "恰好一个胜出");
     }
 
     #[tokio::test]
