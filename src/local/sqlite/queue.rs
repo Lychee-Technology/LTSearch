@@ -19,11 +19,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, TransactionBehavior};
 
-use super::wal::{append_wal_segment, op_err};
+use super::wal::{append_wal_segment, op_err, SqliteWalStorage};
 use super::SqliteDb;
 use crate::contracts::{BuildJob, BuildJobSource};
 use crate::error::IngestError;
-use crate::write::{BuildQueue, QueueBatch, WalAppend};
+use crate::write::{BuildQueue, QueueBatch, WalAppend, WriteAheadLog};
 
 /// 默认最大尝试次数（含首次）。达到后 `nack` 把作业移入 `dead_jobs`。
 pub(crate) const DEFAULT_MAX_ATTEMPTS: u32 = 3;
@@ -100,16 +100,33 @@ impl BuildQueue for SqliteBuildQueue {
     }
 
     /// AC-1 原子写路径：在同一个 `BEGIN IMMEDIATE` 事务内追加 WAL 段并入队作业，任一步
-    /// 失败整体回滚——事件与作业「要么都落库、要么都不落」，在 ack 前完成。忽略 `_wal`
-    /// 参数：直接在本队列的连接上写 WAL 段（本地组合根用同一 `SqliteDb` 构造 WAL 与队列，
-    /// 见 trait 文档），从而两写共用一条连接、一个事务。
+    /// 失败整体回滚——事件与作业「要么都落库、要么都不落」，在 ack 前完成。
+    ///
+    /// 两写都发生在本队列的连接上，因此**先校验** `wal` 确实是共用同一个 `SqliteDb`
+    /// 的 `SqliteWalStorage`：不匹配（不同库、或非 SQLite WAL）即报错拒绝，绝不在
+    /// 调用方配置的 WAL 未收到事件的情况下谎报成功——共库不变式由此处强制，而非
+    /// 依赖组合根的接线约定。
     async fn append_and_enqueue(
         &self,
-        _wal: &dyn WalAppend,
+        wal: &dyn WalAppend,
         wal_key: &str,
         wal_bytes: &[u8],
         batch: QueueBatch,
     ) -> Result<(), IngestError> {
+        let shares_db = wal
+            .as_any()
+            .and_then(|any| any.downcast_ref::<WriteAheadLog<SqliteWalStorage>>())
+            .is_some_and(|wal| wal.storage().db().ptr_eq(&self.db));
+        if !shares_db {
+            return Err(IngestError::Operation {
+                message: format!(
+                    "misconfigured local write path: SqliteBuildQueue::append_and_enqueue \
+                     requires the WriteApi WAL to be a SqliteWalStorage sharing this queue's \
+                     SqliteDb handle; construct both from one SqliteDb (batch_id={})",
+                    batch.batch_id
+                ),
+            });
+        }
         let wal_key = wal_key.to_string();
         let wal_bytes = wal_bytes.to_vec();
         let batch_id = batch.batch_id.clone();
@@ -575,6 +592,71 @@ mod tests {
             Some(&b"{\"e\":1}\n"[..])
         );
         assert_eq!(job_row_count(&db).await, 1);
+    }
+
+    // P1 回归（PR #128 review）：WAL 与队列构造自**不同**数据库时必须报错拒绝，
+    // 且两个库都不得残留任何写入——不得在调用方配置的 WAL 未收到事件时谎报成功。
+    #[tokio::test]
+    async fn atomic_append_and_enqueue_rejects_mismatched_databases() {
+        use crate::local::sqlite::SqliteWalStorage;
+        use crate::write::WriteAheadLog;
+
+        let (db_queue, _dir_q) = SqliteDb::open_temp();
+        let (db_wal, _dir_w) = SqliteDb::open_temp();
+        let queue = SqliteBuildQueue::new(db_queue.clone());
+        let mismatched_wal = WriteAheadLog::new(SqliteWalStorage::new(db_wal.clone()));
+        let key = "wal/2026/07/15/batch-x.jsonl";
+
+        let result = queue
+            .append_and_enqueue(
+                &mismatched_wal,
+                key,
+                b"{\"e\":1}\n",
+                sample_batch("batch-x"),
+            )
+            .await;
+
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("misconfigured"), "got: {message}");
+        // 两个库都干净：队列库无事件无作业，WAL 库无事件。
+        assert!(wal_segment_bytes(&db_queue, key).await.is_none());
+        assert_eq!(job_row_count(&db_queue).await, 0);
+        assert!(wal_segment_bytes(&db_wal, key).await.is_none());
+    }
+
+    // P1 回归：非 SQLite 的 WAL（downcast 失败）同样必须报错拒绝。
+    #[tokio::test]
+    async fn atomic_append_and_enqueue_rejects_non_sqlite_wal() {
+        use crate::write::{WalStorage, WriteAheadLog};
+        use async_trait::async_trait;
+
+        #[derive(Clone)]
+        struct OtherWal;
+        #[async_trait]
+        impl WalStorage for OtherWal {
+            async fn append(&self, _key: &str, _bytes: &[u8]) -> Result<(), IngestError> {
+                Ok(())
+            }
+            async fn read(&self, _key: &str) -> Result<Vec<u8>, IngestError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let (db, _dir) = SqliteDb::open_temp();
+        let queue = SqliteBuildQueue::new(db.clone());
+        let foreign_wal = WriteAheadLog::new(OtherWal);
+
+        let result = queue
+            .append_and_enqueue(
+                &foreign_wal,
+                "wal/2026/07/15/batch-x.jsonl",
+                b"{\"e\":1}\n",
+                sample_batch("batch-x"),
+            )
+            .await;
+
+        assert!(result.unwrap_err().to_string().contains("misconfigured"));
+        assert_eq!(job_row_count(&db).await, 0);
     }
 
     // AC-1 原子性：作业入队失败时，同一事务里的 WAL 追加必须一并回滚——事件不得残留。

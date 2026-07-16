@@ -1,11 +1,12 @@
 //! 文件系统制品存储：把 `key` 当作 `root` 下相对路径。etag 用内容 FNV-1a 哈希
 //! 的十六进制。`compare_and_swap` 必须是原子的（`PublishStorage` 契约，见
-//! `src/indexing/publisher.rs`）：本地 index-builder 会有队列 worker 与
-//! `POST /build` 处理器并发对 `index/_head` 做 CAS，读-比较-写若不互斥则两个
-//! contender 可能都看到同一 etag、都判定通过、后写者静默覆盖，从而激活相互竞争
-//! 的版本。这里用一把进程内锁把整个读-比较-写串起来，与 S3 条件写的原子语义
-//! 同构，让 `next_version_id` / `IndexPublisher` 的发布路径无需改动即可跑在本地。
-//! 作用域为单节点本地进程；跨进程共享同一卷不在本地部署模型内。
+//! `src/indexing/publisher.rs`）；这里用一把进程内锁把整个读-比较-写串起来，
+//! 与 S3 条件写的原子语义同构。作用域为单节点本地进程内的非 head 键。
+//!
+//! **`index/_head` 在此适配器中已退役**（#123）：活跃版本指针唯一活在 SQLite 的
+//! `active_head` 行（见 `sqlite::head::LocalPublishStorage`，它拦截该 key 并把其余
+//! key 委托到这里）。为使退役成立于代码而非仅组合根接线，本适配器对 `index/_head`
+//! 的 `read`/`compare_and_swap` 一律报错拒绝。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,20 @@ use async_trait::async_trait;
 
 use crate::error::PublishError;
 use crate::indexing::{PublishStorage, UploadMode, VersionedObject};
+use crate::storage::INDEX_HEAD_KEY;
+
+/// `index/_head` 的文件系统路径已退役：任何触达都是接线错误，报错而非静默服务。
+fn reject_retired_head(key: &str, operation: &str) -> Result<(), PublishError> {
+    if key == INDEX_HEAD_KEY {
+        return Err(PublishError::Operation {
+            message: format!(
+                "filesystem {operation} of {INDEX_HEAD_KEY} is retired (#123): the active \
+                 head lives in SQLite; route through sqlite::LocalPublishStorage"
+            ),
+        });
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct LocalFsPublishStorage {
@@ -98,6 +113,7 @@ impl PublishStorage for LocalFsPublishStorage {
     }
 
     async fn read(&self, key: &str) -> Result<Option<VersionedObject>, PublishError> {
+        reject_retired_head(key, "read")?;
         match std::fs::read(self.path_for(key)) {
             Ok(bytes) => {
                 let etag = etag_of(&bytes);
@@ -116,6 +132,7 @@ impl PublishStorage for LocalFsPublishStorage {
         expected_etag: Option<&str>,
         new_value: &[u8],
     ) -> Result<bool, PublishError> {
+        reject_retired_head(key, "compare_and_swap")?;
         // 持锁跨整个读-比较-写；临界区内无 `.await`，future 仍是 Send。
         let _guard = self
             .cas_lock
@@ -150,32 +167,26 @@ impl PublishStorage for LocalFsPublishStorage {
 mod tests {
     use super::*;
 
+    // 非 head 键的通用 CAS 语义（head 已退役到 SQLite，此处用制品类键验证）。
+    const CAS_KEY: &str = "index/versions/1/manifest.json";
+
     #[tokio::test]
     async fn cas_creates_then_rejects_stale_then_updates() {
         let dir = tempfile::tempdir().unwrap();
         let store = LocalFsPublishStorage::new(dir.path());
 
         // create (expected None)
-        assert!(store
-            .compare_and_swap("index/_head", None, b"v1")
-            .await
-            .unwrap());
+        assert!(store.compare_and_swap(CAS_KEY, None, b"v1").await.unwrap());
         // stale expectation is rejected
-        assert!(!store
-            .compare_and_swap("index/_head", None, b"v2")
-            .await
-            .unwrap());
+        assert!(!store.compare_and_swap(CAS_KEY, None, b"v2").await.unwrap());
         // read back etag and CAS with it
-        let object = store.read("index/_head").await.unwrap().unwrap();
+        let object = store.read(CAS_KEY).await.unwrap().unwrap();
         assert_eq!(object.bytes, b"v1");
         assert!(store
-            .compare_and_swap("index/_head", Some(&object.etag), b"v2")
+            .compare_and_swap(CAS_KEY, Some(&object.etag), b"v2")
             .await
             .unwrap());
-        assert_eq!(
-            store.read("index/_head").await.unwrap().unwrap().bytes,
-            b"v2"
-        );
+        assert_eq!(store.read(CAS_KEY).await.unwrap().unwrap().bytes, b"v2");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -189,10 +200,10 @@ mod tests {
         // byte-identical content would leave the etag at the seed value and also
         // pass (correct content-etag CAS semantics, but not what this test probes).
         assert!(store
-            .compare_and_swap("index/_head", None, b"seed")
+            .compare_and_swap(CAS_KEY, None, b"seed")
             .await
             .unwrap());
-        let seed_etag = store.read("index/_head").await.unwrap().unwrap().etag;
+        let seed_etag = store.read(CAS_KEY).await.unwrap().unwrap().etag;
 
         let mut handles = Vec::new();
         for i in 0..8u32 {
@@ -200,7 +211,7 @@ mod tests {
             let etag = seed_etag.clone();
             handles.push(tokio::spawn(async move {
                 store
-                    .compare_and_swap("index/_head", Some(&etag), format!("v{i}").as_bytes())
+                    .compare_and_swap(CAS_KEY, Some(&etag), format!("v{i}").as_bytes())
                     .await
                     .unwrap()
             }));
@@ -216,5 +227,25 @@ mod tests {
         // Atomic CAS: only the first contender sees the seed etag; the write
         // changes it, so every later contender must observe a mismatch.
         assert_eq!(winners, 1);
+    }
+
+    // #123 退役断言：文件系统适配器对 index/_head 的 read / CAS 一律报错拒绝，
+    // 活跃指针唯一活在 SQLite（sqlite::LocalPublishStorage 拦截该 key）。
+    #[tokio::test]
+    async fn head_key_is_retired_and_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsPublishStorage::new(dir.path());
+
+        let read_err = store.read(INDEX_HEAD_KEY).await.unwrap_err().to_string();
+        assert!(read_err.contains("retired"), "got: {read_err}");
+
+        let cas_err = store
+            .compare_and_swap(INDEX_HEAD_KEY, None, b"v1")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(cas_err.contains("retired"), "got: {cas_err}");
+        // 拒绝必须发生在写盘之前：不得留下 _head 文件。
+        assert!(!dir.path().join(INDEX_HEAD_KEY).exists());
     }
 }

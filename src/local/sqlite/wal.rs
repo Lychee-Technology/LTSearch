@@ -26,6 +26,11 @@ impl SqliteWalStorage {
         Self { db }
     }
 
+    /// 底层数据库句柄，供原子写路径校验 WAL 与队列是否共库。
+    pub(super) fn db(&self) -> &SqliteDb {
+        &self.db
+    }
+
     /// 列出所有 WAL 段的 `segment_key`（升序），供 index-builder 的 worker 在每次
     /// 构建前取全量快照输入——对齐 AWS 侧 `ListObjectsV2(prefix="wal/")` 与文件型
     /// `list_local_wal_keys` 的语义。PR3 的组合根会把它包成 `ListWalKeysFn` 闭包。

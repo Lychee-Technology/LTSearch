@@ -22,6 +22,12 @@ pub struct QueueBatch {
 #[async_trait]
 pub trait WalAppend: Send + Sync {
     async fn append_bytes(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError>;
+
+    /// 自我暴露钩子：需要校验调用方 WAL 具体类型/构造的后端（如 SQLite 队列校验
+    /// WAL 与队列共用同一个数据库句柄）经它 downcast。默认 `None`（无从校验）。
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 #[async_trait]
@@ -31,6 +37,10 @@ where
 {
     async fn append_bytes(&self, key: &str, bytes: &[u8]) -> Result<(), IngestError> {
         WriteAheadLog::append_bytes(self, key, bytes).await
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }
 
@@ -45,8 +55,9 @@ pub trait BuildQueue: Clone + Send + Sync + 'static {
     /// 提示）。SQLite 后端 override 它，在同一 `BEGIN IMMEDIATE` 事务内提交事件与作业，
     /// 任一步失败则全部回滚，从而在 ack 前原子落库。
     ///
-    /// SQLite 的 override 会忽略 `wal` 参数、直接在自己的连接上写 WAL 段与作业行——
-    /// 因此本地组合根必须用**同一个** `SqliteDb` 构造 WAL 与队列（PR3 组合根如此接线）。
+    /// SQLite 的 override 在自己的连接上写 WAL 段与作业行，并**先校验** `wal` 确实是
+    /// 共用同一个 `SqliteDb` 的 `SqliteWalStorage`（经 [`WalAppend::as_any`] downcast +
+    /// 句柄同一性比对），不匹配即报错拒绝——共库不变式由 API 边界强制，而非调用方约定。
     async fn append_and_enqueue(
         &self,
         wal: &dyn WalAppend,

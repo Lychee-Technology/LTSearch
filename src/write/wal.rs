@@ -23,6 +23,11 @@ where
         Self { storage }
     }
 
+    /// 暴露底层存储，供后端做构造校验（如 SQLite 队列比对 WAL 是否共用同一数据库句柄）。
+    pub fn storage(&self) -> &S {
+        &self.storage
+    }
+
     pub async fn append(&self, key: &str, record: &WalRecord) -> Result<(), IngestError> {
         record.validate()?;
 
