@@ -27,7 +27,7 @@ Resources:
           - bootstrap
       Events:
         WriteApi:
-          Type: Api
+          Type: HttpApi
           Properties:
             Path: /write
             Method: post
@@ -78,7 +78,7 @@ Resources:
           LTSEARCH_QUERY_LTEMBED_MODEL_PATH: /ltembed-assets/model.ort
       Events:
         QueryApi:
-          Type: Api
+          Type: HttpApi
           Properties:
             Path: /query
             Method: post
