@@ -2,6 +2,8 @@
 pub mod adapters;
 #[cfg(feature = "local")]
 pub mod app;
+#[cfg(feature = "aws")]
+pub mod aws_wiring;
 pub mod bootstrap;
 pub mod build_lambda;
 pub mod build_worker;
