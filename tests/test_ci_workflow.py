@@ -31,6 +31,7 @@ class CiWorkflowTest(unittest.TestCase):
                 "sam-e2e",
                 "http-e2e",
                 "local-image-e2e",
+                "local-e2e",
             },
         )
 
@@ -169,6 +170,24 @@ class CiWorkflowTest(unittest.TestCase):
         # moto-free：本作业不得触碰 moto compose，也不装 awscli/sam。
         self.assertNotIn("docker-compose.moto.yml", local_image_e2e)
         self.assertNotIn("awscli", local_image_e2e)
+
+        # 原生本地链路（epic #116 AC-2）：moto-free 且 **Docker-free**——原生进程
+        # 跑 write→build→query + 重启耐久性断言，无任何 docker/moto/awscli 依赖。
+        local_e2e = jobs["local-e2e"]
+        self.assertIn("needs: integration", local_e2e)
+        self.assertIn("runs-on: ubuntu-24.04-arm", local_e2e)
+        self.assertIn("timeout-minutes: 45", local_e2e)
+        self.assertIn("uses: actions/checkout@v6", local_e2e)
+        self.assertIn("uses: actions/setup-python@v6", local_e2e)
+        self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", local_e2e)
+        self.assertIn("cache: true", local_e2e)
+        self.assertIn(
+            "run: cargo build --no-default-features --features local --bin ltsearch",
+            local_e2e,
+        )
+        self.assertIn("run: bash scripts/e2e/run-local-server-flow.sh", local_e2e)
+        self.assertNotIn("docker", local_e2e)
+        self.assertNotIn("awscli", local_e2e)
 
     def _parse_jobs(self, lines: list[str]) -> dict[str, str]:
         jobs: dict[str, list[str]] = {}
