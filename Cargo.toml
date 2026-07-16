@@ -39,6 +39,7 @@ axum = { version = "0.8", optional = true }
 aws-config = { version = "1", optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
 aws-sdk-sqs = { version = "1", optional = true }
+base64 = "0.22"
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 futures = "0.3"

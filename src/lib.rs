@@ -11,6 +11,7 @@ pub mod error;
 pub mod http;
 pub mod index;
 pub mod indexing;
+pub mod lambda_events;
 pub mod local;
 pub mod models;
 pub mod query;
