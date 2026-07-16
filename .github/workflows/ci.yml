@@ -129,8 +129,9 @@ jobs:
 
   # 原生（无 Docker、moto-free）本地链路：3 个 ltsearch 子命令进程共享一个临时
   # LTSEARCH_LOCAL_ROOT，write→build→query + 全进程重启耐久性断言（epic #116 AC-2）。
+  # 独立 job、无 needs:（#120）——不依赖任何 Docker/moto 前置，与 fast/feature-matrix
+  # 并行给出最快的本地链路信号。
   local-e2e:
-    needs: integration
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
