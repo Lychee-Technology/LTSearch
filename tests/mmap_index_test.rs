@@ -2,9 +2,10 @@ use std::fs;
 use std::mem::{align_of, size_of};
 use std::path::PathBuf;
 
+use ltsearch::index::mmap_index::MmapIndexError;
 use ltsearch::index::{
-    CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader, TurboRecord512,
-    TurboRecordSlice, META_RECORD_SIZE,
+    CentroidTable, MetaExtRecord, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader,
+    TurboRecord512, TurboRecordSlice, META_EXT_RECORD_SIZE, META_RECORD_SIZE,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -260,6 +261,140 @@ fn mmap_index_rejects_unknown_record_layout() {
 
     let error = MmapIndex::load(&dir).unwrap_err();
     assert!(error.to_string().contains("unsupported"));
+}
+
+fn write_v3_test_index(dir: &std::path::Path, entries: &[(&str, &str)]) {
+    let header = TurboHeader::new_v3(512, entries.len() as u64);
+    let mut bin_data = header.to_bytes();
+    for i in 0..entries.len() {
+        let record = TurboRecord512 {
+            doc_id: i as u64,
+            idx: [0; 128],
+            qjl: [0; 64],
+            gamma: 0.0,
+            _reserved: [0; 4],
+        };
+        let record_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const TurboRecord512 as *const u8,
+                size_of::<TurboRecord512>(),
+            )
+        };
+        bin_data.extend_from_slice(record_bytes);
+    }
+    fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
+
+    let mut meta_data = Vec::new();
+    for i in 0..entries.len() {
+        let meta = MetaRecord {
+            doc_id: i as u64,
+            corpus_type: 0,
+            _pad: [0; 7],
+            text_offset: 0,
+            text_len: 0,
+            title_offset: 0,
+            title_len: 0,
+        };
+        let meta_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(&meta as *const MetaRecord as *const u8, META_RECORD_SIZE)
+        };
+        meta_data.extend_from_slice(meta_bytes);
+    }
+    fs::write(dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
+    fs::write(dir.join("turbo_static_text.bin"), []).unwrap();
+    fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
+    fs::write(
+        dir.join("centroids.bin"),
+        CentroidTable::generate(512, 16, 7).to_bytes(),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("projection.bin"),
+        ProjectionMatrix::generate(512, 512, 11).to_bytes(),
+    )
+    .unwrap();
+
+    // v3 sidecars: MetaExtRecord array + docid blob + metadata JSON blob.
+    let mut docid_blob = Vec::new();
+    let mut json_blob = Vec::new();
+    let mut ext_data = Vec::new();
+    for (doc_id, meta_json) in entries {
+        let docid_offset = docid_blob.len() as u64;
+        let docid_len = doc_id.len() as u32;
+        docid_blob.extend_from_slice(doc_id.as_bytes());
+        let meta_json_offset = json_blob.len() as u64;
+        let meta_json_len = meta_json.len() as u32;
+        json_blob.extend_from_slice(meta_json.as_bytes());
+        let ext = MetaExtRecord {
+            docid_offset,
+            meta_json_offset,
+            docid_len,
+            meta_json_len,
+        };
+        let ext_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                &ext as *const MetaExtRecord as *const u8,
+                META_EXT_RECORD_SIZE,
+            )
+        };
+        ext_data.extend_from_slice(ext_bytes);
+    }
+    fs::write(dir.join("turbo_static_meta_ext.bin"), &ext_data).unwrap();
+    fs::write(dir.join("turbo_static_docid.bin"), &docid_blob).unwrap();
+    fs::write(dir.join("turbo_static_meta_json.bin"), &json_blob).unwrap();
+}
+
+#[test]
+fn mmap_index_loads_v3_and_exposes_original_doc_id_and_metadata_json() {
+    let dir = temp_dir("load-v3");
+    let doc_id = "doc-α";
+    let metadata_json = r#"{"category":"legal","year":2026}"#;
+    write_v3_test_index(&dir, &[(doc_id, metadata_json)]);
+
+    let index = MmapIndex::load(&dir).unwrap();
+
+    assert_eq!(index.version(), 3);
+    assert_eq!(index.original_doc_id(0), Some(doc_id));
+
+    let json = index.metadata_json(0).expect("v3 index exposes metadata json");
+    let parsed: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(json).expect("metadata json parses back to a map");
+    assert_eq!(parsed["category"], serde_json::json!("legal"));
+    assert_eq!(parsed["year"], serde_json::json!(2026));
+}
+
+#[test]
+fn mmap_index_still_loads_v2_without_ext_files() {
+    let dir = temp_dir("load-v2-no-ext");
+    write_test_index(&dir, 512, &[(1, 0.5), (2, 1.5)], &[0, 1], &["a", "b"]);
+
+    let index = MmapIndex::load(&dir).unwrap();
+
+    assert_eq!(index.version(), 2);
+    assert_eq!(index.original_doc_id(0), None);
+    assert_eq!(index.metadata_json(0), None);
+}
+
+#[test]
+fn mmap_index_rejects_v3_with_mismatched_ext_count() {
+    let dir = temp_dir("v3-mismatch-ext");
+    write_v3_test_index(&dir, &[("doc-1", "{}"), ("doc-2", "{}")]);
+    // Header declares 2 records; shrink the meta_ext sidecar to a single record.
+    let ext_path = dir.join("turbo_static_meta_ext.bin");
+    let ext_data = fs::read(&ext_path).unwrap();
+    fs::write(&ext_path, &ext_data[..META_EXT_RECORD_SIZE]).unwrap();
+
+    let err = MmapIndex::load(&dir).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            MmapIndexError::MetaExtCountMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ),
+        "expected MetaExtCountMismatch {{ expected: 2, actual: 1 }}, got: {err:?}"
+    );
 }
 
 #[test]

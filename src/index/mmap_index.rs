@@ -6,8 +6,9 @@ use std::sync::OnceLock;
 use memmap2::Mmap;
 
 use super::assets::{AssetError, CentroidTable, ProjectionMatrix};
-use super::header::{KnownRecordLayout, TurboHeader, TurboHeaderError};
+use super::header::{KnownRecordLayout, TurboHeader, TurboHeaderError, TURBO_VERSION_V3};
 use super::meta::{MetaRecord, META_RECORD_SIZE};
+use super::meta_ext::{MetaExtRecord, META_EXT_RECORD_SIZE};
 use super::record::{TurboRecord512, TurboRecordRef, TurboRecordSlice};
 
 const IMAGE_STATIC_DIR: &str = "/app/static";
@@ -21,6 +22,11 @@ pub struct MmapIndex {
     meta_mmap: Mmap,
     text_mmap: Mmap,
     title_mmap: Mmap,
+    // v3-only sidecars carrying the original string doc_id and canonicalized
+    // metadata JSON. `None` for v2 images, which have no such files.
+    meta_ext_mmap: Option<Mmap>,
+    docid_mmap: Option<Mmap>,
+    meta_json_mmap: Option<Mmap>,
     centroids: CentroidTable,
     projection: ProjectionMatrix,
 }
@@ -42,6 +48,10 @@ pub enum MmapIndexError {
         actual: u64,
     },
     MetaCountMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    MetaExtCountMismatch {
         expected: u64,
         actual: u64,
     },
@@ -72,6 +82,12 @@ impl fmt::Display for MmapIndexError {
                 write!(
                     f,
                     "meta record count mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::MetaExtCountMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "meta ext record count mismatch: expected {expected}, got {actual}"
                 )
             }
             Self::AssetDimensionMismatch {
@@ -148,6 +164,38 @@ impl MmapIndex {
             });
         }
 
+        // v3 images ship three additional sidecars carrying the original string
+        // doc_id and canonicalized metadata JSON. v2 images have none of these
+        // files, so the branch keeps the legacy load path byte-for-byte.
+        let (meta_ext_mmap, docid_mmap, meta_json_mmap) = if header.version() == TURBO_VERSION_V3 {
+            let meta_ext_path = dir.join("turbo_static_meta_ext.bin");
+            let docid_path = dir.join("turbo_static_docid.bin");
+            let meta_json_path = dir.join("turbo_static_meta_json.bin");
+
+            let meta_ext_mmap = mmap_file(&meta_ext_path)?;
+            let docid_mmap = mmap_file(&docid_path)?;
+            let meta_json_mmap = mmap_file(&meta_json_path)?;
+
+            if meta_ext_mmap.len() % META_EXT_RECORD_SIZE != 0 {
+                return Err(MmapIndexError::MetaExtCountMismatch {
+                    expected: header.record_count(),
+                    actual: meta_ext_mmap.len() as u64 / META_EXT_RECORD_SIZE as u64,
+                });
+            }
+
+            let actual_meta_ext_count = meta_ext_mmap.len() as u64 / META_EXT_RECORD_SIZE as u64;
+            if actual_meta_ext_count != header.record_count() {
+                return Err(MmapIndexError::MetaExtCountMismatch {
+                    expected: header.record_count(),
+                    actual: actual_meta_ext_count,
+                });
+            }
+
+            (Some(meta_ext_mmap), Some(docid_mmap), Some(meta_json_mmap))
+        } else {
+            (None, None, None)
+        };
+
         let centroids_mmap = mmap_file(&centroids_path)?;
         let projection_mmap = mmap_file(&projection_path)?;
 
@@ -193,6 +241,9 @@ impl MmapIndex {
             meta_mmap,
             text_mmap,
             title_mmap,
+            meta_ext_mmap,
+            docid_mmap,
+            meta_json_mmap,
             centroids,
             projection,
         })
@@ -200,6 +251,38 @@ impl MmapIndex {
 
     pub fn dim(&self) -> u32 {
         self.header.dim()
+    }
+
+    pub fn version(&self) -> u32 {
+        self.header.version()
+    }
+
+    /// The original string doc_id for record `i`, or `None` for v2 images (which
+    /// carry no doc_id sidecar) or an out-of-range index.
+    pub fn original_doc_id(&self, i: usize) -> Option<&str> {
+        let ext = self.meta_ext_record(i)?;
+        let blob = self.docid_mmap.as_ref()?;
+        Some(ext.doc_id_from_blob(blob))
+    }
+
+    /// The canonicalized metadata JSON for record `i`, or `None` for v2 images
+    /// (which carry no metadata sidecar) or an out-of-range index.
+    pub fn metadata_json(&self, i: usize) -> Option<&str> {
+        let ext = self.meta_ext_record(i)?;
+        let blob = self.meta_json_mmap.as_ref()?;
+        Some(ext.metadata_json_from_blob(blob))
+    }
+
+    fn meta_ext_record(&self, i: usize) -> Option<&MetaExtRecord> {
+        let mmap = self.meta_ext_mmap.as_ref()?;
+        if i >= self.header.record_count() as usize {
+            return None;
+        }
+        let offset = i * META_EXT_RECORD_SIZE;
+        // Safety: the sidecar length was validated in `load` to be exactly
+        // `record_count * META_EXT_RECORD_SIZE`, and `MetaExtRecord` is
+        // `#[repr(C)]` with no alignment above the `u64`-aligned mmap base.
+        Some(unsafe { &*(mmap[offset..].as_ptr() as *const MetaExtRecord) })
     }
 
     pub fn load_from_image() -> Result<Self, MmapIndexError> {
