@@ -10,10 +10,16 @@
 
 ## Why Docker, and why both runtimes
 
-- **Model size.** The embedding assets baked into the image are ~140 MB
-  (`model.ort` ~118 MB + `tokenizer.json` ~16 MB + `libonnxruntime.so` ~4.6 MB). That exceeds the
-  Lambda **Layer** limit, so a **container image** is required (already the case). Container images
-  fit comfortably under the 10 GB Lambda image limit.
+- **Model size.** The embedding assets are ~139 MiB unzipped
+  (`model.ort` ~118 MiB + `tokenizer.json` ~16.4 MiB + `libonnxruntime.so` ~4.6 MiB)。#111 实测
+  更正了本文早先「模型超 Lambda Layer 限制」的归因：真正吃预算的是**函数二进制**
+  （lance/datafusion 依赖，real 模式解压 235.7 MiB，strip 后 180.5 MiB）——模型资产单独看装得进
+  Layer，但「函数 + Layer 解压合计 ≤ 250MB」硬限下两者放不下同一个包。因此 ZIP 部署路径改为
+  **S3→/tmp 冷启动供给**（#111）：`scripts/package-model-assets.sh` 产出带逐文件 sha256 manifest
+  的 `dist/model-assets/`，部署前上传到 ArtifactBucket 的 `ModelAssetPrefix` 前缀；query/build
+  冷启动下载校验到 `/tmp/ltembed`（`/tmp` 不占 250MB 预算，默认 512MB ephemeral 足够）。strip
+  已强制纳入 `scripts/package-lambda-zips.sh`，`scripts/check-lambda-size-budget.sh` 在 CI 持续
+  断言单函数 250MB/架构/资产 hash。容器镜像 lineage 保留为兼容形态（10 GB image limit 下更宽裕）。
 - **Lambda** is ideal for spiky, event-driven traffic and the batch index builder.
 - **Fargate** gives an always-on service that loads the model **once per task** (no per-invoke cold
   start of a ~118 MB ONNX model) and removes the 15-minute / 10 GB `/tmp` ceilings that constrain
@@ -107,10 +113,21 @@ The two image lineages handle model assets differently; the binary/bundle build 
 `minimal-ort-builder` **v1.0.9**, `jina-embeddings-v5-text-nano-retrieval` q4f16 **linux-arm64**;
 the default `LTEMBED_MODE=stub` builds the `fixed` provider with no model — CI default):
 
+- **Lambda ZIP + S3→/tmp 模型资产**（生产路径，#111）：`scripts/package-model-assets.sh` 只构建
+  `sam/builder.Dockerfile` 的 `bundle` stage（URL + sha256 pin 的单一来源），产出
+  `dist/model-assets/`（含 `manifest.json`：bundle provenance + 逐文件 sha256/bytes），部署前
+  `aws s3 cp --recursive dist/model-assets s3://<ArtifactBucket>/<ModelAssetPrefix>/`。
+  query/build 函数以 `LTSEARCH_{QUERY,BUILD}_LTEMBED_S3_BUCKET/_S3_PREFIX` 定位资产，冷启动时
+  （`src/embedding/model_assets.rs`）按 manifest 逐文件下载 + sha256 校验到
+  `LTSEARCH_{QUERY,BUILD}_LTEMBED_BUNDLE_DIR=/tmp/ltembed`（`..._LTEMBED_MODEL_PATH=
+  /tmp/ltembed/model.ort`）；manifest 最后落盘作完整性标记，warm 容器复用 `/tmp` 免重复下载。
+  **write 函数零模型 env、零下载代码，可独立部署**。资产未就位/下载失败时 query/build 启动报错
+  直接指出 `model assets not provisioned` 与 S3 配置排查点。
 - **Lambda images** (`sam/{query,index_builder}_lambda.Dockerfile`) bake the bundle into the image
   (`COPY --from=builder /ltembed-assets /ltembed-assets`) and point
   `LTSEARCH_{QUERY,BUILD}_LTEMBED_BUNDLE_DIR=/ltembed-assets` /
   `LTSEARCH_{QUERY,BUILD}_LTEMBED_MODEL_PATH=/ltembed-assets/model.ort` at the baked path.
+  （兼容形态；ZIP + Layer 为 #106 之后的默认交付。）
 - **HTTP server images** (`sam/*_server.Dockerfile`, published to GHCR) do **not** contain model
   assets. Operators mount an LTEmbed bundle (model.ort / tokenizer.json / build-info.json /
   libonnxruntime.so, from a `minimal-ort-builder` release) into the container and set

@@ -602,7 +602,9 @@ LTEmbed configuration per side is two env vars: `LTSEARCH_{BUILD,QUERY}_LTEMBED_
 
 ## **LTEmbed Asset Delivery**
 
-Model files are too large for Lambda Layers and impractical to download at cold-start. Instead, an **ort bundle** — a public `minimal-ort-builder` release asset (q4f16 `model.ort` for jina-embeddings-v5-text-nano-retrieval with a matching minimal-build `libonnxruntime.so`) — is **baked into the Lambda container image** at build time. `sam/builder.Dockerfile` pins the exact bundle version via the `LTEMBED_BUNDLE_URL` build arg (default: `minimal-ort-builder` v1.0.9); bumping the model is a one-line change to that default.
+模型资产来自一个 **ort bundle** — a public `minimal-ort-builder` release asset (q4f16 `model.ort` for jina-embeddings-v5-text-nano-retrieval with a matching minimal-build `libonnxruntime.so`)。`sam/builder.Dockerfile` 的独立 `bundle` stage pins the exact bundle version via `LTEMBED_BUNDLE_URL` + `LTEMBED_BUNDLE_SHA256` build args (default: `minimal-ort-builder` v1.0.9, sha256 校验强制)；bumping the model is a two-line change to those defaults.
+
+ZIP 部署路径（#109/#111，生产默认）经 **S3→/tmp 冷启动供给**交付：`scripts/package-model-assets.sh` 只构建 `bundle` stage，产出平铺的 `dist/model-assets/` + `manifest.json`（bundle URL/sha256、逐文件 sha256/bytes、arch），部署前上传到 ArtifactBucket 的 `ModelAssetPrefix` 前缀；query/build 的 lambda bin 启动期（`src/embedding/model_assets.rs`）按 manifest 逐文件下载 + sha256 校验到 **`/tmp/ltembed`**，manifest 最后落盘作完整性标记（warm 容器复用 `/tmp` 免重复下载）；write 零模型依赖。为什么不是 Lambda Layer：#111 实测资产解压 ~139 MiB 本身装得进 Layer，但函数二进制（lance/datafusion 依赖）real 模式解压 235.7 MiB（strip 后 180.5 MiB），「函数 + Layer 解压合计 ≤ 250MB」硬限下两者放不下——本节早先「too large for Lambda Layers」的归因经实测更正为函数体积问题。strip 已强制纳入 `scripts/package-lambda-zips.sh`；`scripts/check-lambda-size-budget.sh` 在 CI（`sam-ltembed-e2e` job）持续断言单函数 250MB 预算、AArch64 ELF 架构与资产 hash。
 
 Build flow:
 
@@ -622,14 +624,15 @@ sam build
 
 The default `LTEMBED_MODE=stub` skips the download and satisfies the ltembed git dependency with the vendored stub crate; binaries are built without the `ltembed` feature and use the `fixed` provider. This is the CI default. `LTEMBED_MODE=real` downloads the pinned default `LTEMBED_BUNDLE_URL` (overridable to bump the model version) and fails the build loudly only if that URL is explicitly emptied or unreachable.
 
-Bundle files inside Lambda containers:
+Bundle files by delivery lineage:
 
-| File | Container path |
-| ---- | -------------- |
-| `model.ort` | `/ltembed-assets/model.ort` |
-| `tokenizer.json` | `/ltembed-assets/tokenizer.json` |
-| `build-info.json` | `/ltembed-assets/build-info.json` |
-| `libonnxruntime.so` | `/ltembed-assets/libonnxruntime.so` (resolved automatically by the engine; `ort` is built with `load-dynamic`) |
+| File | Container image path | Lambda ZIP path (S3→/tmp, #111) |
+| ---- | -------------------- | ------------------------------- |
+| `model.ort` | `/ltembed-assets/model.ort` | `/tmp/ltembed/model.ort` |
+| `tokenizer.json` | `/ltembed-assets/tokenizer.json` | `/tmp/ltembed/tokenizer.json` |
+| `build-info.json` | `/ltembed-assets/build-info.json` | `/tmp/ltembed/build-info.json` |
+| `libonnxruntime.so` | `/ltembed-assets/libonnxruntime.so` | `/tmp/ltembed/libonnxruntime.so` (both resolved automatically by the engine; `ort` is built with `load-dynamic`) |
+| `manifest.json` | –（镜像 bake 不需要） | `/tmp/ltembed/manifest.json`（完整性标记，最后落盘） |
 
 ---
 
@@ -662,9 +665,10 @@ task; on Lambda, once per warm container.
 
 ## Why Docker for both
 
-The embedding model assets (~140 MB: `model.ort` ~118 MB + `tokenizer.json` ~16 MB +
-`libonnxruntime.so` ~4.6 MB) exceed the Lambda **Layer** limit, so they are baked into a
-**container image** (already the case). Running the same image on **Fargate** additionally gives
+#111 实测更正：模型资产（~139 MiB unzipped）本身装得进 Lambda Layer，但函数二进制
+（lance/datafusion 依赖，strip 后仍 ~180 MiB）+ Layer 超出「函数 + Layer 解压合计 ≤ 250MB」
+硬限——生产 Lambda ZIP 路线因此走 **S3→/tmp 冷启动供给**（见 §21），不依赖容器镜像。Docker
+双运行时的动机不再是「模型超 Layer 限制」，而是：running the same image on **Fargate** gives
 an always-on service that loads the model once (no per-invoke cold start) and sidesteps Lambda's
 15-minute / 10 GB `/tmp` limits for the index builder.
 
