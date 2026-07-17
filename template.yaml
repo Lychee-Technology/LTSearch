@@ -8,15 +8,24 @@ Description: >-
 Parameters:
   EmbeddingProvider:
     Type: String
-    Default: ltembed
+    Default: fixed
     Description: >-
-      LTSEARCH_*_EMBEDDING_PROVIDER for build/query. ltembed 模型资产
-      （LTSEARCH_*_LTEMBED_BUNDLE_DIR 等 env 与 Lambda Layer）由 #111 交付；
-      在那之前生产部署需自带模型资产或改用 fixed 做冒烟。
+      LTSEARCH_*_EMBEDDING_PROVIDER for build/query. 默认 fixed 与
+      package-lambda-zips.sh 的默认 stub 产物构成可直接部署的冒烟组合。
+      ltembed 模型资产（LTSEARCH_*_LTEMBED_BUNDLE_DIR 等 env 与 Lambda
+      Layer）由 #111 交付，届时默认翻回 ltembed；在那之前 ltembed 部署需
+      real 模式产物并自带模型资产。
   EmbeddingDim:
     Type: String
-    Default: '512'
-    Description: LTSEARCH_BUILD_EMBEDDING_DIM（jina/512 为 #94 裁决的默认档）。
+    Default: '3'
+    Description: >-
+      LTSEARCH_BUILD_EMBEDDING_DIM。默认 3 与 FixedEmbedding 默认向量一致；
+      jina/512 为 #94 裁决的生产档，随 #111 与 provider 默认一并翻回。
+  FixedEmbedding:
+    Type: String
+    Default: '0.9,0.1,0.0'
+    Description: >-
+      仅 EmbeddingProvider=fixed 时使用的固定向量（冒烟用）；ltembed 下忽略。
 
 Globals:
   Function:
@@ -86,6 +95,7 @@ Resources:
           LTSEARCH_QUERY_S3_BUCKET: !Ref ArtifactBucket
           LTSEARCH_QUERY_ARTIFACT_ROOT: /tmp/ltsearch-artifacts
           LTSEARCH_QUERY_EMBEDDING_PROVIDER: !Ref EmbeddingProvider
+          LTSEARCH_QUERY_FIXED_EMBEDDING: !Ref FixedEmbedding
       Policies:
         - S3ReadPolicy:
             BucketName: !Ref ArtifactBucket
@@ -110,6 +120,7 @@ Resources:
           LTSEARCH_BUILD_ARTIFACT_ROOT: /tmp/ltsearch-artifacts
           LTSEARCH_BUILD_EMBEDDING_PROVIDER: !Ref EmbeddingProvider
           LTSEARCH_BUILD_EMBEDDING_DIM: !Ref EmbeddingDim
+          LTSEARCH_BUILD_FIXED_EMBEDDING: !Ref FixedEmbedding
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref ArtifactBucket

@@ -316,10 +316,12 @@ yaml.SafeDumper.add_representer(CfnTag, represent_tag)
 with open(template_path) as handle:
     template = yaml.load(handle, yaml.SafeLoader)
 
+# fixed-embedding 相关变量已由生产模板声明(FixedEmbedding 参数),此处只需
+# 补 moto endpoint 声明。
 TEST_ONLY_ENV = {
     'WriteFunction': ['AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL_SQS'],
-    'BuildFunction': ['AWS_ENDPOINT_URL_S3', 'LTSEARCH_BUILD_FIXED_EMBEDDING'],
-    'QueryFunction': ['AWS_ENDPOINT_URL_S3', 'LTSEARCH_QUERY_FIXED_EMBEDDING'],
+    'BuildFunction': ['AWS_ENDPOINT_URL_S3'],
+    'QueryFunction': ['AWS_ENDPOINT_URL_S3'],
 }
 for logical_id, keys in TEST_ONLY_ENV.items():
     properties = template['Resources'][logical_id]['Properties']

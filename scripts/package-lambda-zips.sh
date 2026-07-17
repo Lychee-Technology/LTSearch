@@ -7,7 +7,9 @@ set -euo pipefail
 readonly REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 readonly DIST_DIR="${LTSEARCH_DIST_DIR:-$REPO_ROOT/dist}"
 readonly BUILDER_IMAGE="${LTSEARCH_BUILDER_IMAGE:-ltsearch-lambda-zip-builder}"
-# stub = features lambda（fixed embedding，e2e/CI 用）；real = features lambda,ltembed。
+# stub = features lambda（fixed embedding；与 template.yaml 默认 fixed/3 维参数
+# 构成可直接部署的冒烟组合，e2e/CI 用）；real = features lambda,ltembed（生产档，
+# 运行时模型资产与 Layer 由 #111 交付，需 .sam-local-deps/LTEmbed vendored checkout）。
 readonly LTEMBED_MODE="${LTSEARCH_LTEMBED_MODE:-stub}"
 
 DOCKER_BUILDKIT=1 docker build \
