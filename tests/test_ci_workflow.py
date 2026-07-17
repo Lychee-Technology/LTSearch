@@ -29,6 +29,7 @@ class CiWorkflowTest(unittest.TestCase):
                 "feature-matrix",
                 "integration",
                 "sam-e2e",
+                "sam-zip-e2e",
                 "http-e2e",
                 "local-image-e2e",
                 "local-e2e",

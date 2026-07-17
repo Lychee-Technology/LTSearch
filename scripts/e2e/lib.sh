@@ -257,3 +257,80 @@ actual = str(body.get(field))
 assert actual == expected, f'{field}: expected {expected}, got {actual} in {body}'
 PY
 }
+
+# 断言 zip 根含可执行 bootstrap（provided.al2023 自定义运行时布局）。
+# 用法: assert_zip_layout <zip-file>
+assert_zip_layout() {
+  python3 - "$1" <<'PY'
+import stat, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    names = archive.namelist()
+    assert names == ['bootstrap'], f'zip root must contain only bootstrap, got {names}'
+    info = archive.getinfo('bootstrap')
+    mode = info.external_attr >> 16
+    assert mode & stat.S_IXUSR, f'bootstrap must be executable, mode={oct(mode)}'
+PY
+}
+
+# 由生产 template.yaml 派生 zip e2e 专用模板：sam local invoke 的 --env-vars
+# 只能覆盖模板已声明的变量，因此把 moto endpoint 与 fixed-embedding 等测试
+# 专用变量声明进各函数 Environment（占位值，实际值全部由 --env-vars 注入），
+# 并把 CodeUri 改写为绝对路径（派生文件不在仓库根，相对 CodeUri 会解析失败）。
+# 生产模板保持纯净，其部署有效性由 CI 的 `sam validate --lint` 直接把关。
+# 用法: make_zip_e2e_template <production-template> <repo-root> <out-file>
+make_zip_e2e_template() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import sys
+import yaml
+
+template_path, repo_root, out_path = sys.argv[1:4]
+
+
+class CfnTag:
+    def __init__(self, tag, value):
+        self.tag = tag
+        self.value = value
+
+
+def construct_tag(loader, tag_suffix, node):
+    if isinstance(node, yaml.ScalarNode):
+        value = loader.construct_scalar(node)
+    elif isinstance(node, yaml.SequenceNode):
+        value = loader.construct_sequence(node)
+    else:
+        value = loader.construct_mapping(node)
+    return CfnTag('!' + tag_suffix, value)
+
+
+def represent_tag(dumper, data):
+    if isinstance(data.value, list):
+        return dumper.represent_sequence(data.tag, data.value)
+    if isinstance(data.value, dict):
+        return dumper.represent_mapping(data.tag, data.value)
+    return dumper.represent_scalar(data.tag, data.value)
+
+
+yaml.SafeLoader.add_multi_constructor('!', construct_tag)
+yaml.SafeDumper.add_representer(CfnTag, represent_tag)
+
+with open(template_path) as handle:
+    template = yaml.load(handle, yaml.SafeLoader)
+
+# fixed-embedding 相关变量已由生产模板声明(FixedEmbedding 参数),此处只需
+# 补 moto endpoint 声明。
+TEST_ONLY_ENV = {
+    'WriteFunction': ['AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL_SQS'],
+    'BuildFunction': ['AWS_ENDPOINT_URL_S3'],
+    'QueryFunction': ['AWS_ENDPOINT_URL_S3'],
+}
+for logical_id, keys in TEST_ONLY_ENV.items():
+    properties = template['Resources'][logical_id]['Properties']
+    properties['CodeUri'] = f"{repo_root}/{properties['CodeUri']}"
+    variables = properties.setdefault('Environment', {}).setdefault('Variables', {})
+    for key in keys:
+        variables.setdefault(key, 'overridden-by-env-vars-file')
+
+with open(out_path, 'w') as handle:
+    yaml.dump(template, handle, yaml.SafeDumper, sort_keys=False)
+PY
+}
