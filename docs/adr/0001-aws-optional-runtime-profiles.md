@@ -105,3 +105,28 @@ done
 the local build; any success is a leak and fails the job. The same job also
 builds and tests the `aws` profile and builds the three `lambda` binaries, so a
 regression in any profile is caught.
+
+## Addendum (2026-07-16, #109 / PR #134)
+
+The consequence above — "The existing AWS/Lambda deployment path is
+unchanged; the Lambda handler binaries are byte-for-byte the same" — is
+**superseded for the three Lambda handler binaries**. #109 intentionally
+migrates their transport contracts to real AWS event envelopes:
+
+- `query_lambda` and `write_lambda` accept API Gateway HTTP API proxy events
+  (payload format 2.0) and return `{statusCode, headers, body,
+  isBase64Encoded}` envelopes. Bare-JSON direct invocation is no longer
+  supported. `write_lambda` routes `POST /write` and `POST /delete` by exact
+  `rawPath` match.
+- `index_builder_lambda` consumes SQS batch events and reports per-record
+  failures via `batchItemFailures` (partial-batch semantics, no manual ack).
+  Index versions are allocated from `_head`, and
+  `LTSEARCH_BUILD_EMBEDDING_DIM` is a required environment variable.
+- The error-status mapping (`validation_error`→400, `not_found`→404,
+  otherwise 500) is single-sourced in `src/lambda_events.rs` and shared by
+  the HTTP servers and the Lambda envelopes.
+
+Adapter public signatures, the server binaries, and the AWS-free local
+profile guarantee (the guard invariant above) are unaffected. See
+`docs/superpowers/plans/2026-07-16-issue-109-lambda-zip.md` and #109 for the
+full contract migration; deployment-doc calibration follows in #113.
