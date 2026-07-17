@@ -126,3 +126,24 @@ fn build_lambda_does_not_publish_when_build_fails() {
         "publish handler should not be called when build fails"
     );
 }
+
+#[tokio::test]
+async fn malformed_queue_body_is_reported_as_batch_item_failure() {
+    use ltsearch::lambda_events::{process_sqs_records, SqsEvent, SqsRecord};
+
+    let event: SqsEvent =
+        serde_json::from_str(r#"{"Records": [{"messageId": "m-1", "body": "not json"}]}"#).unwrap();
+
+    // 与 bin 的 function_handler 相同的组合方式：process_queue_message 解析失败
+    // → Err → batchItemFailures 含该 messageId。这里用解析失败路径即可覆盖组合
+    // 语义，不需要真实 S3。
+    let response = process_sqs_records(event, async |record: &SqsRecord| {
+        serde_json::from_str::<ltsearch::build_worker::QueueBuildMessage>(&record.body)
+            .map(|_| ())
+            .map_err(|error| format!("failed to parse queue message: {error}"))
+    })
+    .await;
+
+    assert_eq!(response.batch_item_failures.len(), 1);
+    assert_eq!(response.batch_item_failures[0].item_identifier, "m-1");
+}

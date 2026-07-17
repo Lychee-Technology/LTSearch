@@ -24,6 +24,7 @@ class SamStartApiE2ETest(unittest.TestCase):
         self.assertIn("sam-api.pid", content)
         self.assertIn("http://localhost:3000", content)
         self.assertIn("e2e-state.json", content)
+        self.assertIn("LTSEARCH_BUILD_EMBEDDING_DIM", content)
         self.assertNotIn("host.docker.internal", content)
 
     def test_http_flow_script_runs_write_build_query(self) -> None:
@@ -38,7 +39,10 @@ class SamStartApiE2ETest(unittest.TestCase):
         self.assertIn("receive_one_sqs_batch", content)
         self.assertIn("assert_json_field", content)
         self.assertIn("accepted_count", content)
-        self.assertIn("activated_version_id", content)
+        # builder is invoked with an SQS batch envelope and returns partial-batch
+        # failures; success is an empty batchItemFailures list.
+        self.assertIn("make_sqs_event", content)
+        self.assertIn("batchItemFailures", content)
         self.assertIn("doc-rust-hybrid", content)
         self.assertIn("e2e-state.json", content)
         self.assertIn("--docker-network ltsearch-e2e", content)

@@ -2,6 +2,8 @@
 pub mod adapters;
 #[cfg(feature = "local")]
 pub mod app;
+#[cfg(feature = "aws")]
+pub mod aws_wiring;
 pub mod bootstrap;
 pub mod build_lambda;
 pub mod build_worker;
@@ -11,6 +13,7 @@ pub mod error;
 pub mod http;
 pub mod index;
 pub mod indexing;
+pub mod lambda_events;
 pub mod local;
 pub mod models;
 pub mod query;

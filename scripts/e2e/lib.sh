@@ -207,3 +207,53 @@ print(cur)' "$json_file" "$jq_filter")
     return 1
   fi
 }
+
+# 把裸请求体包成 API Gateway HTTP API payload v2 信封事件文件。
+# 用法: make_apigw_event <body-json-file> <raw-path> <out-file>
+make_apigw_event() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+body_path, raw_path, out_path = sys.argv[1:4]
+event = {
+    'version': '2.0',
+    'routeKey': f'POST {raw_path}',
+    'rawPath': raw_path,
+    'requestContext': {'http': {'method': 'POST', 'path': raw_path}},
+    'isBase64Encoded': False,
+    'body': open(body_path).read(),
+}
+json.dump(event, open(out_path, 'w'))
+PY
+}
+
+# 把 `aws sqs receive-message` 的响应包成 Lambda SQS 触发事件文件。
+# 用法: make_sqs_event <receive-message-response-file> <out-file>
+make_sqs_event() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+response = json.load(open(sys.argv[1]))
+messages = response.get('Messages', [])
+if not messages:
+    raise SystemExit('expected one SQS batch message')
+event = {'Records': [{
+    'messageId': messages[0].get('MessageId', 'e2e-message-1'),
+    'body': messages[0]['Body'],
+    'eventSource': 'aws:sqs',
+}]}
+json.dump(event, open(sys.argv[2], 'w'))
+PY
+}
+
+# 断言 APIGW v2 信封响应: statusCode==200 且 body 内字段等于期望值。
+# 用法: assert_lambda_json_field <response-file> <field> <expected>
+assert_lambda_json_field() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+path, field, expected = sys.argv[1:4]
+response = json.load(open(path))
+assert response.get('statusCode') == 200, f'non-200 lambda response: {response}'
+body = json.loads(response['body'])
+actual = str(body.get(field))
+assert actual == expected, f'{field}: expected {expected}, got {actual} in {body}'
+PY
+}

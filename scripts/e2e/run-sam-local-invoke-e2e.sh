@@ -47,6 +47,7 @@ env = {
     'BuildFunction': {
         'LTSEARCH_BUILD_S3_BUCKET': bucket,
         'LTSEARCH_BUILD_ARTIFACT_ROOT': '/tmp/ltsearch-e2e-artifacts',
+        'LTSEARCH_BUILD_EMBEDDING_DIM': '3',
         'AWS_ENDPOINT_URL_S3': moto_endpoint,
     },
     'QueryFunction': {
@@ -58,32 +59,21 @@ env = {
 json.dump(env, open(env_path, 'w'))
 PY
 
+WRITE_EVENT_JSON="$E2E_OUTPUT_DIR/write-event.json"
+make_apigw_event "$E2E_FIXTURES_DIR/write_request.json" /write "$WRITE_EVENT_JSON"
+
 WRITE_RESPONSE_JSON="$E2E_OUTPUT_DIR/write-response.json"
 sam local invoke WriteFunction \
   --template-file "$SAM_BUILT_TEMPLATE" \
   --env-vars "$ENV_VARS_JSON" \
-  --event "$E2E_FIXTURES_DIR/write_request.json" \
+  --event "$WRITE_EVENT_JSON" \
   --docker-network ltsearch-e2e \
   > "$WRITE_RESPONSE_JSON"
 
 BATCH_RESPONSE_JSON="$E2E_OUTPUT_DIR/batch-response.json"
 receive_one_sqs_batch "$QUEUE_URL" > "$BATCH_RESPONSE_JSON"
 
-python3 - <<'PY' "$BATCH_RESPONSE_JSON" "$E2E_OUTPUT_DIR/build-event.json"
-import json, sys
-response = json.load(open(sys.argv[1]))
-messages = response.get('Messages', [])
-if not messages:
-    raise SystemExit('expected one SQS batch message')
-body = json.loads(messages[0]['Body'])
-event = {
-    'batch_id': body['batch_id'],
-    'wal_key': body['wal_key'],
-    'version_id': 1,
-    'embedding_dim': 3,
-}
-json.dump(event, open(sys.argv[2], 'w'))
-PY
+make_sqs_event "$BATCH_RESPONSE_JSON" "$E2E_OUTPUT_DIR/build-event.json"
 
 BUILD_RESPONSE_JSON="$E2E_OUTPUT_DIR/build-response.json"
 sam local invoke BuildFunction \
@@ -93,24 +83,34 @@ sam local invoke BuildFunction \
   --docker-network ltsearch-e2e \
   > "$BUILD_RESPONSE_JSON"
 
+QUERY_EVENT_JSON="$E2E_OUTPUT_DIR/query-event.json"
+make_apigw_event "$E2E_FIXTURES_DIR/query_request.json" /query "$QUERY_EVENT_JSON"
+
 QUERY_RESPONSE_JSON="$E2E_OUTPUT_DIR/query-response.json"
 sam local invoke QueryFunction \
   --template-file "$SAM_BUILT_TEMPLATE" \
   --env-vars "$ENV_VARS_JSON" \
-  --event "$E2E_FIXTURES_DIR/query_request.json" \
+  --event "$QUERY_EVENT_JSON" \
   --docker-network ltsearch-e2e \
   > "$QUERY_RESPONSE_JSON"
 
-assert_json_field "$WRITE_RESPONSE_JSON" accepted_count 6
-assert_json_field "$BUILD_RESPONSE_JSON" activated_version_id 1
+assert_lambda_json_field "$WRITE_RESPONSE_JSON" accepted_count 6
+
+python3 - <<'PY' "$BUILD_RESPONSE_JSON"
+import json, sys
+response = json.load(open(sys.argv[1]))
+assert response == {'batchItemFailures': []}, response
+PY
 
 python3 - <<'PY' "$QUERY_RESPONSE_JSON"
 import json, sys
 response = json.load(open(sys.argv[1]))
-assert response['index_version'] == 1, response
-assert response['dynamic_count'] >= 1, response
-doc_ids = [item['doc_id'] for item in response['dynamic_chunks']]
-assert 'doc-rust-hybrid' in doc_ids, response
+assert response['statusCode'] == 200, response
+body = json.loads(response['body'])
+assert body['index_version'] == 1, body
+assert body['dynamic_count'] >= 1, body
+doc_ids = [item['doc_id'] for item in body['dynamic_chunks']]
+assert 'doc-rust-hybrid' in doc_ids, body
 PY
 
 if [[ "${LTSEARCH_E2E_LTEMBED:-}" == "true" ]]; then
@@ -161,6 +161,7 @@ env = {
         'LTSEARCH_BUILD_S3_BUCKET': bucket,
         'LTSEARCH_BUILD_ARTIFACT_ROOT': '/tmp/ltsearch-e2e-artifacts-ltembed',
         'LTSEARCH_BUILD_EMBEDDING_PROVIDER': 'ltembed',
+        'LTSEARCH_BUILD_EMBEDDING_DIM': '512',
         'AWS_ENDPOINT_URL_S3': moto_endpoint,
     },
     'QueryFunction': {
@@ -173,34 +174,24 @@ env = {
 json.dump(env, open(env_path, 'w'))
 PY
 
+  LTEMBED_WRITE_EVENT_JSON="$E2E_OUTPUT_DIR/ltembed-write-event.json"
+  make_apigw_event "$E2E_FIXTURES_DIR/write_request.json" /write "$LTEMBED_WRITE_EVENT_JSON"
+
   LTEMBED_WRITE_RESPONSE_JSON="$E2E_OUTPUT_DIR/ltembed-write-response.json"
   sam local invoke WriteFunction \
     --template-file "$SAM_BUILT_TEMPLATE" \
     --env-vars "$ENV_VARS_LTEMBED_JSON" \
-    --event "$E2E_FIXTURES_DIR/write_request.json" \
+    --event "$LTEMBED_WRITE_EVENT_JSON" \
     --docker-network ltsearch-e2e \
     > "$LTEMBED_WRITE_RESPONSE_JSON"
 
   LTEMBED_BATCH_RESPONSE_JSON="$E2E_OUTPUT_DIR/ltembed-batch-response.json"
   receive_one_sqs_batch "$QUEUE_URL" > "$LTEMBED_BATCH_RESPONSE_JSON"
 
-  python3 - <<'PY' "$LTEMBED_BATCH_RESPONSE_JSON" "$E2E_OUTPUT_DIR/ltembed-build-event.json"
-import json, sys
-response = json.load(open(sys.argv[1]))
-messages = response.get('Messages', [])
-if not messages:
-    raise SystemExit('expected one SQS batch message for LTEmbed run')
-body = json.loads(messages[0]['Body'])
-# The fixed-provider run above already activated version 1 in the shared
-# bucket; the monotonic publish check requires a strictly greater version.
-event = {
-    'batch_id': body['batch_id'],
-    'wal_key': body['wal_key'],
-    'version_id': 2,
-    'embedding_dim': 512,
-}
-json.dump(event, open(sys.argv[2], 'w'))
-PY
+  # The fixed-provider run above already activated version 1 in the shared
+  # bucket; the builder allocates the next version from _head, so this run
+  # publishes version 2 without a hand-authored version id.
+  make_sqs_event "$LTEMBED_BATCH_RESPONSE_JSON" "$E2E_OUTPUT_DIR/ltembed-build-event.json"
 
   LTEMBED_BUILD_RESPONSE_JSON="$E2E_OUTPUT_DIR/ltembed-build-response.json"
   sam local invoke BuildFunction \
@@ -210,25 +201,35 @@ PY
     --docker-network ltsearch-e2e \
     > "$LTEMBED_BUILD_RESPONSE_JSON"
 
+  LTEMBED_QUERY_EVENT_JSON="$E2E_OUTPUT_DIR/ltembed-query-event.json"
+  make_apigw_event "$E2E_FIXTURES_DIR/query_request.json" /query "$LTEMBED_QUERY_EVENT_JSON"
+
   LTEMBED_QUERY_RESPONSE_JSON="$E2E_OUTPUT_DIR/ltembed-query-response.json"
   sam local invoke QueryFunction \
     --template-file "$SAM_BUILT_TEMPLATE" \
     --env-vars "$ENV_VARS_LTEMBED_JSON" \
-    --event "$E2E_FIXTURES_DIR/query_request.json" \
+    --event "$LTEMBED_QUERY_EVENT_JSON" \
     --docker-network ltsearch-e2e \
     > "$LTEMBED_QUERY_RESPONSE_JSON"
 
-  assert_json_field "$LTEMBED_WRITE_RESPONSE_JSON" accepted_count 6
-  assert_json_field "$LTEMBED_BUILD_RESPONSE_JSON" activated_version_id 2
+  assert_lambda_json_field "$LTEMBED_WRITE_RESPONSE_JSON" accepted_count 6
+
+  python3 - <<'PY' "$LTEMBED_BUILD_RESPONSE_JSON"
+import json, sys
+response = json.load(open(sys.argv[1]))
+assert response == {'batchItemFailures': []}, response
+PY
 
   python3 - <<'PY' "$LTEMBED_QUERY_RESPONSE_JSON"
 import json, sys
 response = json.load(open(sys.argv[1]))
-assert response['index_version'] == 2, response
-assert response['dynamic_count'] >= 1, response
-doc_ids = [item['doc_id'] for item in response['dynamic_chunks']]
-assert 'doc-rust-hybrid' in doc_ids, response
-print(f"LTEmbed query OK — index_version={response['index_version']}, dynamic_count={response['dynamic_count']}, doc_ids={doc_ids[:3]}...")
+assert response['statusCode'] == 200, response
+body = json.loads(response['body'])
+assert body['index_version'] == 2, body
+assert body['dynamic_count'] >= 1, body
+doc_ids = [item['doc_id'] for item in body['dynamic_chunks']]
+assert 'doc-rust-hybrid' in doc_ids, body
+print(f"LTEmbed query OK — index_version={body['index_version']}, dynamic_count={body['dynamic_count']}, doc_ids={doc_ids[:3]}...")
 PY
 
   echo "LTEmbed E2E complete." >&2

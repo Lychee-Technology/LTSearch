@@ -25,21 +25,7 @@ curl -sf -X POST "$SAM_API_BASE/write" \
 BATCH_RESPONSE_JSON="$E2E_OUTPUT_DIR/batch-response.json"
 receive_one_sqs_batch "$QUEUE_URL" > "$BATCH_RESPONSE_JSON"
 
-python3 - <<'PY' "$BATCH_RESPONSE_JSON" "$E2E_OUTPUT_DIR/build-event.json"
-import json, sys
-response = json.load(open(sys.argv[1]))
-messages = response.get('Messages', [])
-if not messages:
-    raise SystemExit('expected one SQS batch message after POST /write')
-body = json.loads(messages[0]['Body'])
-event = {
-    'batch_id': body['batch_id'],
-    'wal_key': body['wal_key'],
-    'version_id': 1,
-    'embedding_dim': 3,
-}
-json.dump(event, open(sys.argv[2], 'w'))
-PY
+make_sqs_event "$BATCH_RESPONSE_JSON" "$E2E_OUTPUT_DIR/build-event.json"
 
 echo "--- invoke BuildFunction ---" >&2
 BUILD_RESPONSE_JSON="$E2E_OUTPUT_DIR/build-response.json"
@@ -58,7 +44,12 @@ curl -sf -X POST "$SAM_API_BASE/query" \
   > "$QUERY_RESPONSE_JSON"
 
 assert_json_field "$WRITE_RESPONSE_JSON" accepted_count 6
-assert_json_field "$BUILD_RESPONSE_JSON" activated_version_id 1
+
+python3 - <<'PY' "$BUILD_RESPONSE_JSON"
+import json, sys
+response = json.load(open(sys.argv[1]))
+assert response == {'batchItemFailures': []}, response
+PY
 
 python3 - <<'PY' "$QUERY_RESPONSE_JSON"
 import json, sys

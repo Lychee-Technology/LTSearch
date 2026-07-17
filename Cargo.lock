@@ -4671,6 +4671,7 @@ dependencies = [
  "aws-sdk-s3",
  "aws-sdk-sqs",
  "axum",
+ "base64 0.22.1",
  "futures",
  "http-body-util",
  "lambda_runtime",

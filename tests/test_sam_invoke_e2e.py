@@ -23,6 +23,10 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("BuildFunction:", content)
         self.assertIn("QueryFunction:", content)
         self.assertIn("PackageType: Image", content)
+        # HTTP API (payload v2) events so `sam local start-api` sends v2
+        # envelopes to the write/query runtimes.
+        self.assertIn("Type: HttpApi", content)
+        self.assertNotIn("Type: Api\n", content)
         self.assertIn("sam/write_lambda.Dockerfile", content)
         self.assertIn("sam/index_builder_lambda.Dockerfile", content)
         self.assertIn("sam/query_lambda.Dockerfile", content)
@@ -63,6 +67,12 @@ class SamInvokeE2ETest(unittest.TestCase):
         self.assertIn("ENV_VARS_JSON", content)
         self.assertIn("http://moto:5000", content)
         self.assertNotIn("host.docker.internal", content)
+        # write/query are driven through API Gateway v2 envelopes, the builder
+        # through an SQS batch envelope; responses are asserted accordingly.
+        self.assertIn("make_apigw_event", content)
+        self.assertIn("make_sqs_event", content)
+        self.assertIn("assert_lambda_json_field", content)
+        self.assertIn("batchItemFailures", content)
 
     def test_e2e_helpers_keep_long_sam_builds_alive_in_ci(self) -> None:
         helpers = (REPO_ROOT / "scripts" / "e2e" / "lib.sh").read_text(encoding="utf-8")
@@ -173,7 +183,9 @@ class SamInvokeE2ETest(unittest.TestCase):
         # the real-mode Docker build patches ltembed to .sam-local-deps/LTEmbed,
         # so the checkout must be staged before building
         self.assertIn("prepare_local_ltembed_checkout", content)
-        self.assertIn("embedding_dim': 512", content)
+        # ltembed publishes 512-dim vectors; the dimension is passed as the
+        # required build env var (the SQS envelope no longer hand-carries it).
+        self.assertIn("'LTSEARCH_BUILD_EMBEDDING_DIM': '512'", content)
         self.assertIn("env-vars-ltembed.json", content)
         self.assertIn("LTSEARCH_BUILD_EMBEDDING_PROVIDER", content)
         self.assertIn("LTSEARCH_QUERY_EMBEDDING_PROVIDER", content)

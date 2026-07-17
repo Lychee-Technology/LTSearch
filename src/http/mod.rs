@@ -18,11 +18,8 @@ pub struct ErrorBody {
 }
 
 pub fn error_status(error_type: &str) -> StatusCode {
-    if error_type == "validation_error" {
-        StatusCode::BAD_REQUEST
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    }
+    StatusCode::from_u16(crate::lambda_events::status_code_for_error_type(error_type))
+        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 pub fn error_response(error_type: impl Into<String>, message: impl Into<String>) -> Response {
