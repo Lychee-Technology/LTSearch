@@ -8,7 +8,10 @@ pub mod static_source;
 pub mod turbo_codec;
 
 pub use assets::{AssetError, CentroidTable, ProjectionMatrix};
-pub use header::{KnownRecordLayout, TurboHeader, TURBO_MAGIC};
+pub use header::{
+    KnownRecordLayout, TurboHeader, TurboHeaderError, TURBO_MAGIC, TURBO_VERSION_V2,
+    TURBO_VERSION_V3,
+};
 pub use meta::{CorpusTypeId, MetaRecord, META_RECORD_SIZE};
 pub use mmap_index::MmapIndex;
 pub use record::{TurboRecord512, TurboRecordRef, TurboRecordSlice, TypedTurboRecordRef};

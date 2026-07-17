@@ -251,7 +251,7 @@ impl MmapIndex {
 
     pub fn records(&self) -> TurboRecordSlice<'_> {
         match self.layout {
-            KnownRecordLayout::V2Dim512 => {
+            KnownRecordLayout::V2Dim512 | KnownRecordLayout::V3Dim512 => {
                 let bytes = &self.bin_mmap[TurboHeader::SIZE..];
                 let ptr = bytes.as_ptr() as *const TurboRecord512;
                 let len = self.header.record_count() as usize;
