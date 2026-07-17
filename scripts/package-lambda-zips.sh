@@ -10,7 +10,7 @@ readonly BUILDER_IMAGE="${LTSEARCH_BUILDER_IMAGE:-ltsearch-lambda-zip-builder}"
 # stub = features lambda（fixed embedding，e2e/CI 用）；real = features lambda,ltembed。
 readonly LTEMBED_MODE="${LTSEARCH_LTEMBED_MODE:-stub}"
 
-docker build \
+DOCKER_BUILDKIT=1 docker build \
   --platform linux/arm64 \
   --build-arg LTEMBED_MODE="$LTEMBED_MODE" \
   --tag "$BUILDER_IMAGE" \

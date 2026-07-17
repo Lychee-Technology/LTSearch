@@ -98,6 +98,7 @@ jobs:
           python-version: '3.x'
       - run: python3 -B tests/test_lambda_zip_packaging.py
       - run: python3 -m pip install --upgrade pip awscli aws-sam-cli
+      - run: sam validate --lint --template-file template.yaml
       - run: docker compose -f docker-compose.moto.yml up -d
       - run: bash scripts/e2e/run-sam-zip-invoke-e2e.sh
       - if: always()
