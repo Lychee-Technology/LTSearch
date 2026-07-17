@@ -55,8 +55,15 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<ApiGatewayV2Respo
 }
 
 fn main() -> Result<(), Error> {
-    tokio::runtime::Runtime::new()?
-        .block_on(async { lambda_runtime::run(service_fn(function_handler)).await })
+    tokio::runtime::Runtime::new()?.block_on(async {
+        // ZIP 部署不带模型：provider=ltembed 且配置了 S3 供给时，冷启动先把
+        // 模型资产下载校验到 /tmp（#111）。失败即 init 报错，不进 handler 循环。
+        #[cfg(feature = "ltembed")]
+        ltsearch::embedding::model_assets::provision_from_env("QUERY")
+            .await
+            .map_err(Error::from)?;
+        lambda_runtime::run(service_fn(function_handler)).await
+    })
 }
 
 #[cfg(test)]

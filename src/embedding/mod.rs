@@ -1,6 +1,8 @@
 pub mod generator;
 #[cfg(feature = "ltembed")]
 pub mod ltembed;
+#[cfg(all(feature = "aws", feature = "ltembed"))]
+pub mod model_assets;
 pub mod provider;
 
 pub use generator::{EmbeddingError, EmbeddingGenerator};

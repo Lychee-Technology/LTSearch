@@ -50,13 +50,36 @@ impl LTEmbedEmbeddingGenerator<OnnxEngine> {
         config: &LTEmbedConfig,
         input_kind: EmbeddingInputKind,
     ) -> Result<Self, EmbeddingError> {
+        // 预检文件系统路径：Lambda ZIP 部署下资产由 S3→/tmp 冷启动供给
+        // （src/embedding/model_assets.rs），镜像/挂载部署则预置在容器内。
+        // 路径缺失把供给这层原因直接说出来，而不是让 ORT 的 "file not found"
+        // 留给运维猜。
+        for (label, path) in [
+            ("bundle dir", config.bundle_dir.as_str()),
+            ("model", config.model_path.as_str()),
+        ] {
+            if !std::path::Path::new(path).exists() {
+                return Err(EmbeddingError::Generation {
+                    message: format!(
+                        "LTEmbed {label} not found at '{path}' — model assets not provisioned \
+                         (ZIP deployments download them from S3 at cold start: check \
+                         LTSEARCH_*_LTEMBED_S3_BUCKET/_S3_PREFIX and startup logs; \
+                         image/mount deployments must pre-place the bundle)"
+                    ),
+                });
+            }
+        }
         let engine = OnnxEngine::from_bundle_dir(
             &config.bundle_dir,
             &config.model_path,
             OnnxEngineConfig::default(),
         )
         .map_err(|error| EmbeddingError::Generation {
-            message: format!("LTEmbed bootstrap failed: {error}"),
+            message: format!(
+                "LTEmbed bootstrap failed for bundle_dir '{}': {error} — \
+                 verify the model assets match linux/arm64 and are not corrupt",
+                config.bundle_dir
+            ),
         })?;
 
         Ok(Self { engine, input_kind })
@@ -103,5 +126,25 @@ where
             .map_err(|error| EmbeddingError::Generation {
                 message: format!("LTEmbed embedding failed: {error}"),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_config_reports_unprovisioned_assets() {
+        let config = LTEmbedConfig {
+            bundle_dir: "/tmp/ltembed-nonexistent-test".to_string(),
+            model_path: "/tmp/ltembed-nonexistent-test/model.ort".to_string(),
+        };
+        let error = LTEmbedEmbeddingGenerator::from_config(&config, EmbeddingInputKind::Query)
+            .err()
+            .expect("missing bundle dir must fail");
+        let message = error.to_string();
+        assert!(message.contains("/tmp/ltembed-nonexistent-test"), "{message}");
+        assert!(message.contains("model assets not provisioned"), "{message}");
+        assert!(message.contains("LTEMBED_S3_BUCKET"), "{message}");
     }
 }
