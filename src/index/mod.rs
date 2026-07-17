@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod header;
+pub mod lance_source;
 pub mod meta;
 pub mod meta_ext;
 pub mod mmap_index;
@@ -17,6 +18,7 @@ pub use header::{
 };
 pub use meta::{CorpusTypeId, MetaRecord, META_RECORD_SIZE};
 pub use meta_ext::{MetaExtRecord, META_EXT_RECORD_SIZE};
+pub use lance_source::{load_lance_snapshot, LanceSnapshot, LanceStaticSourceConfig};
 pub use mmap_index::MmapIndex;
 pub use record::{TurboRecord512, TurboRecordRef, TurboRecordSlice, TypedTurboRecordRef};
 pub use release_manifest::{
