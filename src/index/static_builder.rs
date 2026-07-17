@@ -15,10 +15,12 @@ use super::{
     META_RECORD_SIZE,
 };
 
-const CENTROIDS_PER_DIM: u32 = 4;
-const CENTROIDS_SEED: u64 = 7;
-const PROJECTION_SEED: u64 = 11;
-const SUPPORTED_TYPED_DIM: u32 = 512;
+// Shared with the v3 `StaticReleaseBuilder` so both writers derive the same
+// codec assets and doc_id hashes from a single source of truth.
+pub(crate) const CENTROIDS_PER_DIM: u32 = 4;
+pub(crate) const CENTROIDS_SEED: u64 = 7;
+pub(crate) const PROJECTION_SEED: u64 = 11;
+pub(crate) const SUPPORTED_TYPED_DIM: u32 = 512;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -120,47 +122,10 @@ impl<E> StaticIndexBuilder<E> {
         let mut turbo_static_title = Vec::new();
 
         for (chunk, embedding) in chunks.iter().zip(resolved_embeddings.iter()) {
-            let encoded = encode_vector(embedding, &centroids, &projection).map_err(|error| {
-                IndexError::Operation {
-                    message: format!("failed to encode static chunk {}: {error}", chunk.doc_id),
-                }
-            })?;
-
             let doc_id = parse_doc_id(&chunk.doc_id)?;
-            let record = TurboRecord512 {
-                doc_id,
-                idx: encoded
-                    .idx
-                    .clone()
-                    .try_into()
-                    .map_err(|_| IndexError::Operation {
-                        message: format!(
-                            "static chunk {} produced idx payload with unexpected length {}",
-                            chunk.doc_id,
-                            encoded.idx.len()
-                        ),
-                    })?,
-                qjl: encoded
-                    .qjl
-                    .clone()
-                    .try_into()
-                    .map_err(|_| IndexError::Operation {
-                        message: format!(
-                            "static chunk {} produced qjl payload with unexpected length {}",
-                            chunk.doc_id,
-                            encoded.qjl.len()
-                        ),
-                    })?,
-                gamma: encoded.gamma,
-                _reserved: [0; 4],
-            };
-            let record_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(
-                    &record as *const TurboRecord512 as *const u8,
-                    std::mem::size_of::<TurboRecord512>(),
-                )
-            };
-            turbo_static.extend_from_slice(record_bytes);
+            let record =
+                encode_turbo_record(doc_id, embedding, &centroids, &projection, &chunk.doc_id)?;
+            turbo_static.extend_from_slice(turbo_record_bytes(&record));
 
             let text_offset = turbo_static_text.len() as u64;
             turbo_static_text.extend_from_slice(chunk.text.as_bytes());
@@ -191,13 +156,7 @@ impl<E> StaticIndexBuilder<E> {
                 title_offset,
                 title_len,
             };
-            let meta_bytes: &[u8] = unsafe {
-                std::slice::from_raw_parts(
-                    &meta as *const MetaRecord as *const u8,
-                    META_RECORD_SIZE,
-                )
-            };
-            turbo_static_meta.extend_from_slice(meta_bytes);
+            turbo_static_meta.extend_from_slice(meta_record_bytes(&meta));
         }
 
         // Stage next to the output directory (same filesystem), then swap
@@ -335,7 +294,7 @@ fn parse_doc_id(doc_id: &str) -> Result<u64, IndexError> {
     Ok(stable_hash_doc_id(doc_id))
 }
 
-fn stable_hash_doc_id(doc_id: &str) -> u64 {
+pub(crate) fn stable_hash_doc_id(doc_id: &str) -> u64 {
     let mut hash = FNV_OFFSET_BASIS;
     for byte in doc_id.as_bytes() {
         hash ^= u64::from(*byte);
@@ -344,7 +303,69 @@ fn stable_hash_doc_id(doc_id: &str) -> u64 {
     hash
 }
 
-fn corpus_type_id(corpus_type: &CorpusType) -> u8 {
+/// Encodes one embedding into a `TurboRecord512`. Shared by the v2
+/// `StaticIndexBuilder` and the v3 `StaticReleaseBuilder` so both writers
+/// produce byte-identical records for the same input. `label` is only used in
+/// error messages (the caller's original doc_id string).
+pub(crate) fn encode_turbo_record(
+    doc_id: u64,
+    embedding: &[f32],
+    centroids: &CentroidTable,
+    projection: &ProjectionMatrix,
+    label: &str,
+) -> Result<TurboRecord512, IndexError> {
+    let encoded =
+        encode_vector(embedding, centroids, projection).map_err(|error| IndexError::Operation {
+            message: format!("failed to encode static chunk {label}: {error}"),
+        })?;
+
+    Ok(TurboRecord512 {
+        doc_id,
+        idx: encoded
+            .idx
+            .clone()
+            .try_into()
+            .map_err(|_| IndexError::Operation {
+                message: format!(
+                    "static chunk {label} produced idx payload with unexpected length {}",
+                    encoded.idx.len()
+                ),
+            })?,
+        qjl: encoded
+            .qjl
+            .clone()
+            .try_into()
+            .map_err(|_| IndexError::Operation {
+                message: format!(
+                    "static chunk {label} produced qjl payload with unexpected length {}",
+                    encoded.qjl.len()
+                ),
+            })?,
+        gamma: encoded.gamma,
+        _reserved: [0; 4],
+    })
+}
+
+/// Views a `TurboRecord512` as its raw `repr(C)` bytes for serialization.
+pub(crate) fn turbo_record_bytes(record: &TurboRecord512) -> &[u8] {
+    // Safety: `TurboRecord512` is `#[repr(C)]` with no padding beyond its
+    // declared fields; reading it as bytes is sound and matches the layout the
+    // mmap reader reconstructs.
+    unsafe {
+        std::slice::from_raw_parts(
+            record as *const TurboRecord512 as *const u8,
+            std::mem::size_of::<TurboRecord512>(),
+        )
+    }
+}
+
+/// Views a `MetaRecord` as its raw `repr(C)` bytes for serialization.
+pub(crate) fn meta_record_bytes(meta: &MetaRecord) -> &[u8] {
+    // Safety: `MetaRecord` is `#[repr(C)]` sized to exactly `META_RECORD_SIZE`.
+    unsafe { std::slice::from_raw_parts(meta as *const MetaRecord as *const u8, META_RECORD_SIZE) }
+}
+
+pub(crate) fn corpus_type_id(corpus_type: &CorpusType) -> u8 {
     match corpus_type {
         CorpusType::Legal => 0,
         CorpusType::Contract => 1,

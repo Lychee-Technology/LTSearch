@@ -1,4 +1,6 @@
-use ltsearch::index::{TurboHeader, TURBO_MAGIC};
+use ltsearch::index::{
+    KnownRecordLayout, TurboHeader, TurboHeaderError, TurboRecord512, TURBO_MAGIC,
+};
 
 #[test]
 fn header_roundtrip_for_512_dim() {
@@ -73,4 +75,31 @@ fn header_expected_file_size_matches_data_region() {
     let header = TurboHeader::new(512, 1000);
     let expected = TurboHeader::SIZE as u64 + 1000 * 204;
     assert_eq!(header.expected_file_size(), expected);
+}
+
+#[test]
+fn header_roundtrips_v3_version() {
+    let header = TurboHeader::new_v3(512, 3);
+    assert_eq!(header.version(), 3);
+    let parsed = TurboHeader::from_bytes(&header.to_bytes()).unwrap();
+    assert_eq!(parsed.version(), 3);
+    assert_eq!(parsed.dim(), 512);
+    assert_eq!(parsed.record_count(), 3);
+}
+
+#[test]
+fn header_rejects_unknown_version() {
+    let mut bytes = TurboHeader::new_v3(512, 1).to_bytes();
+    bytes[4..8].copy_from_slice(&4u32.to_le_bytes());
+    assert!(matches!(
+        TurboHeader::from_bytes(&bytes),
+        Err(TurboHeaderError::UnsupportedVersion { version: 4 })
+    ));
+}
+
+#[test]
+fn layout_v3_dim512_record_size_matches_v2() {
+    let header = TurboHeader::new_v3(512, 1);
+    let layout = KnownRecordLayout::from_header(&header).unwrap();
+    assert_eq!(layout.record_size(), std::mem::size_of::<TurboRecord512>());
 }

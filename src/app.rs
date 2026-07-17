@@ -26,7 +26,9 @@ use crate::http::build::{build_router, BuildServerState, SnapshotBuildRequest};
 use crate::http::query::{query_router, QueryServerState};
 use crate::http::write::{write_router, WriteServerState};
 use crate::http::{port_from_env, serve};
-use crate::index::{parse_static_source_lines, StaticIndexBuilder, TurboBuildConfig};
+use crate::index::{
+    load_lance_snapshot, LanceStaticSourceConfig, ReleaseSource, StaticReleaseBuilder,
+};
 use crate::indexing::{BuildIndexRequest, IndexPublisher, LocalIndexBuilder, PublishRequest};
 use crate::local::{
     LocalPublishStorage, SqliteBuildJobSource, SqliteBuildQueue, SqliteDb, SqliteWalStorage,
@@ -133,8 +135,9 @@ pub async fn run_query() -> Result<(), AppError> {
 }
 
 /// static-build 角色：一次性 CLI（非服务）。与 `turbo_index_builder` 同形的
-/// `--config <json> --output <dir>`，但静态源从**本地文件路径**（`sources[].key`）
-/// 读取 JSONL，而非 S3——本地 profile 不携带 AWS 客户端。
+/// `--config <json> --output <dir>`，但静态源是一个 **pin 版本的 Lance 快照**
+/// （`LanceStaticSourceConfig`）：确定性全表扫描、零重嵌，直接产出 TurboQuant v3
+/// release。本地 profile 不携带 AWS 客户端。
 pub async fn run_static_build<I, S>(args: I) -> Result<String, AppError>
 where
     I: IntoIterator<Item = S>,
@@ -143,35 +146,37 @@ where
     let parsed = parse_static_build_args(args)?;
     let config_text = std::fs::read_to_string(&parsed.config_path)
         .map_err(|error| format!("failed to read {}: {error}", parsed.config_path))?;
-    let config: TurboBuildConfig = serde_json::from_str(&config_text)
+    let config: LanceStaticSourceConfig = serde_json::from_str(&config_text)
         .map_err(|error| format!("failed to parse {}: {error}", parsed.config_path))?;
 
-    let mut chunks = Vec::new();
-    for source in &config.sources {
-        let bytes = std::fs::read(&source.key)
-            .map_err(|error| format!("failed to read static source {}: {error}", source.key))?;
-        let mut source_chunks = parse_static_source_lines(&bytes, &source.corpus_type, &source.key)
-            .map_err(|error| error.to_string())?;
-        chunks.append(&mut source_chunks);
-    }
+    let snapshot = load_lance_snapshot(&config)
+        .await
+        .map_err(|error| error.to_string())?;
 
-    let provider = build_embedding_provider_from_env().map_err(|error| error.to_string())?;
-    let generator =
-        build_embedding_generator_from_env(provider).map_err(|error| error.to_string())?;
+    let source = ReleaseSource {
+        kind: "lance".to_string(),
+        dataset_path: config.dataset_path.clone(),
+        table_version: snapshot.table_version,
+        table_row_count: snapshot.row_count,
+        corpus_type: config.corpus_type.clone(),
+    };
 
-    let embeddings = vec![None; chunks.len()];
-    let result = StaticIndexBuilder::<()>::new()
-        .build(
+    let manifest = StaticReleaseBuilder
+        .build_release(
             std::path::Path::new(&parsed.output_dir),
-            &chunks,
-            &embeddings,
-            &generator,
+            &snapshot.chunks,
+            &snapshot.embeddings,
+            &config.embedding_profile,
+            &source,
         )
         .map_err(|error| error.to_string())?;
 
     Ok(format!(
-        "built {} static records (dim={}) into {}",
-        result.record_count, result.embedding_dim, parsed.output_dir
+        "built static release {} ({} records, dim={}) into {}",
+        manifest.release_id,
+        manifest.input_fingerprint.doc_count,
+        manifest.embedding_profile.dim,
+        parsed.output_dir
     ))
 }
 

@@ -3,10 +3,12 @@ use std::fmt;
 use super::record::TurboRecord512;
 
 pub const TURBO_MAGIC: [u8; 4] = *b"TQNT";
-const TURBO_VERSION: u32 = 2;
+pub const TURBO_VERSION_V2: u32 = 2;
+pub const TURBO_VERSION_V3: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurboHeader {
+    version: u32,
     dim: u32,
     record_count: u64,
 }
@@ -23,6 +25,7 @@ pub enum TurboHeaderError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnownRecordLayout {
     V2Dim512,
+    V3Dim512,
 }
 
 impl fmt::Display for TurboHeaderError {
@@ -51,14 +54,15 @@ impl fmt::Display for TurboHeaderError {
 impl KnownRecordLayout {
     pub fn from_header(header: &TurboHeader) -> Result<Self, TurboHeaderError> {
         match (header.version(), header.dim()) {
-            (TURBO_VERSION, 512) => Ok(Self::V2Dim512),
+            (TURBO_VERSION_V2, 512) => Ok(Self::V2Dim512),
+            (TURBO_VERSION_V3, 512) => Ok(Self::V3Dim512),
             (version, dim) => Err(TurboHeaderError::UnsupportedLayout { version, dim }),
         }
     }
 
     pub fn record_size(&self) -> usize {
         match self {
-            Self::V2Dim512 => std::mem::size_of::<TurboRecord512>(),
+            Self::V2Dim512 | Self::V3Dim512 => std::mem::size_of::<TurboRecord512>(),
         }
     }
 }
@@ -70,7 +74,20 @@ impl TurboHeader {
 
     pub fn new(dim: u32, record_count: u64) -> Self {
         assert!(dim > 0, "dim must be positive");
-        Self { dim, record_count }
+        Self {
+            version: TURBO_VERSION_V2,
+            dim,
+            record_count,
+        }
+    }
+
+    pub fn new_v3(dim: u32, record_count: u64) -> Self {
+        assert!(dim > 0, "dim must be positive");
+        Self {
+            version: TURBO_VERSION_V3,
+            dim,
+            record_count,
+        }
     }
 
     pub fn magic(&self) -> [u8; 4] {
@@ -78,7 +95,7 @@ impl TurboHeader {
     }
 
     pub fn version(&self) -> u32 {
-        TURBO_VERSION
+        self.version
     }
 
     pub fn dim(&self) -> u32 {
@@ -120,7 +137,7 @@ impl TurboHeader {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = vec![0u8; Self::SIZE];
         buf[0..4].copy_from_slice(&TURBO_MAGIC);
-        buf[4..8].copy_from_slice(&TURBO_VERSION.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.version.to_le_bytes());
         buf[8..12].copy_from_slice(&self.dim.to_le_bytes());
         buf[12..20].copy_from_slice(&self.record_count.to_le_bytes());
         buf
@@ -141,7 +158,7 @@ impl TurboHeader {
         }
 
         let version = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        if version != TURBO_VERSION {
+        if !matches!(version, TURBO_VERSION_V2 | TURBO_VERSION_V3) {
             return Err(TurboHeaderError::UnsupportedVersion { version });
         }
 
@@ -152,6 +169,10 @@ impl TurboHeader {
 
         let record_count = u64::from_le_bytes(buf[12..20].try_into().unwrap());
 
-        Ok(Self { dim, record_count })
+        Ok(Self {
+            version,
+            dim,
+            record_count,
+        })
     }
 }
