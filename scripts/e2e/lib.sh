@@ -257,3 +257,17 @@ actual = str(body.get(field))
 assert actual == expected, f'{field}: expected {expected}, got {actual} in {body}'
 PY
 }
+
+# 断言 zip 根含可执行 bootstrap（provided.al2023 自定义运行时布局）。
+# 用法: assert_zip_layout <zip-file>
+assert_zip_layout() {
+  python3 - "$1" <<'PY'
+import stat, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    names = archive.namelist()
+    assert names == ['bootstrap'], f'zip root must contain only bootstrap, got {names}'
+    info = archive.getinfo('bootstrap')
+    mode = info.external_attr >> 16
+    assert mode & stat.S_IXUSR, f'bootstrap must be executable, mode={oct(mode)}'
+PY
+}
