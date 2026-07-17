@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  LTSearch production deployment: Lambda ZIP (provided.al2023 / arm64),
+  HTTP API front for write/query, SQS-triggered index builder with
+  partial-batch failure redrive. (#109)
+
+Parameters:
+  EmbeddingProvider:
+    Type: String
+    Default: ltembed
+    Description: >-
+      LTSEARCH_*_EMBEDDING_PROVIDER for build/query. ltembed 模型资产
+      （LTSEARCH_*_LTEMBED_BUNDLE_DIR 等 env 与 Lambda Layer）由 #111 交付；
+      在那之前生产部署需自带模型资产或改用 fixed 做冒烟。
+  EmbeddingDim:
+    Type: String
+    Default: '512'
+    Description: LTSEARCH_BUILD_EMBEDDING_DIM（jina/512 为 #94 裁决的默认档）。
+
+Globals:
+  Function:
+    Runtime: provided.al2023
+    Handler: bootstrap
+    Architectures:
+      - arm64
+    Timeout: 30
+    MemorySize: 1024
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+
+  BuildDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
+  BuildQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      # timeout-safe：≥ 6 × BuildFunction Timeout(900s)，避免在途消息被重复投递。
+      VisibilityTimeout: 5400
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BuildDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  WriteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist/write_lambda/
+      Events:
+        WriteApi:
+          Type: HttpApi
+          Properties:
+            Path: /write
+            Method: post
+        DeleteApi:
+          Type: HttpApi
+          Properties:
+            Path: /delete
+            Method: post
+      Environment:
+        Variables:
+          LTSEARCH_WRITE_S3_BUCKET: !Ref ArtifactBucket
+          LTSEARCH_WRITE_SQS_QUEUE_URL: !Ref BuildQueue
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactBucket
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt BuildQueue.QueueName
+
+  QueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist/query_lambda/
+      MemorySize: 3008
+      Events:
+        QueryApi:
+          Type: HttpApi
+          Properties:
+            Path: /query
+            Method: post
+      Environment:
+        Variables:
+          LTSEARCH_QUERY_S3_BUCKET: !Ref ArtifactBucket
+          LTSEARCH_QUERY_ARTIFACT_ROOT: /tmp/ltsearch-artifacts
+          LTSEARCH_QUERY_EMBEDDING_PROVIDER: !Ref EmbeddingProvider
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ArtifactBucket
+
+  BuildFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist/index_builder_lambda/
+      Timeout: 900
+      MemorySize: 3008
+      Events:
+        BuildQueueEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt BuildQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+      Environment:
+        Variables:
+          LTSEARCH_BUILD_S3_BUCKET: !Ref ArtifactBucket
+          LTSEARCH_BUILD_ARTIFACT_ROOT: /tmp/ltsearch-artifacts
+          LTSEARCH_BUILD_EMBEDDING_PROVIDER: !Ref EmbeddingProvider
+          LTSEARCH_BUILD_EMBEDDING_DIM: !Ref EmbeddingDim
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactBucket
+        - SQSPollerPolicy:
+            QueueName: !GetAtt BuildQueue.QueueName
+
+Outputs:
+  ApiUrl:
+    Description: HTTP API base URL (POST /write, /delete, /query)
+    Value: !Sub 'https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+  BuildQueueUrl:
+    Value: !Ref BuildQueue
