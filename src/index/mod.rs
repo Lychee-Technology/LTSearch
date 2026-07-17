@@ -4,6 +4,7 @@ pub mod meta;
 pub mod meta_ext;
 pub mod mmap_index;
 pub mod record;
+pub mod release_manifest;
 pub mod static_builder;
 pub mod static_source;
 pub mod turbo_codec;
