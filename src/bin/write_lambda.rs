@@ -17,8 +17,10 @@ struct DeleteBody {
     doc_ids: Vec<String>,
 }
 
-/// 事件 → WriteRequest：按 rawPath 分派 `/write`（tagged WriteRequest）与
+/// 事件 → WriteRequest：按 rawPath 精确分派 `/write`（tagged WriteRequest）与
 /// `/delete`（doc_ids 包装为 Delete），与 HTTP 服务模式的双路由契约对齐。
+/// HTTP API `$default` stage 下 rawPath 即为无前缀的精确路径；未配置路径
+/// （含带前缀变体如 `/internal/write`）一律 404。
 fn decode_write_request(payload: Value) -> Result<WriteRequest, ApiGatewayV2Response> {
     let event: ApiGatewayV2Request = serde_json::from_value(payload).map_err(|source| {
         ApiGatewayV2Response::error(
@@ -30,28 +32,28 @@ fn decode_write_request(payload: Value) -> Result<WriteRequest, ApiGatewayV2Resp
         .body_bytes()
         .map_err(|error| ApiGatewayV2Response::error("validation_error", error))?;
 
-    if event.raw_path.ends_with("/delete") {
-        let body: DeleteBody = serde_json::from_slice(&bytes).map_err(|source| {
-            ApiGatewayV2Response::error(
-                "validation_error",
-                format!("failed to deserialize delete request: {source}"),
-            )
-        })?;
-        Ok(WriteRequest::Delete {
-            doc_ids: body.doc_ids,
-        })
-    } else if event.raw_path.ends_with("/write") {
-        serde_json::from_slice(&bytes).map_err(|source| {
+    match event.raw_path.as_str() {
+        "/delete" => {
+            let body: DeleteBody = serde_json::from_slice(&bytes).map_err(|source| {
+                ApiGatewayV2Response::error(
+                    "validation_error",
+                    format!("failed to deserialize delete request: {source}"),
+                )
+            })?;
+            Ok(WriteRequest::Delete {
+                doc_ids: body.doc_ids,
+            })
+        }
+        "/write" => serde_json::from_slice(&bytes).map_err(|source| {
             ApiGatewayV2Response::error(
                 "validation_error",
                 format!("failed to deserialize write request: {source}"),
             )
-        })
-    } else {
-        Err(ApiGatewayV2Response::error(
+        }),
+        _ => Err(ApiGatewayV2Response::error(
             "not_found",
             format!("unsupported path: {}", event.raw_path),
-        ))
+        )),
     }
 }
 
@@ -151,5 +153,17 @@ mod tests {
         let response = decode_write_request(payload).expect_err("must produce error envelope");
         assert_eq!(response.status_code, 404);
         assert!(response.body.contains("not_found"));
+    }
+
+    #[test]
+    fn prefixed_known_suffix_path_returns_404_envelope() {
+        // 精确匹配：带前缀的 `/internal/write`、`/foo/delete` 不再被 suffix 放行。
+        for raw_path in ["/internal/write", "/foo/delete"] {
+            let payload = json!({"rawPath": raw_path, "body": "{}"});
+
+            let response = decode_write_request(payload).expect_err("must produce error envelope");
+            assert_eq!(response.status_code, 404, "path {raw_path} must 404");
+            assert!(response.body.contains("not_found"));
+        }
     }
 }
