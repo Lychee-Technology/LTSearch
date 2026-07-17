@@ -59,7 +59,9 @@ class LambdaZipPackagingTest(unittest.TestCase):
         self.assertIn("make_apigw_event", content)
         self.assertIn("make_sqs_event", content)
         self.assertIn("batchItemFailures", content)
-        self.assertIn('--template-file "$REPO_ROOT/template.yaml"', content)
+        self.assertIn('make_zip_e2e_template "$REPO_ROOT/template.yaml"', content)
+        self.assertIn('--template-file "$ZIP_E2E_TEMPLATE"', content)
+        self.assertNotIn('--template-file "$REPO_ROOT/template.yaml"', content)
 
     def test_ci_has_zip_e2e_job(self) -> None:
         content = WORKFLOW_PATH.read_text(encoding="utf-8")
