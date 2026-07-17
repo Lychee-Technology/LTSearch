@@ -11,6 +11,10 @@
 //! 产生不同字节;唯有 `canonical_metadata_json` 的 BTreeMap 规范化能让产物稳定。
 //! 本测试正是对这条决定性缝的端到端把关。
 
+// `ltsearch::app` 仅在 local profile 下编译;aws/lambda profile 的
+// `clippy --all-targets` 也会编译本 test crate,须整文件门控。
+#![cfg(feature = "local")]
+
 use std::sync::Arc;
 
 use arrow_array::types::Float32Type;

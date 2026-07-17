@@ -4,6 +4,10 @@
 //! `FixedSizeList<Float32,512>` 的 `documents` 表,捕获 `table.version()`,写 config
 //! JSON,再驱动 `run_static_build(["--config", .., "--output", ..])`。
 
+// `ltsearch::app` 仅在 local profile 下编译;aws/lambda profile 的
+// `clippy --all-targets` 也会编译本 test crate,须整文件门控。
+#![cfg(feature = "local")]
+
 use std::sync::Arc;
 
 use arrow_array::types::Float32Type;
