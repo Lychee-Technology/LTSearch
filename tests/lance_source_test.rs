@@ -255,6 +255,50 @@ async fn lance_source_rejects_missing_embedding_row() {
 }
 
 #[tokio::test]
+async fn lance_source_rejects_null_embedding_coordinate() {
+    // 非 null 的 FixedSizeList,但其中一个 Float32 子坐标为 null。`floats.values()`
+    // 绕过子元素 validity bitmap,若不显式拒绝会把非法向量的 backing-buffer 默认值
+    // 静默索引进来(#110 AC1:校验有限 embedding)。
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().to_str().unwrap();
+
+    let schema = make_schema(512);
+    let mut coords: Vec<Option<f32>> = (0..512).map(|i| Some(i as f32)).collect();
+    coords[0] = None; // 首坐标 null,list 本身非 null
+    let embeddings =
+        FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(vec![Some(coords)], 512);
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["doc-a"])),
+            Arc::new(StringArray::from(vec!["alpha"])),
+            Arc::new(StringArray::from(vec!["{}"])),
+            Arc::new(Int64Array::from(vec![0_i64])),
+            Arc::new(embeddings),
+        ],
+    )
+    .unwrap();
+
+    let batches: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+        vec![Ok(batch)].into_iter(),
+        schema,
+    ));
+    let conn = lancedb::connect(path).execute().await.unwrap();
+    let table = conn
+        .create_table("documents", batches)
+        .execute()
+        .await
+        .unwrap();
+    let version = table.version().await.unwrap();
+
+    let result = load_lance_snapshot(&config(path, version, profile(512))).await;
+    assert!(
+        result.is_err(),
+        "embedding with a null coordinate must fail the build"
+    );
+}
+
+#[tokio::test]
 async fn lance_source_rejects_wrong_dim() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().to_str().unwrap();

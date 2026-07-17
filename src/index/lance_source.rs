@@ -244,6 +244,16 @@ fn decode_embedding(
         )));
     }
 
+    // 一个非 null 的 FixedSizeList 仍可能含 null 子坐标(schema 的 `item` 字段
+    // nullable)。`values()` 直接暴露 backing buffer、绕过子元素 validity bitmap,
+    // 会把 null 坐标当成缓冲区默认值静默索引进来。这里显式拒绝,满足 #110 AC1
+    // 对「有限 embedding」的校验。
+    if floats.null_count() > 0 {
+        return Err(op(format!(
+            "Lance row {doc_id} embedding contains a null coordinate"
+        )));
+    }
+
     let embedding = floats.values().to_vec();
     if embedding.iter().any(|value| !value.is_finite()) {
         return Err(op(format!(
