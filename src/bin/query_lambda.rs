@@ -85,15 +85,19 @@ mod tests {
         let response = decode_search_request(payload).expect_err("must produce error envelope");
         assert_eq!(response.status_code, 400);
         assert!(response.body.contains("validation_error"));
-        assert!(response.body.contains("failed to deserialize search request"));
+        assert!(response
+            .body
+            .contains("failed to deserialize search request"));
     }
 
     #[test]
     fn non_apigw_event_returns_400_envelope() {
         // 直调裸 JSON（旧契约）不再被接受：信封字段类型不匹配 → 400。
-        let response = decode_search_request(json!({"body": 42}))
-            .expect_err("bare payload must be rejected");
+        let response =
+            decode_search_request(json!({"body": 42})).expect_err("bare payload must be rejected");
         assert_eq!(response.status_code, 400);
-        assert!(response.body.contains("failed to deserialize API Gateway event"));
+        assert!(response
+            .body
+            .contains("failed to deserialize API Gateway event"));
     }
 }

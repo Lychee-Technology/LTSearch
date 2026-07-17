@@ -139,7 +139,9 @@ mod tests {
 
         let response = decode_write_request(payload).expect_err("must produce error envelope");
         assert_eq!(response.status_code, 400);
-        assert!(response.body.contains("failed to deserialize write request"));
+        assert!(response
+            .body
+            .contains("failed to deserialize write request"));
     }
 
     #[test]

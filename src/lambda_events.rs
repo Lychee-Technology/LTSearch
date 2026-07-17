@@ -65,10 +65,7 @@ impl ApiGatewayV2Response {
         });
         Self {
             status_code,
-            headers: BTreeMap::from([(
-                "content-type".to_string(),
-                "application/json".to_string(),
-            )]),
+            headers: BTreeMap::from([("content-type".to_string(), "application/json".to_string())]),
             body,
             is_base64_encoded: false,
         }
@@ -212,10 +209,22 @@ mod tests {
 
     #[test]
     fn error_response_maps_error_types_to_http_status() {
-        assert_eq!(ApiGatewayV2Response::error("validation_error", "x").status_code, 400);
-        assert_eq!(ApiGatewayV2Response::error("not_found", "x").status_code, 404);
-        assert_eq!(ApiGatewayV2Response::error("execution_error", "x").status_code, 500);
-        assert_eq!(ApiGatewayV2Response::error("publish_error", "x").status_code, 500);
+        assert_eq!(
+            ApiGatewayV2Response::error("validation_error", "x").status_code,
+            400
+        );
+        assert_eq!(
+            ApiGatewayV2Response::error("not_found", "x").status_code,
+            404
+        );
+        assert_eq!(
+            ApiGatewayV2Response::error("execution_error", "x").status_code,
+            500
+        );
+        assert_eq!(
+            ApiGatewayV2Response::error("publish_error", "x").status_code,
+            500
+        );
     }
 
     /// 取自 AWS 官方文档的 SQS 事件裁剪版：验证 `Records`/`messageId` 字段名。
