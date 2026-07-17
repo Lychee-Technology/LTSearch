@@ -356,7 +356,9 @@ fn mmap_index_loads_v3_and_exposes_original_doc_id_and_metadata_json() {
     assert_eq!(index.version(), 3);
     assert_eq!(index.original_doc_id(0), Some(doc_id));
 
-    let json = index.metadata_json(0).expect("v3 index exposes metadata json");
+    let json = index
+        .metadata_json(0)
+        .expect("v3 index exposes metadata json");
     let parsed: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(json).expect("metadata json parses back to a map");
     assert_eq!(parsed["category"], serde_json::json!("legal"));

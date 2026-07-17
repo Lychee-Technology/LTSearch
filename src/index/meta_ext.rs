@@ -37,7 +37,12 @@ mod tests {
     fn meta_ext_reads_docid_and_json_from_blob() {
         let docid_blob = b"doc-1doc-2";
         let json_blob = br#"{"a":1}{"b":2}"#;
-        let record = MetaExtRecord { docid_offset: 5, docid_len: 5, meta_json_offset: 7, meta_json_len: 7 };
+        let record = MetaExtRecord {
+            docid_offset: 5,
+            docid_len: 5,
+            meta_json_offset: 7,
+            meta_json_len: 7,
+        };
         assert_eq!(record.doc_id_from_blob(docid_blob), "doc-2");
         assert_eq!(record.metadata_json_from_blob(json_blob), r#"{"b":2}"#);
     }

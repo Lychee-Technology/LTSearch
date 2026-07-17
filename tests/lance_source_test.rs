@@ -44,8 +44,7 @@ fn make_schema(dim: i32) -> Arc<ArrowSchema> {
 fn make_batch(schema: Arc<ArrowSchema>, dim: i32, rows: &[FixtureRow]) -> RecordBatch {
     let doc_ids = StringArray::from(rows.iter().map(|r| r.doc_id).collect::<Vec<_>>());
     let texts = StringArray::from(rows.iter().map(|r| r.text).collect::<Vec<_>>());
-    let metadata =
-        StringArray::from(rows.iter().map(|r| r.metadata.as_str()).collect::<Vec<_>>());
+    let metadata = StringArray::from(rows.iter().map(|r| r.metadata.as_str()).collect::<Vec<_>>());
     let timestamps = Int64Array::from(vec![0_i64; rows.len()]);
     let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
         rows.iter().map(|r| {
@@ -77,8 +76,10 @@ async fn create_documents_table(
 ) -> lancedb::Table {
     let schema = make_schema(dim);
     let batch = make_batch(schema.clone(), dim, rows);
-    let batches: Box<dyn RecordBatchReader + Send> =
-        Box::new(RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema));
+    let batches: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+        vec![Ok(batch)].into_iter(),
+        schema,
+    ));
 
     let conn = lancedb::connect(dataset_path).execute().await.unwrap();
     conn.create_table("documents", batches)
@@ -99,7 +100,11 @@ fn profile(dim: u32) -> EmbeddingProfile {
     }
 }
 
-fn config(dataset_path: &str, table_version: u64, embedding_profile: EmbeddingProfile) -> LanceStaticSourceConfig {
+fn config(
+    dataset_path: &str,
+    table_version: u64,
+    embedding_profile: EmbeddingProfile,
+) -> LanceStaticSourceConfig {
     LanceStaticSourceConfig {
         dataset_path: dataset_path.to_string(),
         table_version,
@@ -203,8 +208,10 @@ async fn lance_source_pins_version_and_ignores_later_writes() {
         embedding: Some(embedding_for(0.4)),
     }];
     let batch = make_batch(schema.clone(), 512, &extra);
-    let batches: Box<dyn RecordBatchReader + Send> =
-        Box::new(RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema));
+    let batches: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
+        vec![Ok(batch)].into_iter(),
+        schema,
+    ));
     table.add(batches).execute().await.unwrap();
     let v_new = table.version().await.unwrap();
     assert!(v_new > v_old, "add must advance version");
@@ -264,7 +271,10 @@ async fn lance_source_rejects_wrong_dim() {
     let version = table.version().await.unwrap();
 
     let result = load_lance_snapshot(&config(path, version, profile(512))).await;
-    assert!(result.is_err(), "embedding dim mismatch must fail the build");
+    assert!(
+        result.is_err(),
+        "embedding dim mismatch must fail the build"
+    );
 }
 
 #[tokio::test]
@@ -283,5 +293,8 @@ async fn lance_source_rejects_malformed_metadata_json() {
     let version = table.version().await.unwrap();
 
     let result = load_lance_snapshot(&config(path, version, profile(512))).await;
-    assert!(result.is_err(), "malformed metadata JSON must fail the build");
+    assert!(
+        result.is_err(),
+        "malformed metadata JSON must fail the build"
+    );
 }

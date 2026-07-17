@@ -60,7 +60,9 @@ fn op(message: impl Into<String>) -> IndexError {
 ///
 /// 任一行校验失败(doc_id/text 空、metadata 非合法 JSON object、embedding 缺失 /
 /// 维度不符 / 含非有限值)即 fail 整个 build。
-pub async fn load_lance_snapshot(cfg: &LanceStaticSourceConfig) -> Result<LanceSnapshot, IndexError> {
+pub async fn load_lance_snapshot(
+    cfg: &LanceStaticSourceConfig,
+) -> Result<LanceSnapshot, IndexError> {
     // profile 维度必须是本模块支持的 512(否则 typed 布局无从谈起)。
     if cfg.embedding_profile.dim != SUPPORTED_DIM {
         return Err(op(format!(
@@ -204,12 +206,12 @@ fn downcast_fixed_size_list<'a>(
         .ok_or_else(|| op(format!("Lance column '{column}' is not a FixedSizeList")))
 }
 
-fn parse_metadata_object(
-    raw: &str,
-    doc_id: &str,
-) -> Result<HashMap<String, Value>, IndexError> {
-    let value = serde_json::from_str::<Value>(raw)
-        .map_err(|source| op(format!("Lance row {doc_id} has non-JSON metadata: {source}")))?;
+fn parse_metadata_object(raw: &str, doc_id: &str) -> Result<HashMap<String, Value>, IndexError> {
+    let value = serde_json::from_str::<Value>(raw).map_err(|source| {
+        op(format!(
+            "Lance row {doc_id} has non-JSON metadata: {source}"
+        ))
+    })?;
     match value {
         Value::Object(map) => Ok(map.into_iter().collect()),
         _ => Err(op(format!(

@@ -16,9 +16,9 @@ pub use header::{
     KnownRecordLayout, TurboHeader, TurboHeaderError, TURBO_MAGIC, TURBO_VERSION_V2,
     TURBO_VERSION_V3,
 };
+pub use lance_source::{load_lance_snapshot, LanceSnapshot, LanceStaticSourceConfig};
 pub use meta::{CorpusTypeId, MetaRecord, META_RECORD_SIZE};
 pub use meta_ext::{MetaExtRecord, META_EXT_RECORD_SIZE};
-pub use lance_source::{load_lance_snapshot, LanceSnapshot, LanceStaticSourceConfig};
 pub use mmap_index::MmapIndex;
 pub use record::{TurboRecord512, TurboRecordRef, TurboRecordSlice, TypedTurboRecordRef};
 pub use release_manifest::{

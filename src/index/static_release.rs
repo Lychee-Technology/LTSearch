@@ -252,7 +252,8 @@ impl StaticReleaseBuilder {
                 ))
             }
         };
-        if let Err(error) = write_file(&staged.path().join(RELEASE_MANIFEST_FILE), &manifest_bytes) {
+        if let Err(error) = write_file(&staged.path().join(RELEASE_MANIFEST_FILE), &manifest_bytes)
+        {
             return Err(append_cleanup_failure(error, staged.abort()));
         }
 
@@ -327,12 +328,18 @@ fn write_release_files(
     write_file(&staged_dir.join("turbo_static.bin"), turbo_static)?;
     write_file(&staged_dir.join("turbo_static_meta.bin"), turbo_static_meta)?;
     write_file(&staged_dir.join("turbo_static_text.bin"), turbo_static_text)?;
-    write_file(&staged_dir.join("turbo_static_title.bin"), turbo_static_title)?;
+    write_file(
+        &staged_dir.join("turbo_static_title.bin"),
+        turbo_static_title,
+    )?;
     write_file(
         &staged_dir.join("turbo_static_meta_ext.bin"),
         turbo_static_meta_ext,
     )?;
-    write_file(&staged_dir.join("turbo_static_docid.bin"), turbo_static_docid)?;
+    write_file(
+        &staged_dir.join("turbo_static_docid.bin"),
+        turbo_static_docid,
+    )?;
     write_file(
         &staged_dir.join("turbo_static_meta_json.bin"),
         turbo_static_meta_json,

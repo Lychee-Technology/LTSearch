@@ -200,7 +200,13 @@ mod tests {
     fn sample_manifest() -> ReleaseManifest {
         let outputs = sample_outputs();
         let content_digest = "cc".repeat(32);
-        let release_id = derive_release_id(3, &sample_profile(), &sample_codec(), &content_digest, &outputs);
+        let release_id = derive_release_id(
+            3,
+            &sample_profile(),
+            &sample_codec(),
+            &content_digest,
+            &outputs,
+        );
         ReleaseManifest {
             manifest_schema_version: 1,
             turbo_version: 3,
@@ -230,7 +236,10 @@ mod tests {
         assert_eq!(bytes_a, bytes_b);
 
         let text = String::from_utf8(bytes_a).unwrap();
-        assert!(!text.contains("timestamp"), "manifest must not contain timestamp");
+        assert!(
+            !text.contains("timestamp"),
+            "manifest must not contain timestamp"
+        );
         assert!(!text.contains("uuid"), "manifest must not contain uuid");
     }
 
@@ -265,7 +274,10 @@ mod tests {
             &m2.input_fingerprint.content_digest,
             &m2.outputs,
         );
-        assert_eq!(rid1, rid2, "changing dataset_path (source) must not change release_id");
+        assert_eq!(
+            rid1, rid2,
+            "changing dataset_path (source) must not change release_id"
+        );
     }
 
     #[test]

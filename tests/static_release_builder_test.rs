@@ -20,7 +20,9 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn finite_embedding(seed: f32) -> Vec<f32> {
-    (0..512).map(|i| ((i as f32) * 0.001 + seed).sin()).collect()
+    (0..512)
+        .map(|i| ((i as f32) * 0.001 + seed).sin())
+        .collect()
 }
 
 fn citation_metadata(title: &str, resource_id: &str) -> HashMap<String, Value> {
@@ -71,11 +73,20 @@ fn release_builder_writes_v3_artifacts_loadable_by_mmap_index() {
     let embeddings = vec![finite_embedding(0.1), finite_embedding(0.2)];
 
     let manifest = StaticReleaseBuilder
-        .build_release(&dir, &chunks, &embeddings, &sample_profile(), &sample_source())
+        .build_release(
+            &dir,
+            &chunks,
+            &embeddings,
+            &sample_profile(),
+            &sample_source(),
+        )
         .expect("build_release should succeed");
 
     assert_eq!(manifest.turbo_version, 3);
-    assert!(!manifest.release_id.is_empty(), "release_id must be non-empty");
+    assert!(
+        !manifest.release_id.is_empty(),
+        "release_id must be non-empty"
+    );
 
     let index = MmapIndex::load(&dir).expect("v3 image must load");
     assert_eq!(index.version(), 3);
@@ -106,13 +117,21 @@ fn release_builder_writes_v3_artifacts_loadable_by_mmap_index() {
     let manifest_path = dir.join("release_manifest.json");
     assert!(manifest_path.exists(), "release_manifest.json must exist");
     assert!(
-        !manifest.outputs.iter().any(|o| o.name == "release_manifest.json"),
+        !manifest
+            .outputs
+            .iter()
+            .any(|o| o.name == "release_manifest.json"),
         "manifest must not list itself as an output"
     );
     assert_eq!(manifest.outputs.len(), 9, "nine .bin outputs expected");
     for output in &manifest.outputs {
         let bytes = fs::read(dir.join(&output.name)).expect("output file must exist on disk");
-        assert_eq!(output.size_bytes, bytes.len() as u64, "{} size", output.name);
+        assert_eq!(
+            output.size_bytes,
+            bytes.len() as u64,
+            "{} size",
+            output.name
+        );
         assert_eq!(output.sha256, sha256_hex(&bytes), "{} sha256", output.name);
     }
     // outputs are sorted by name ascending.
@@ -135,7 +154,8 @@ fn release_builder_rejects_non_512_dim() {
         model_id: "m".to_string(),
         dim: 511,
     };
-    let result = StaticReleaseBuilder.build_release(&dir, &chunks, &embeddings, &profile, &sample_source());
+    let result =
+        StaticReleaseBuilder.build_release(&dir, &chunks, &embeddings, &profile, &sample_source());
     assert!(result.is_err(), "511-dim embedding must be rejected");
 }
 
@@ -151,7 +171,13 @@ fn release_builder_rejects_non_finite_embedding() {
     let mut embedding = finite_embedding(0.1);
     embedding[7] = f32::NAN;
     let embeddings = vec![embedding];
-    let result = StaticReleaseBuilder.build_release(&dir, &chunks, &embeddings, &sample_profile(), &sample_source());
+    let result = StaticReleaseBuilder.build_release(
+        &dir,
+        &chunks,
+        &embeddings,
+        &sample_profile(),
+        &sample_source(),
+    );
     assert!(result.is_err(), "non-finite embedding must be rejected");
 }
 
@@ -173,6 +199,12 @@ fn release_builder_rejects_duplicate_doc_id() {
         },
     ];
     let embeddings = vec![finite_embedding(0.1), finite_embedding(0.2)];
-    let result = StaticReleaseBuilder.build_release(&dir, &chunks, &embeddings, &sample_profile(), &sample_source());
+    let result = StaticReleaseBuilder.build_release(
+        &dir,
+        &chunks,
+        &embeddings,
+        &sample_profile(),
+        &sample_source(),
+    );
     assert!(result.is_err(), "duplicate doc_id must be rejected");
 }

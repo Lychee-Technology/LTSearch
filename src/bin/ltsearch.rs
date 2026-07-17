@@ -9,7 +9,7 @@ const USAGE: &str = "usage: ltsearch <write|build|query|static-build> [args...]\
   write         serve POST /write, POST /delete, GET /health\n\
   build         serve POST /build, GET /health + SQLite queue worker\n\
   query         serve POST /query, GET /health\n\
-  static-build  one-shot static index build: --config <json> --output <dir>\n\
+  static-build  one-shot TurboQuant v3 release from a pinned Lance snapshot: --config <json> --output <dir>\n\
 \n\
 Local roles read LTSEARCH_LOCAL_ROOT (shared volume holding wal/, artifacts, ltsearch.db)\n\
 and LTSEARCH_HTTP_PORT (default 8080).";
