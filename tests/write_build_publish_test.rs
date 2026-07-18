@@ -15,9 +15,17 @@ use ltsearch::adapters::s3_publish::AwsPublishStorage;
 use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::adapters::sqs_build_queue::AwsSqsBuildQueue;
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
+use ltsearch::index::{
+    EmbeddingProfile, ReleaseSource, StaticChunk, StaticReleaseBuilder,
+};
 use ltsearch::indexing::PublishStorage;
 use ltsearch::indexing::{
-    BuildIndexRequest, BuildIndexResult, IndexPublisher, LocalIndexBuilder, PublishRequest,
+    activate_static_pointer, verify_release_dir, BuildIndexRequest, BuildIndexResult,
+    IndexPublisher, LocalIndexBuilder, PublishRequest, UploadMode,
+};
+use ltsearch::models::CorpusType;
+use ltsearch::storage::{
+    static_release_dir_key, static_release_manifest_key, StaticReleaseHead, STATIC_HEAD_KEY,
 };
 use ltsearch::write::{BuildQueue, WalStorage};
 
@@ -252,6 +260,114 @@ async fn publish_storage_compare_and_swap_rejects_stale_etag_and_existing_object
         storage.read("index/_head").await.unwrap().unwrap().bytes,
         b"v2"
     );
+}
+
+/// The AWS twin of the local `static-activate` flow (bin `static_activate`):
+/// verify a built v3 release → immutably upload it under
+/// `static/releases/<release_id>/` → CAS-flip `static/_head`. Asserts the stored
+/// pointer resolves to the release and the manifest bytes landed verbatim in S3.
+#[tokio::test]
+async fn aws_static_activate_uploads_release_and_flips_pointer() {
+    let harness = MotoHarness::new("static-activate").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+
+    let dir = build_v3_release_fixture();
+    let manifest = verify_release_dir(&dir, None, None).unwrap();
+
+    storage
+        .upload_directory(
+            &static_release_dir_key(&manifest.release_id),
+            &dir,
+            UploadMode::CreateOnly,
+        )
+        .await
+        .unwrap();
+
+    let result = activate_static_pointer(&storage, &manifest.release_id, 1_700_000_000_000)
+        .await
+        .unwrap();
+    assert_eq!(result.previous_release_id, None);
+
+    // The pointer object resolves back to the just-activated release.
+    let head_object = storage
+        .read(STATIC_HEAD_KEY)
+        .await
+        .unwrap()
+        .expect("static/_head must exist after activation");
+    let head = StaticReleaseHead::from_json(&head_object.bytes).unwrap();
+    assert_eq!(head.release_id, manifest.release_id);
+
+    // The release manifest landed in S3 byte-for-byte with the source on disk.
+    let manifest_object = storage
+        .read(&static_release_manifest_key(&manifest.release_id))
+        .await
+        .unwrap()
+        .expect("release manifest must exist in S3");
+    let on_disk = std::fs::read(dir.join("release_manifest.json")).unwrap();
+    assert_eq!(manifest_object.bytes, on_disk);
+}
+
+/// Builds a real, self-consistent v3 static release directory via
+/// `StaticReleaseBuilder` (same pattern as `tests/static_activation_test.rs`),
+/// returning the release dir. Each call gets a uniquely-named directory.
+fn build_v3_release_fixture() -> std::path::PathBuf {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir()
+        .join(format!(
+            "ltsearch-aws-static-activate-{}-{suffix}",
+            std::process::id()
+        ))
+        .join("release");
+    std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
+
+    let finite_embedding = |seed: f32| -> Vec<f32> {
+        (0..512).map(|i| ((i as f32) * 0.001 + seed).sin()).collect()
+    };
+    let citation_metadata = |title: &str, resource_id: &str| {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("title".to_string(), serde_json::json!(title));
+        metadata.insert("resource_id".to_string(), serde_json::json!(resource_id));
+        metadata.insert("source_type".to_string(), serde_json::json!("statute"));
+        metadata.insert("source_ref".to_string(), serde_json::json!("第一条"));
+        metadata.insert("url".to_string(), serde_json::json!("https://example.com/law"));
+        metadata.insert("section".to_string(), serde_json::json!("总则"));
+        metadata
+    };
+
+    let chunks = vec![
+        StaticChunk {
+            doc_id: "文档-1".to_string(),
+            text: "第一条文本".to_string(),
+            metadata: citation_metadata("宪法总纲", "res-1"),
+            corpus_type: CorpusType::Legal,
+        },
+        StaticChunk {
+            doc_id: "文档-2".to_string(),
+            text: "第二条文本".to_string(),
+            metadata: citation_metadata("合同法则", "res-2"),
+            corpus_type: CorpusType::Contract,
+        },
+    ];
+    let embeddings = vec![finite_embedding(0.1), finite_embedding(0.2)];
+    let profile = EmbeddingProfile {
+        model_id: "jina-embeddings-v2".to_string(),
+        dim: 512,
+    };
+    let source = ReleaseSource {
+        kind: "lance".to_string(),
+        dataset_path: "/data/corpus.lance".to_string(),
+        table_version: 9,
+        table_row_count: 2,
+        corpus_type: CorpusType::Legal,
+    };
+
+    StaticReleaseBuilder
+        .build_release(&dir, &chunks, &embeddings, &profile, &source)
+        .expect("build_release should succeed");
+    dir
 }
 
 #[tokio::test]
