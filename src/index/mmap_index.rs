@@ -99,10 +99,7 @@ impl fmt::Display for MmapIndexError {
                 )
             }
             Self::MetaExtBlobOutOfBounds { index, blob } => {
-                write!(
-                    f,
-                    "meta ext {blob} blob out of bounds at record {index}"
-                )
+                write!(f, "meta ext {blob} blob out of bounds at record {index}")
             }
             Self::MetaExtBlobInvalidUtf8 { index, blob } => {
                 write!(
@@ -222,8 +219,7 @@ impl MmapIndex {
                 // Safety: the sidecar length was validated above to be exactly
                 // `record_count * META_EXT_RECORD_SIZE`, and `offset` is a
                 // multiple of 8, matching `MetaExtRecord`'s alignment.
-                let ext =
-                    unsafe { &*(meta_ext_mmap[offset..].as_ptr() as *const MetaExtRecord) };
+                let ext = unsafe { &*(meta_ext_mmap[offset..].as_ptr() as *const MetaExtRecord) };
 
                 validate_ext_blob(
                     &docid_mmap,

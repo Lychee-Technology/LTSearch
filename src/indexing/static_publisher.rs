@@ -110,8 +110,7 @@ pub fn verify_release_dir(
     // reads every artifact by fixed filename from disk, serving the omitted
     // files unchecked. Pinning the set to the canonical writer const closes that
     // gap and keeps the two sides from drifting.
-    let mut actual_names: Vec<&str> =
-        manifest.outputs.iter().map(|o| o.name.as_str()).collect();
+    let mut actual_names: Vec<&str> = manifest.outputs.iter().map(|o| o.name.as_str()).collect();
     actual_names.sort_unstable();
     if actual_names != V3_RELEASE_OUTPUT_FILES {
         let missing: Vec<&str> = V3_RELEASE_OUTPUT_FILES
@@ -229,7 +228,10 @@ pub fn verify_release_dir(
 
     // Step 7: the image must actually load as a v3 index with a matching count.
     let index = MmapIndex::load(dir).map_err(|error| {
-        verify_err(format!("MmapIndex::load({}) failed: {error}", dir.display()))
+        verify_err(format!(
+            "MmapIndex::load({}) failed: {error}",
+            dir.display()
+        ))
     })?;
     if index.version() != EXPECTED_TURBO_VERSION {
         return Err(verify_err(format!(

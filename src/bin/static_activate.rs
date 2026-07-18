@@ -100,7 +100,11 @@ where
 async fn run(args: CliArgs) -> Result<String, String> {
     let bucket = match env::var(BUCKET_ENV) {
         Ok(value) if !value.trim().is_empty() => value,
-        _ => return Err(format!("missing required environment variable {BUCKET_ENV}")),
+        _ => {
+            return Err(format!(
+                "missing required environment variable {BUCKET_ENV}"
+            ))
+        }
     };
     let release_dir = Path::new(&args.release_dir);
 
@@ -273,7 +277,10 @@ mod tests {
             "512",
         ])
         .unwrap();
-        assert_eq!(parsed.expect_model_id.as_deref(), Some("jina-embeddings-v2"));
+        assert_eq!(
+            parsed.expect_model_id.as_deref(),
+            Some("jina-embeddings-v2")
+        );
         assert_eq!(parsed.expect_dim, Some(512));
     }
 
@@ -285,8 +292,8 @@ mod tests {
 
     #[test]
     fn parse_args_rejects_unknown_flag() {
-        let error = parse_args(["static_activate", "--release", "/tmp/rel", "--bogus"])
-            .unwrap_err();
+        let error =
+            parse_args(["static_activate", "--release", "/tmp/rel", "--bogus"]).unwrap_err();
         assert!(error.contains("--bogus"), "unexpected error: {error}");
     }
 

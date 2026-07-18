@@ -185,7 +185,7 @@ async fn run_static_activate_installs_and_flips_pointer() {
         .await
         .unwrap()
         .expect("static/_head pointer row must exist after activation");
-    let head = StaticReleaseHead::from_json(&head_object.bytes)
-        .expect("stored static/_head must parse");
+    let head =
+        StaticReleaseHead::from_json(&head_object.bytes).expect("stored static/_head must parse");
     assert_eq!(head.release_id, release_id);
 }

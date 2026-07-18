@@ -45,7 +45,9 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn finite_embedding(seed: f32) -> Vec<f32> {
-    (0..512).map(|i| ((i as f32) * 0.001 + seed).sin()).collect()
+    (0..512)
+        .map(|i| ((i as f32) * 0.001 + seed).sin())
+        .collect()
 }
 
 fn citation_metadata(title: &str, resource_id: &str) -> HashMap<String, Value> {
@@ -279,12 +281,15 @@ impl PublishStorage for RecordingPublishStorage {
     }
 
     async fn read(&self, key: &str) -> Result<Option<VersionedObject>, PublishError> {
-        Ok(self.objects.lock().unwrap().get(key).map(|object| {
-            VersionedObject {
+        Ok(self
+            .objects
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|object| VersionedObject {
                 bytes: object.bytes.clone(),
                 etag: object.etag.clone(),
-            }
-        }))
+            }))
     }
 
     async fn compare_and_swap(

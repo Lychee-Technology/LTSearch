@@ -464,7 +464,9 @@ fn build_v3_release_fixture() -> std::path::PathBuf {
     std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
 
     let finite_embedding = |seed: f32| -> Vec<f32> {
-        (0..512).map(|i| ((i as f32) * 0.001 + seed).sin()).collect()
+        (0..512)
+            .map(|i| ((i as f32) * 0.001 + seed).sin())
+            .collect()
     };
     let citation_metadata = |title: &str, resource_id: &str| {
         let mut metadata = std::collections::HashMap::new();
@@ -472,7 +474,10 @@ fn build_v3_release_fixture() -> std::path::PathBuf {
         metadata.insert("resource_id".to_string(), serde_json::json!(resource_id));
         metadata.insert("source_type".to_string(), serde_json::json!("statute"));
         metadata.insert("source_ref".to_string(), serde_json::json!("第一条"));
-        metadata.insert("url".to_string(), serde_json::json!("https://example.com/law"));
+        metadata.insert(
+            "url".to_string(),
+            serde_json::json!("https://example.com/law"),
+        );
         metadata.insert("section".to_string(), serde_json::json!("总则"));
         metadata
     };
