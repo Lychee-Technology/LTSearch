@@ -1,6 +1,6 @@
 use std::fs;
 use std::mem::{align_of, size_of};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ltsearch::index::mmap_index::MmapIndexError;
 use ltsearch::index::{
@@ -397,6 +397,94 @@ fn mmap_index_rejects_v3_with_mismatched_ext_count() {
         ),
         "expected MetaExtCountMismatch {{ expected: 2, actual: 1 }}, got: {err:?}"
     );
+}
+
+/// Builds a valid single-record v3 image on disk and returns its directory.
+fn build_valid_v3_dir(name: &str) -> PathBuf {
+    let dir = temp_dir(name);
+    write_v3_test_index(&dir, &[("doc-1", r#"{"a":1}"#)]);
+    dir
+}
+
+/// Reads meta_ext record `index` off disk, applies `mutate`, and writes it back.
+fn patch_meta_ext_record(dir: &Path, index: usize, mutate: impl FnOnce(&mut MetaExtRecord)) {
+    let path = dir.join("turbo_static_meta_ext.bin");
+    let mut data = fs::read(&path).unwrap();
+    let offset = index * META_EXT_RECORD_SIZE;
+    let mut record: MetaExtRecord =
+        unsafe { std::ptr::read_unaligned(data[offset..].as_ptr() as *const MetaExtRecord) };
+    mutate(&mut record);
+    let record_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            &record as *const MetaExtRecord as *const u8,
+            META_EXT_RECORD_SIZE,
+        )
+    };
+    data[offset..offset + META_EXT_RECORD_SIZE].copy_from_slice(record_bytes);
+    fs::write(&path, &data).unwrap();
+}
+
+/// Overwrites record `index`'s meta_json blob bytes with invalid UTF-8, keeping
+/// the recorded length unchanged so only the byte content is corrupt.
+fn corrupt_meta_json_blob_to_invalid_utf8(dir: &Path, index: usize) {
+    let ext_data = fs::read(dir.join("turbo_static_meta_ext.bin")).unwrap();
+    let offset = index * META_EXT_RECORD_SIZE;
+    let record: MetaExtRecord =
+        unsafe { std::ptr::read_unaligned(ext_data[offset..].as_ptr() as *const MetaExtRecord) };
+
+    let json_path = dir.join("turbo_static_meta_json.bin");
+    let mut json_data = fs::read(&json_path).unwrap();
+    let start = record.meta_json_offset as usize;
+    let end = start + record.meta_json_len as usize;
+    assert!(end > start, "fixture must have a non-empty meta_json blob");
+    for b in &mut json_data[start..end] {
+        *b = 0xFF;
+    }
+    fs::write(&json_path, &json_data).unwrap();
+}
+
+#[test]
+fn mmap_index_rejects_v3_with_docid_blob_out_of_bounds() {
+    let dir = build_valid_v3_dir("docid-oob");
+    patch_meta_ext_record(&dir, 0, |ext| ext.docid_len = 9999); // 越过 docid blob 末尾
+    let err = MmapIndex::load(&dir).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            MmapIndexError::MetaExtBlobOutOfBounds {
+                index: 0,
+                blob: "docid"
+            }
+        ),
+        "expected MetaExtBlobOutOfBounds {{ index: 0, blob: \"docid\" }}, got: {err:?}"
+    );
+}
+
+#[test]
+fn mmap_index_rejects_v3_with_meta_json_invalid_utf8() {
+    let dir = build_valid_v3_dir("json-utf8");
+    corrupt_meta_json_blob_to_invalid_utf8(&dir, 0); // len 不变，字节改为无效 UTF-8
+    let err = MmapIndex::load(&dir).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            MmapIndexError::MetaExtBlobInvalidUtf8 {
+                index: 0,
+                blob: "meta_json"
+            }
+        ),
+        "expected MetaExtBlobInvalidUtf8 {{ index: 0, blob: \"meta_json\" }}, got: {err:?}"
+    );
+}
+
+#[test]
+fn mmap_index_v3_accessors_never_panic_on_valid_release() {
+    let dir = build_valid_v3_dir("valid");
+    let index = MmapIndex::load(&dir).unwrap();
+    for i in 0..index.record_count() as usize {
+        assert!(index.original_doc_id(i).is_some());
+        assert!(index.metadata_json(i).is_some());
+    }
 }
 
 #[test]

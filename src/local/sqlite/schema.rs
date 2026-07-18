@@ -42,6 +42,12 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
          CREATE TABLE IF NOT EXISTS active_head (
             id         INTEGER PRIMARY KEY CHECK (id = 1),
             head_bytes BLOB NOT NULL
+         );
+         -- 静态发布指针（static/_head）。刻意与 active_head 分表：静态指针不得复用活跃
+         -- 版本的单行，二者是相互独立的 CAS 目标，同机制（IMMEDIATE 事务 + etag）不同表。
+         CREATE TABLE IF NOT EXISTS static_release_head (
+            id         INTEGER PRIMARY KEY CHECK (id = 1),
+            head_bytes BLOB NOT NULL
          );",
     )?;
     Ok(())
