@@ -49,9 +49,10 @@ class LambdaZipPackagingTest(unittest.TestCase):
         self.assertIn("VisibilityTimeout: 5400", content)
         self.assertIn("Timeout: 900", content)
         self.assertIn("LTSEARCH_BUILD_EMBEDDING_DIM", content)
-        # 默认可运行冒烟组合:stub 产物 ↔ EmbeddingProvider=fixed + 3 维固定向量;
-        # #111 交付 Layer 后默认翻回 ltembed/512(#94 裁决的生产档)。
-        self.assertIn("Default: fixed", content)
+        # #111 已交付模型 Layer,默认为 ltembed/512 生产档(#94 裁决);
+        # stub e2e 经派生模板剥 Layer 并用 --env-vars 覆盖回 fixed/3。
+        self.assertIn("Default: ltembed", content)
+        self.assertIn("Default: '512'", content)
         self.assertIn("LTSEARCH_BUILD_FIXED_EMBEDDING", content)
         self.assertIn("LTSEARCH_QUERY_FIXED_EMBEDDING", content)
 

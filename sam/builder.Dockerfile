@@ -1,20 +1,23 @@
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023
-RUN dnf install -y --allowerasing gcc gcc-c++ make perl pkgconfig openssl-devel git tar gzip curl && dnf clean all
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.94.0
-ENV PATH="/root/.cargo/bin:${PATH}"
+# ort_bundle 下载/校验独立成 bundle stage（#111）：Layer 打包只 build 该 stage
+# （--target bundle），不触发 cargo 编译、不需要 LTEmbed 源 checkout。
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS bundle
 ARG LTEMBED_MODE=stub
 # ort_bundle tarball for jina-embeddings-v5-text-nano-retrieval, with
 # model.ort, tokenizer.json, build-info.json, libonnxruntime.so (linux/arm64)
 # under a leading ./ (hence --strip-components=1 below). Defaults to the public
-# minimal-ort-builder release asset; override to bump the pinned model version.
+# minimal-ort-builder release asset; bump URL and SHA256 together to pin a new
+# model version.
 ARG LTEMBED_BUNDLE_URL=https://github.com/Lychee-Technology/minimal-ort-builder/releases/download/v1.0.9/jinaai__jina-embeddings-v5-text-nano-retrieval_q4f16_linux-arm64.tar.gz
+ARG LTEMBED_BUNDLE_SHA256=4d781723f14f8a9791fc31c21347364dea095dbbf22676d30fec3e659e6f6af9
 RUN mkdir -p /ltembed-assets && \
     if [ "$LTEMBED_MODE" != "stub" ]; then \
-      if [ -z "$LTEMBED_BUNDLE_URL" ]; then \
-        echo "LTEMBED_MODE=real requires LTEMBED_BUNDLE_URL (ort_bundle tarball)" >&2; \
+      if [ -z "$LTEMBED_BUNDLE_URL" ] || [ -z "$LTEMBED_BUNDLE_SHA256" ]; then \
+        echo "LTEMBED_MODE=real requires LTEMBED_BUNDLE_URL and LTEMBED_BUNDLE_SHA256 (ort_bundle tarball pin)" >&2; \
         exit 1; \
       fi; \
+      dnf install -y tar gzip >/dev/null && dnf clean all >/dev/null && \
       curl -fSL "$LTEMBED_BUNDLE_URL" -o /tmp/ltembed-bundle.tar.gz && \
+      echo "$LTEMBED_BUNDLE_SHA256  /tmp/ltembed-bundle.tar.gz" | sha256sum -c - && \
       tar -xzf /tmp/ltembed-bundle.tar.gz -C /ltembed-assets --strip-components=1 && \
       rm /tmp/ltembed-bundle.tar.gz && \
       test -f /ltembed-assets/model.ort && \
@@ -22,6 +25,13 @@ RUN mkdir -p /ltembed-assets && \
       test -f /ltembed-assets/build-info.json && \
       test -f /ltembed-assets/libonnxruntime.so; \
     fi
+
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS builder
+RUN dnf install -y --allowerasing gcc gcc-c++ make perl pkgconfig openssl-devel git tar gzip curl && dnf clean all
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.94.0
+ENV PATH="/root/.cargo/bin:${PATH}"
+ARG LTEMBED_MODE=stub
+COPY --from=bundle /ltembed-assets /ltembed-assets
 WORKDIR /src
 COPY . .
 RUN if [ "$LTEMBED_MODE" = "stub" ]; then \

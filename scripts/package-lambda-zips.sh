@@ -7,9 +7,9 @@ set -euo pipefail
 readonly REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 readonly DIST_DIR="${LTSEARCH_DIST_DIR:-$REPO_ROOT/dist}"
 readonly BUILDER_IMAGE="${LTSEARCH_BUILDER_IMAGE:-ltsearch-lambda-zip-builder}"
-# stub = features lambda（fixed embedding；与 template.yaml 默认 fixed/3 维参数
-# 构成可直接部署的冒烟组合，e2e/CI 用）；real = features lambda,ltembed（生产档，
-# 运行时模型资产与 Layer 由 #111 交付，需 .sam-local-deps/LTEmbed vendored checkout）。
+# stub = features lambda（fixed embedding；e2e/CI 用，配 --env-vars 覆盖回 fixed）；
+# real = features lambda,ltembed（生产档，模型资产由 S3→/tmp 冷启动供给，#111；
+# 需 .sam-local-deps/LTEmbed vendored checkout）。
 readonly LTEMBED_MODE="${LTSEARCH_LTEMBED_MODE:-stub}"
 
 DOCKER_BUILDKIT=1 docker build \
@@ -29,7 +29,19 @@ for fn in query_lambda write_lambda index_builder_lambda; do
   mkdir -p "$fn_dir"
   docker cp "$container_id:/$fn" "$fn_dir/bootstrap"
   chmod +x "$fn_dir/bootstrap"
-  (cd "$fn_dir" && zip -q -X "$DIST_DIR/$fn.zip" bootstrap)
+done
+
+# strip 在 builder 镜像内做（宿主机无 aarch64 binutils，镜像随 gcc 自带）。
+# #111 实测：real query 二进制解压 235.7 MiB，距 Lambda 250MB 单函数硬限仅
+# ~14 MiB；strip 回收 ~55 MiB（→180.6 MiB）。仅 ZIP lineage strip，镜像
+# lineage 保留符号便于诊断。
+docker run --rm --platform linux/arm64 \
+  --mount "type=bind,source=$DIST_DIR,target=/dist" \
+  "$BUILDER_IMAGE" \
+  bash -c 'strip /dist/query_lambda/bootstrap /dist/write_lambda/bootstrap /dist/index_builder_lambda/bootstrap'
+
+for fn in query_lambda write_lambda index_builder_lambda; do
+  (cd "$DIST_DIR/$fn" && zip -q -X "$DIST_DIR/$fn.zip" bootstrap)
 done
 
 echo "packaged lambda zips into $DIST_DIR" >&2

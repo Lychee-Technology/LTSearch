@@ -93,20 +93,37 @@ impl BuildConfig {
     }
 }
 
+/// S3 config builder, honouring the `AWS_ENDPOINT_URL_S3` override used by
+/// Moto/LocalStack test environments (which also require path-style access).
+#[cfg(feature = "aws")]
+fn s3_config_builder_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::config::Builder {
+    let builder = aws_sdk_s3::config::Builder::from(config);
+    match env::var("AWS_ENDPOINT_URL_S3") {
+        Ok(endpoint_url) => builder.endpoint_url(endpoint_url).force_path_style(true),
+        Err(_) => builder,
+    }
+}
+
 /// Builds an S3 client, honouring the `AWS_ENDPOINT_URL_S3` override used by
 /// Moto/LocalStack test environments (which also require path-style access).
 #[cfg(feature = "aws")]
 pub fn s3_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client {
-    match env::var("AWS_ENDPOINT_URL_S3") {
-        Ok(endpoint_url) => {
-            let s3_config = aws_sdk_s3::config::Builder::from(config)
-                .endpoint_url(endpoint_url)
-                .force_path_style(true)
-                .build();
-            aws_sdk_s3::Client::from_conf(s3_config)
-        }
-        Err(_) => aws_sdk_s3::Client::new(config),
-    }
+    aws_sdk_s3::Client::from_conf(s3_config_builder_from_env(config).build())
+}
+
+/// 模型资产供给专用 S3 client（#111）：在 [`s3_client_from_env`] 之上跳过可选
+/// 的响应 CRC 校验（`WhenRequired`）——完整性由资产 manifest 的逐文件 sha256
+/// 保证（强于 CRC），且 moto 对 multipart 上传对象返回的复合 checksum 会让
+/// SDK 默认校验在大文件（model.ort）上误报 ChecksumMismatch。
+#[cfg(all(feature = "aws", feature = "ltembed"))]
+pub fn model_assets_s3_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client {
+    use aws_sdk_s3::config::ResponseChecksumValidation;
+
+    aws_sdk_s3::Client::from_conf(
+        s3_config_builder_from_env(config)
+            .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+            .build(),
+    )
 }
 
 /// Builds an SQS client, honouring the `AWS_ENDPOINT_URL_SQS` override.

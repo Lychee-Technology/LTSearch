@@ -18,6 +18,18 @@ lance = { version = "=8.0.0", default-features = false, features = ["protoc"] }
 lance-datafusion = { version = "=8.0.0", features = ["protoc"] }
 lancedb = "0.31.0"
 
+# Lambda ZIP 尺寸优化（#111）：lance/datafusion 依赖体量大，此前 strip 后仍
+# ~180 MiB，距 250MB 单函数硬限余量有限。opt-level=z + thin LTO + strip +
+# panic=abort 换体积；代价：release 编译显著变慢，panic 不再 unwind（进程
+# 直接 abort，Lambda 靠容器回收兜底；测试构建不受影响，cargo 对 test
+# harness 强制 unwind）。LTO 用 thin 而非 fat：fat 在 Docker/CI 内存下
+# 链接本依赖图会 OOM（实测 cannot allocate memory），thin 的体积收益接近。
+[profile.release]
+opt-level = "z"
+lto = "thin"
+strip = true
+panic = "abort"
+
 [package]
 name = "ltsearch"
 version = "0.1.0"
