@@ -136,16 +136,28 @@ pub fn verify_release_dir(
     }
 
     // Step 3a: `outputs[]` must name EXACTLY the nine v3 artifact files, no more
-    // and no less. Step 3b only re-hashes the files the manifest lists, and
+    // and no less, AND in the canonical name-ascending order the `ReleaseManifest`
+    // contract mandates. Step 3b only re-hashes the files the manifest lists, and
     // step 4's release_id is derived over that same list, so a crafted manifest
     // that omits some `.bin` files (with release_id recomputed over the reduced
     // set) would be self-consistent through steps 1-4 — yet `MmapIndex::load`
     // reads every artifact by fixed filename from disk, serving the omitted
     // files unchecked. Pinning the set to the canonical writer const closes that
-    // gap and keeps the two sides from drifting.
-    let mut actual_names: Vec<&str> = manifest.outputs.iter().map(|o| o.name.as_str()).collect();
-    actual_names.sort_unstable();
+    // gap. We compare IN ORIGINAL ORDER (not against a sorted copy) because
+    // `derive_release_id` sorts outputs internally, so a reordered manifest stays
+    // self-consistent through step 4 — only an order-sensitive check here rejects
+    // it, enforcing the stored-name-ascending contract rather than mere set equality.
+    let actual_names: Vec<&str> = manifest.outputs.iter().map(|o| o.name.as_str()).collect();
     if actual_names != V3_RELEASE_OUTPUT_FILES {
+        // Distinguish a set difference (files missing/unexpected) from a pure
+        // ordering violation (same set, wrong order) so the error is actionable.
+        let mut sorted_names = actual_names.clone();
+        sorted_names.sort_unstable();
+        if sorted_names == V3_RELEASE_OUTPUT_FILES {
+            return Err(verify_err(format!(
+                "outputs not name-ascending: expected {V3_RELEASE_OUTPUT_FILES:?}, got {actual_names:?}"
+            )));
+        }
         let missing: Vec<&str> = V3_RELEASE_OUTPUT_FILES
             .iter()
             .copied()

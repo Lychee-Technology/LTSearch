@@ -165,6 +165,45 @@ fn verify_rejects_manifest_with_missing_output_entry() {
 }
 
 #[test]
+fn verify_rejects_reordered_manifest_outputs() {
+    // A crafted manifest that lists the nine v3 outputs as the SAME set but in a
+    // non-ascending order. Because `derive_release_id` sorts outputs internally,
+    // the release_id is unaffected by the reorder — we assert that premise by NOT
+    // re-deriving it after swapping. The `ReleaseManifest` contract requires
+    // outputs stored name-ascending, so verify must reject on the order alone.
+    let dir = build_v3_release_fixture();
+    let manifest_path = dir.join("release_manifest.json");
+    let original: ReleaseManifest =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+
+    let mut manifest = original.clone();
+    manifest.outputs.swap(0, 1);
+    // Premise: swapping two outputs does not change the content-derived id.
+    let rederived = derive_release_id(
+        manifest.turbo_version,
+        &manifest.embedding_profile,
+        &manifest.codec,
+        &manifest.input_fingerprint.content_digest,
+        &manifest.outputs,
+    );
+    assert_eq!(
+        rederived, original.release_id,
+        "premise: derive_release_id sorts internally, so a reorder is self-consistent"
+    );
+    // Leave release_id untouched (it already equals the derived id).
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    let error = verify_release_dir(&dir, None, None).unwrap_err();
+    match error {
+        StaticActivateError::Verify { message } => assert!(
+            message.contains("not name-ascending"),
+            "expected an order-violation message, got: {message}"
+        ),
+        other => panic!("expected Verify error, got {other:?}"),
+    }
+}
+
+#[test]
 fn verify_accepts_valid_release() {
     let dir = build_v3_release_fixture();
     let manifest = verify_release_dir(&dir, None, Some(512)).unwrap();
