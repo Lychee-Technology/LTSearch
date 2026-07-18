@@ -21,7 +21,8 @@
 //! Contract:
 //! ```text
 //! static_activate --release <built_release_dir> [--expect-model-id <id>] [--expect-dim <n>]
-//! env: LTSEARCH_STATIC_S3_BUCKET (required)
+//! env: LTSEARCH_QUERY_S3_BUCKET (required) — the bucket the query stack reads,
+//!      and therefore the exact bucket activation must write to.
 //! ```
 
 use std::env;
@@ -31,12 +32,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ltsearch::adapters::s3_publish::{AwsPublishStorage, CREATE_ONLY_CONFLICT_PHRASE};
 use ltsearch::bootstrap::s3_client_from_env;
 use ltsearch::error::PublishError;
-use ltsearch::index::{RELEASE_MANIFEST_FILE, V3_RELEASE_OUTPUT_FILES};
+use ltsearch::index::{
+    sha256_hex, ReleaseManifest, RELEASE_MANIFEST_FILE, V3_RELEASE_OUTPUT_FILES,
+};
 use ltsearch::indexing::{activate_static_pointer, verify_release_dir, PublishStorage, UploadMode};
 use ltsearch::storage::{static_release_dir_key, static_release_manifest_key};
 
-/// The bucket holding the static release tree and its `static/_head` pointer.
-const BUCKET_ENV: &str = "LTSEARCH_STATIC_S3_BUCKET";
+/// The bucket the query stack reads (`query_service.rs` →
+/// `LTSEARCH_QUERY_S3_BUCKET`), and therefore the exact bucket activation must
+/// write to. Single source of truth for the activation target.
+const QUERY_BUCKET_ENV: &str = "LTSEARCH_QUERY_S3_BUCKET";
+/// Deprecated bucket var this branch introduced. It is no longer a bucket
+/// *source*; it is retained only as a transition guard against stale runbooks
+/// (see [`resolve_bucket`]).
+const LEGACY_BUCKET_ENV: &str = "LTSEARCH_STATIC_S3_BUCKET";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
@@ -95,15 +104,47 @@ where
     })
 }
 
-async fn run(args: CliArgs) -> Result<String, String> {
-    let bucket = match env::var(BUCKET_ENV) {
-        Ok(value) if !value.trim().is_empty() => value,
-        _ => {
-            return Err(format!(
-                "missing required environment variable {BUCKET_ENV}"
-            ))
-        }
+/// Resolves the activation target bucket, converging on the bucket the query
+/// stack reads (`LTSEARCH_QUERY_S3_BUCKET`). Activation must write exactly where
+/// the query side reads, so that env var is the single source of truth.
+///
+/// The deprecated `LTSEARCH_STATIC_S3_BUCKET` (introduced by this branch, no
+/// external consumers) is no longer a bucket source. Transition guard: if it is
+/// still set AND names a *different* bucket than the query var, hard-error naming
+/// both values so a stale runbook cannot silently publish somewhere the query
+/// side never reads. If it is set and equal (or unset), proceed.
+///
+/// Pure over its inputs (no `env::var` calls) so it is unit-testable without the
+/// process-global environment and its attendant test races.
+fn resolve_bucket(query: Option<String>, legacy: Option<String>) -> Result<String, String> {
+    let non_empty = |value: Option<String>| -> Option<String> {
+        value
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
     };
+    let query = non_empty(query);
+    let legacy = non_empty(legacy);
+
+    let query =
+        query.ok_or_else(|| format!("missing required environment variable {QUERY_BUCKET_ENV}"))?;
+
+    if let Some(legacy) = legacy {
+        if legacy != query {
+            return Err(format!(
+                "{LEGACY_BUCKET_ENV} ({legacy}) differs from {QUERY_BUCKET_ENV} ({query}); \
+                 {LEGACY_BUCKET_ENV} is deprecated — unset it and publish to {QUERY_BUCKET_ENV}"
+            ));
+        }
+    }
+
+    Ok(query)
+}
+
+async fn run(args: CliArgs) -> Result<String, String> {
+    let bucket = resolve_bucket(
+        env::var(QUERY_BUCKET_ENV).ok(),
+        env::var(LEGACY_BUCKET_ENV).ok(),
+    )?;
     let release_dir = Path::new(&args.release_dir);
 
     // 1) Verify: 8-step self-consistency + optional model_id/dim expectations.
@@ -136,8 +177,16 @@ async fn run(args: CliArgs) -> Result<String, String> {
             .await
         {
             Ok(()) => {}
-            // Already present from a prior (possibly interrupted) run — resume.
-            Err(error) if is_create_only_conflict(&error) => {}
+            // Already present from a prior (possibly interrupted) run — but
+            // "present" is not "correct". `verify_release_dir` only proved the
+            // LOCAL dir; a pre-planted object with WRONG bytes under this prefix
+            // would otherwise be skipped, the rest uploaded, and the pointer
+            // flipped at a corrupt release. So read the remote object back and
+            // verify its sha256 + size against the verified manifest entry for
+            // this file before treating the conflict as a resumable skip.
+            Err(error) if is_create_only_conflict(&error) => {
+                verify_remote_object(&storage, &object_key, name, &manifest).await?;
+            }
             Err(error) => {
                 return Err(format!(
                     "failed to upload static release object {object_key}: {error}"
@@ -204,6 +253,58 @@ async fn run(args: CliArgs) -> Result<String, String> {
     ))
 }
 
+/// Verifies a pre-existing remote object against the already-verified local
+/// manifest before a per-object CreateOnly conflict is treated as a resumable
+/// skip. Reads the object back and compares its byte length and `sha256_hex`
+/// against the manifest's `outputs[]` entry for `name`.
+///
+/// A mismatch means the object under this content-addressed prefix carries
+/// different bytes than this release expects (a pre-planted / corrupt object or
+/// an impossible id collision) — fatal, so the caller aborts before uploading
+/// the manifest completeness marker or flipping the pointer. A vanished object
+/// (`None`) is fatal too.
+async fn verify_remote_object<S: PublishStorage>(
+    storage: &S,
+    object_key: &str,
+    name: &str,
+    manifest: &ReleaseManifest,
+) -> Result<(), String> {
+    let expected = manifest
+        .outputs
+        .iter()
+        .find(|output| output.name == name)
+        .ok_or_else(|| {
+            format!(
+                "manifest has no output entry for {name}; cannot verify pre-existing {object_key}"
+            )
+        })?;
+    let stored = storage
+        .read(object_key)
+        .await
+        .map_err(|error| format!("failed to read pre-existing object {object_key}: {error}"))?
+        .ok_or_else(|| {
+            format!(
+                "pre-existing object {object_key} reported present then vanished during integrity check"
+            )
+        })?;
+
+    let actual_size = stored.bytes.len() as u64;
+    if actual_size != expected.size_bytes {
+        return Err(format!(
+            "pre-existing object {object_key} size mismatch: manifest {}, remote {actual_size}; refusing to activate a corrupt release",
+            expected.size_bytes
+        ));
+    }
+    let actual_sha = sha256_hex(&stored.bytes);
+    if actual_sha != expected.sha256 {
+        return Err(format!(
+            "pre-existing object {object_key} sha256 mismatch: manifest {}, remote {actual_sha}; refusing to activate a corrupt release",
+            expected.sha256
+        ));
+    }
+    Ok(())
+}
+
 /// True for the CreateOnly precondition failure `AwsPublishStorage` raises when
 /// an object already exists. `PublishError` collapses that case into
 /// `Operation { message }`, so we key off the adapter's fixed wording — the only
@@ -233,7 +334,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, CliArgs};
+    use super::{parse_args, resolve_bucket, CliArgs};
+
+    #[test]
+    fn resolve_bucket_uses_query_var_when_legacy_unset() {
+        assert_eq!(
+            resolve_bucket(Some("query-bucket".to_string()), None).unwrap(),
+            "query-bucket"
+        );
+    }
+
+    #[test]
+    fn resolve_bucket_accepts_legacy_equal_to_query() {
+        assert_eq!(
+            resolve_bucket(
+                Some("same-bucket".to_string()),
+                Some("same-bucket".to_string())
+            )
+            .unwrap(),
+            "same-bucket"
+        );
+    }
+
+    #[test]
+    fn resolve_bucket_errors_when_query_missing() {
+        let error = resolve_bucket(None, Some("legacy-bucket".to_string())).unwrap_err();
+        assert!(
+            error.contains("LTSEARCH_QUERY_S3_BUCKET"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_bucket_treats_blank_query_as_missing() {
+        let error = resolve_bucket(Some("   ".to_string()), None).unwrap_err();
+        assert!(
+            error.contains("LTSEARCH_QUERY_S3_BUCKET"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_bucket_errors_when_legacy_differs_from_query() {
+        let error = resolve_bucket(
+            Some("query-bucket".to_string()),
+            Some("static-bucket".to_string()),
+        )
+        .unwrap_err();
+        // Names BOTH values so a stale runbook is diagnosable.
+        assert!(error.contains("query-bucket"), "unexpected error: {error}");
+        assert!(error.contains("static-bucket"), "unexpected error: {error}");
+        assert!(
+            error.contains("LTSEARCH_STATIC_S3_BUCKET")
+                && error.contains("LTSEARCH_QUERY_S3_BUCKET"),
+            "unexpected error: {error}"
+        );
+    }
 
     #[test]
     fn parse_args_accepts_release_only() {

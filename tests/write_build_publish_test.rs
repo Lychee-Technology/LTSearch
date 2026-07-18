@@ -316,7 +316,7 @@ fn run_static_activate_bin(bucket: &str, release_dir: &std::path::Path) -> std::
     std::process::Command::new(env!("CARGO_BIN_EXE_static_activate"))
         .arg("--release")
         .arg(release_dir)
-        .env("LTSEARCH_STATIC_S3_BUCKET", bucket)
+        .env("LTSEARCH_QUERY_S3_BUCKET", bucket)
         .env("AWS_ENDPOINT_URL_S3", "http://localhost:5000")
         .env("AWS_ACCESS_KEY_ID", "test")
         .env("AWS_SECRET_ACCESS_KEY", "test")
@@ -445,6 +445,66 @@ async fn aws_static_activate_bin_resumes_partial_prior_upload() {
         .expect("static/_head must exist after activation");
     let head = StaticReleaseHead::from_json(&head_object.bytes).unwrap();
     assert_eq!(head.release_id, manifest.release_id);
+}
+
+/// Finding 1 guard: a pre-existing object under the release prefix carrying
+/// WRONG bytes must abort activation. `verify_release_dir` only proves the LOCAL
+/// dir, so the bin must read each conflicting object back and verify its sha256 +
+/// size against the verified manifest. A corrupt pre-planted `.bin` must be fatal
+/// — the manifest completeness marker must NOT be uploaded and `static/_head`
+/// must NOT flip. Without the read-back integrity check the bin would skip the
+/// corrupt object, upload the rest + manifest, and activate a corrupt release.
+#[tokio::test]
+async fn aws_static_activate_bin_rejects_preexisting_corrupt_object() {
+    let harness = MotoHarness::new("static-activate-corrupt").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+    let dir = build_v3_release_fixture();
+    let manifest = verify_release_dir(&dir, None, None).unwrap();
+    let dir_key = static_release_dir_key(&manifest.release_id);
+
+    // Pre-plant ONE object under the release prefix with DIFFERENT bytes than the
+    // release expects (a corrupt / colliding prior write).
+    let corrupt_name = V3_RELEASE_OUTPUT_FILES[0];
+    let corrupt_key = format!("{dir_key}/{corrupt_name}");
+    let corrupt_path = std::env::temp_dir().join(format!(
+        "ltsearch-corrupt-preplant-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&corrupt_path, b"totally-wrong-bytes-not-the-real-artifact").unwrap();
+    storage
+        .upload_file(&corrupt_key, &corrupt_path, UploadMode::CreateOnly)
+        .await
+        .unwrap();
+
+    let out = run_static_activate_bin(&harness.bucket, &dir);
+    assert!(
+        !out.status.success(),
+        "activation must abort on a corrupt pre-existing object; stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&corrupt_key),
+        "stderr must name the corrupt object {corrupt_key}; stderr: {stderr}"
+    );
+
+    // The pointer must NOT have flipped and the manifest marker must NOT exist.
+    assert!(
+        storage.read(STATIC_HEAD_KEY).await.unwrap().is_none(),
+        "static/_head must not exist after a rejected corrupt activation"
+    );
+    assert!(
+        storage
+            .read(&static_release_manifest_key(&manifest.release_id))
+            .await
+            .unwrap()
+            .is_none(),
+        "manifest completeness marker must not be uploaded when activation aborts"
+    );
 }
 
 /// Builds a real, self-consistent v3 static release directory via
