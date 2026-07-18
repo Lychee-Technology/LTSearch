@@ -16,7 +16,7 @@ use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::adapters::sqs_build_queue::AwsSqsBuildQueue;
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
 use ltsearch::index::{
-    EmbeddingProfile, ReleaseSource, StaticChunk, StaticReleaseBuilder,
+    EmbeddingProfile, ReleaseSource, StaticChunk, StaticReleaseBuilder, V3_RELEASE_OUTPUT_FILES,
 };
 use ltsearch::indexing::PublishStorage;
 use ltsearch::indexing::{
@@ -305,6 +305,146 @@ async fn aws_static_activate_uploads_release_and_flips_pointer() {
         .expect("release manifest must exist in S3");
     let on_disk = std::fs::read(dir.join("release_manifest.json")).unwrap();
     assert_eq!(manifest_object.bytes, on_disk);
+}
+
+/// Runs the real `static_activate` bin as a subprocess pointed at Moto, so the
+/// tests exercise the bin's actual install orchestration end-to-end (not a
+/// reproduction of it). Credentials + endpoint are injected via env to match the
+/// `MotoHarness` client wiring; the S3 endpoint override is honoured by
+/// `bootstrap::s3_client_from_env`.
+fn run_static_activate_bin(bucket: &str, release_dir: &std::path::Path) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_static_activate"))
+        .arg("--release")
+        .arg(release_dir)
+        .env("LTSEARCH_STATIC_S3_BUCKET", bucket)
+        .env("AWS_ENDPOINT_URL_S3", "http://localhost:5000")
+        .env("AWS_ACCESS_KEY_ID", "test")
+        .env("AWS_SECRET_ACCESS_KEY", "test")
+        .env("AWS_REGION", "us-east-1")
+        .env("AWS_DEFAULT_REGION", "us-east-1")
+        .output()
+        .expect("failed to spawn static_activate bin")
+}
+
+/// Finding 2 end-to-end guard: running the bin twice against the same release
+/// must succeed both times. The second run hits a CreateOnly conflict on every
+/// object including the manifest; the bin's conflict matcher (pinned to the
+/// adapter's `CREATE_ONLY_CONFLICT_PHRASE` const) must recognise it and report
+/// "already fully installed" instead of turning the idempotent re-run fatal. A
+/// wording drift between the adapter's message and the bin's matcher would break
+/// this test.
+#[tokio::test]
+async fn aws_static_activate_bin_second_run_is_idempotent() {
+    let harness = MotoHarness::new("static-activate-idempotent").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+    let dir = build_v3_release_fixture();
+    let manifest = verify_release_dir(&dir, None, None).unwrap();
+
+    let first = run_static_activate_bin(&harness.bucket, &dir);
+    assert!(
+        first.status.success(),
+        "first install must succeed; stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let second = run_static_activate_bin(&harness.bucket, &dir);
+    assert!(
+        second.status.success(),
+        "second install must be idempotent, not fatal; stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        second_stderr.contains("already fully installed"),
+        "second run should report the already-installed outcome; stderr: {second_stderr}"
+    );
+
+    // The pointer resolves to the release and the manifest landed byte-for-byte.
+    let head_object = storage
+        .read(STATIC_HEAD_KEY)
+        .await
+        .unwrap()
+        .expect("static/_head must exist after activation");
+    let head = StaticReleaseHead::from_json(&head_object.bytes).unwrap();
+    assert_eq!(head.release_id, manifest.release_id);
+    let manifest_object = storage
+        .read(&static_release_manifest_key(&manifest.release_id))
+        .await
+        .unwrap()
+        .expect("release manifest must exist in S3");
+    let on_disk = std::fs::read(dir.join("release_manifest.json")).unwrap();
+    assert_eq!(manifest_object.bytes, on_disk);
+}
+
+/// Finding 1 end-to-end guard: a prior run that died mid-upload leaves a partial
+/// `.bin` set and NO manifest. The bin must resume — backfilling the remaining
+/// objects and finally writing the manifest completeness marker — rather than
+/// treating the first already-present object as "fully installed" and flipping
+/// the pointer at an incomplete release. This test FAILS against the old
+/// all-or-nothing `upload_directory` + first-conflict-means-installed logic,
+/// which would skip the remaining objects and never upload the manifest.
+#[tokio::test]
+async fn aws_static_activate_bin_resumes_partial_prior_upload() {
+    let harness = MotoHarness::new("static-activate-resume").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+    let dir = build_v3_release_fixture();
+    let manifest = verify_release_dir(&dir, None, None).unwrap();
+    let dir_key = static_release_dir_key(&manifest.release_id);
+
+    // Simulate a dead prior run: place exactly ONE .bin object, no manifest.
+    let partial = V3_RELEASE_OUTPUT_FILES[0];
+    storage
+        .upload_file(
+            &format!("{dir_key}/{partial}"),
+            &dir.join(partial),
+            UploadMode::CreateOnly,
+        )
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .read(&static_release_manifest_key(&manifest.release_id))
+            .await
+            .unwrap()
+            .is_none(),
+        "precondition: manifest must be absent before the resume run"
+    );
+
+    let out = run_static_activate_bin(&harness.bucket, &dir);
+    assert!(
+        out.status.success(),
+        "resume install must complete; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Every one of the nine .bin objects is now present (the pre-placed one plus
+    // the eight backfilled by the resume run).
+    for name in V3_RELEASE_OUTPUT_FILES {
+        assert!(
+            storage
+                .read(&format!("{dir_key}/{name}"))
+                .await
+                .unwrap()
+                .is_some(),
+            "object {name} must be present after resume"
+        );
+    }
+    // The manifest completeness marker landed byte-for-byte...
+    let manifest_object = storage
+        .read(&static_release_manifest_key(&manifest.release_id))
+        .await
+        .unwrap()
+        .expect("manifest must land only after all .bin objects are present");
+    let on_disk = std::fs::read(dir.join("release_manifest.json")).unwrap();
+    assert_eq!(manifest_object.bytes, on_disk);
+    // ...and only then did the pointer flip to the now-complete release.
+    let head_object = storage
+        .read(STATIC_HEAD_KEY)
+        .await
+        .unwrap()
+        .expect("static/_head must exist after activation");
+    let head = StaticReleaseHead::from_json(&head_object.bytes).unwrap();
+    assert_eq!(head.release_id, manifest.release_id);
 }
 
 /// Builds a real, self-consistent v3 static release directory via

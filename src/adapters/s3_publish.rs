@@ -9,6 +9,16 @@ use aws_sdk_s3::Client as S3Client;
 use crate::error::PublishError;
 use crate::indexing::{PublishStorage, UploadMode, VersionedObject};
 
+/// Discriminating phrase in the `PublishError::Operation` message this adapter
+/// raises when a `CreateOnly` upload hits an already-present object. Because
+/// `PublishError` collapses that precondition failure into a stringly-typed
+/// `Operation { message }`, this substring is the only stable discriminator the
+/// error shape offers. It lives here, beside its single construction site, so
+/// callers that key idempotent re-runs off the CreateOnly conflict (e.g. the
+/// `static_activate` bin) match against the same const the message is built
+/// from — a wording edit can never silently desync the two.
+pub const CREATE_ONLY_CONFLICT_PHRASE: &str = "refusing to overwrite existing version artifact";
+
 #[derive(Clone)]
 pub struct AwsPublishStorage {
     bucket: String,
@@ -91,7 +101,7 @@ impl PublishStorage for AwsPublishStorage {
             Err(error) if mode == UploadMode::CreateOnly && is_precondition_failure(&error) => {
                 Err(PublishError::Operation {
                     message: format!(
-                        "refusing to overwrite existing version artifact {key}: version artifacts are immutable"
+                        "{CREATE_ONLY_CONFLICT_PHRASE} {key}: version artifacts are immutable"
                     ),
                 })
             }

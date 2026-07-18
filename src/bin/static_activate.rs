@@ -5,10 +5,18 @@
 //! compare-and-swaps the `static/_head` pointer to it. The three steps are
 //! strictly ordered: verify precedes upload, upload precedes the pointer swap.
 //!
-//! Idempotent: because `release_id` is content-derived, re-running the same
-//! release re-targets the same immutable keys. The first already-present object
-//! surfaces as a CreateOnly conflict, which we treat as "already installed" and
-//! proceed straight to the pointer swap. Every other upload error is fatal.
+//! Idempotent *and* resumable: because `release_id` is content-derived,
+//! re-running the same release re-targets the same immutable keys. The nine
+//! `.bin` objects are uploaded one at a time — a CreateOnly conflict on any one
+//! means a prior run already placed it, so it is skipped and the rest resume.
+//! `release_manifest.json` is uploaded strictly last as the completeness
+//! marker: only a fully-installed release has a manifest object, so a manifest
+//! conflict (byte-identical to the local one) is the single signal that means
+//! "already completely installed", and only then do we CAS the pointer. A run
+//! that died mid-upload leaves an incomplete `.bin` set but no manifest, so the
+//! retry backfills rather than activating an incomplete release. A manifest
+//! conflict with *different* bytes is treated as corruption (content-addressed
+//! ids make it impossible). Every other upload error is fatal.
 //!
 //! Contract:
 //! ```text
@@ -20,13 +28,14 @@ use std::env;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ltsearch::adapters::s3_publish::AwsPublishStorage;
+use ltsearch::adapters::s3_publish::{AwsPublishStorage, CREATE_ONLY_CONFLICT_PHRASE};
 use ltsearch::bootstrap::s3_client_from_env;
 use ltsearch::error::PublishError;
+use ltsearch::index::{RELEASE_MANIFEST_FILE, V3_RELEASE_OUTPUT_FILES};
 use ltsearch::indexing::{
     activate_static_pointer, verify_release_dir, PublishStorage, StaticActivateError, UploadMode,
 };
-use ltsearch::storage::static_release_dir_key;
+use ltsearch::storage::{static_release_dir_key, static_release_manifest_key};
 
 /// The bucket holding the static release tree and its `static/_head` pointer.
 const BUCKET_ENV: &str = "LTSEARCH_STATIC_S3_BUCKET";
@@ -107,23 +116,76 @@ async fn run(args: CliArgs) -> Result<String, String> {
     let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
     let storage = AwsPublishStorage::new(bucket, s3_client_from_env(&sdk_config));
 
-    // 2) Upload the release tree immutably. A CreateOnly conflict means the
-    //    content-derived release is already installed — idempotent no-op.
-    match storage
-        .upload_directory(
-            &static_release_dir_key(&release_id),
-            release_dir,
-            UploadMode::CreateOnly,
+    // 2) Resumable per-object install with manifest-last as the completeness
+    //    marker. Upload the nine `.bin` objects first, each CreateOnly; a
+    //    conflict on an individual object means a prior run already placed it,
+    //    so we skip it and resume. Only once every `.bin` is present do we
+    //    upload `release_manifest.json` (also CreateOnly). Because the manifest
+    //    is written strictly last, its presence in S3 proves the whole release
+    //    landed — a run that died mid-upload leaves the `.bin` set incomplete
+    //    but never the manifest, so the next run backfills instead of flipping
+    //    the pointer at an incomplete release.
+    let dir_key = static_release_dir_key(&release_id);
+    for name in V3_RELEASE_OUTPUT_FILES {
+        let object_key = format!("{dir_key}/{name}");
+        let source = release_dir.join(name);
+        match storage
+            .upload_file(&object_key, &source, UploadMode::CreateOnly)
+            .await
+        {
+            Ok(()) => {}
+            // Already present from a prior (possibly interrupted) run — resume.
+            Err(error) if is_create_only_conflict(&error) => {}
+            Err(error) => {
+                return Err(format!(
+                    "failed to upload static release object {object_key}: {error}"
+                ));
+            }
+        }
+    }
+
+    // Manifest LAST: it is the completeness marker for this release.
+    let manifest_key = static_release_manifest_key(&release_id);
+    let manifest_source = release_dir.join(RELEASE_MANIFEST_FILE);
+    let local_manifest = std::fs::read(&manifest_source).map_err(|error| {
+        format!(
+            "failed to read local manifest {}: {error}",
+            manifest_source.display()
         )
+    })?;
+    match storage
+        .upload_file(&manifest_key, &manifest_source, UploadMode::CreateOnly)
         .await
     {
         Ok(()) => {}
         Err(error) if is_create_only_conflict(&error) => {
-            eprintln!("static release {release_id} already installed; reusing existing objects");
+            // Manifest already present ⇒ a prior run completed the install. Read
+            // it back and byte-compare: equal means genuinely already installed
+            // (idempotent success); different means two distinct releases share
+            // one content-addressed id, which is impossible barring corruption.
+            let stored = storage
+                .read(&manifest_key)
+                .await
+                .map_err(|error| {
+                    format!("failed to read stored manifest {manifest_key}: {error}")
+                })?
+                .ok_or_else(|| {
+                    format!(
+                        "manifest {manifest_key} reported present then vanished during idempotency check"
+                    )
+                })?;
+            if stored.bytes != local_manifest {
+                return Err(format!(
+                    "static release {release_id} already installed with a DIFFERENT manifest at {manifest_key}: content-addressed ids make this impossible; treating as corruption"
+                ));
+            }
+            eprintln!(
+                "static release {release_id} already fully installed; reusing existing objects"
+            );
         }
         Err(error) => {
             return Err(format!(
-                "failed to upload static release {release_id}: {error}"
+                "failed to upload static release manifest {manifest_key}: {error}"
             ));
         }
     }
@@ -148,7 +210,7 @@ fn is_create_only_conflict(error: &PublishError) -> bool {
     matches!(
         error,
         PublishError::Operation { message }
-            if message.contains("refusing to overwrite existing version artifact")
+            if message.contains(CREATE_ONLY_CONFLICT_PHRASE)
     )
 }
 
