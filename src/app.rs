@@ -31,7 +31,7 @@ use crate::index::{
 };
 use crate::indexing::{
     activate_static_pointer, install_into_managed_store, verify_release_dir, BuildIndexRequest,
-    IndexPublisher, LocalIndexBuilder, PublishRequest, StaticActivateError,
+    IndexPublisher, LocalIndexBuilder, PublishRequest,
 };
 use crate::local::{
     LocalPublishStorage, SqliteBuildJobSource, SqliteBuildQueue, SqliteDb, SqliteWalStorage,
@@ -227,6 +227,12 @@ where
 /// 安装进受管存储 `<root>/static/releases/<id>/` → CAS 切换 `static/_head` 静态指针。
 /// 三步严格有序：验证在安装（会 move 掉 src 目录）之前，安装在 CAS 之前，只有
 /// 全部通过才落库指针。控制面库与其余本地角色共用 `<root>/ltsearch.db`。
+///
+/// 移动/所有权语义：安装快路径是 `fs::rename`，`--release` 目录会被移动进受管
+/// 存储，成功后原 `--release` 路径不复存在。因此一旦安装成功、CAS 却失手
+/// （`LostCas`），重试不能再指向原始构建目录，而应以受管副本
+/// `<root>/static/releases/<release_id>/` 作为 `--release`——那里验证可过、安装幂等
+/// 跳过，直接重跑指针 CAS。
 pub async fn run_static_activate<I, S>(args: I) -> Result<String, AppError>
 where
     I: IntoIterator<Item = S>,
@@ -247,18 +253,17 @@ where
         parsed.expect_model_id.as_deref(),
         parsed.expect_dim,
     )
-    .map_err(describe_activate_error)?;
+    .map_err(|err| err.to_string())?;
     let release_id = manifest.release_id.clone();
 
     // 2) 安装进受管存储(幂等;快路径为 rename,会移动 src 目录)。
-    install_into_managed_store(&root, &release_id, &release_dir)
-        .map_err(describe_activate_error)?;
+    install_into_managed_store(&root, &release_id, &release_dir).map_err(|err| err.to_string())?;
 
     // 3) CAS 切换静态指针(head 落 SQLite `static_release_head`)。
     let storage = LocalPublishStorage::new(db, &root);
     let result = activate_static_pointer(&storage, &release_id, current_time_millis())
         .await
-        .map_err(describe_activate_error)?;
+        .map_err(|err| err.to_string())?;
 
     let previous = result.previous_release_id.as_deref().unwrap_or("<none>");
     Ok(format!(
@@ -330,21 +335,6 @@ where
         expect_model_id,
         expect_dim,
     })
-}
-
-/// 把 [`StaticActivateError`] 转成可读的一行摘要（该错误只 derive Debug,不实现
-/// Display,故 CLI 侧集中在此渲染）。
-fn describe_activate_error(error: StaticActivateError) -> String {
-    match error {
-        StaticActivateError::Verify { message } => {
-            format!("release verification failed: {message}")
-        }
-        StaticActivateError::LostCas { release_id } => {
-            format!("static pointer CAS lost for release {release_id} (concurrent writer won)")
-        }
-        StaticActivateError::Storage(error) => format!("publish storage error: {error}"),
-        StaticActivateError::Io { message } => format!("install failed: {message}"),
-    }
 }
 
 /// build 闭包：按序读取全部 `wal_keys`（SQLite WAL）→ 构建 embedding 引擎 →

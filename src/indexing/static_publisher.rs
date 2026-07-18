@@ -7,6 +7,7 @@
 //! the `index`/`storage` modules — never on `adapters` or any `#[cfg(aws)]`
 //! item, so activation stays in the AWS-free dependency graph.
 
+use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -38,6 +39,38 @@ pub enum StaticActivateError {
     Storage(PublishError),
     /// A local filesystem operation failed during install.
     Io { message: String },
+}
+
+impl fmt::Display for StaticActivateError {
+    /// Renders each variant as the one-line summary the CLIs surface to users.
+    /// The exhaustive match (no wildcard arm) forces any future variant to add
+    /// its own wording here rather than silently falling through.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StaticActivateError::Verify { message } => {
+                write!(f, "release verification failed: {message}")
+            }
+            StaticActivateError::LostCas { release_id } => {
+                write!(
+                    f,
+                    "static pointer CAS lost for release {release_id} (concurrent writer won)"
+                )
+            }
+            StaticActivateError::Storage(error) => write!(f, "publish storage error: {error}"),
+            StaticActivateError::Io { message } => write!(f, "install failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for StaticActivateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            StaticActivateError::Storage(error) => Some(error),
+            StaticActivateError::Verify { .. }
+            | StaticActivateError::LostCas { .. }
+            | StaticActivateError::Io { .. } => None,
+        }
+    }
 }
 
 /// The outcome of a successful pointer activation.
@@ -258,6 +291,14 @@ pub fn verify_release_dir(
 /// a plain `fs::rename` first; on any rename failure (e.g. a cross-device move)
 /// it falls back to a recursive copy into a `.<release_id>-staging` sibling and
 /// then renames that into place.
+///
+/// Ownership semantics: on the fast path `src_dir` is **moved** (renamed) into
+/// the managed store, so after a successful call the original `--release` path
+/// no longer exists. This matters for lost-CAS recovery: install has already
+/// succeeded, so a retry must NOT point `--release` back at the (now-gone)
+/// original build dir — that would fail verification. Retry instead against the
+/// managed copy at `<root>/static/releases/<release_id>/`, where verify passes
+/// and this install idempotent-skips before the pointer CAS runs again.
 pub fn install_into_managed_store(
     root: &Path,
     release_id: &str,

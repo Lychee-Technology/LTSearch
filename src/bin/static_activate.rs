@@ -32,9 +32,7 @@ use ltsearch::adapters::s3_publish::{AwsPublishStorage, CREATE_ONLY_CONFLICT_PHR
 use ltsearch::bootstrap::s3_client_from_env;
 use ltsearch::error::PublishError;
 use ltsearch::index::{RELEASE_MANIFEST_FILE, V3_RELEASE_OUTPUT_FILES};
-use ltsearch::indexing::{
-    activate_static_pointer, verify_release_dir, PublishStorage, StaticActivateError, UploadMode,
-};
+use ltsearch::indexing::{activate_static_pointer, verify_release_dir, PublishStorage, UploadMode};
 use ltsearch::storage::{static_release_dir_key, static_release_manifest_key};
 
 /// The bucket holding the static release tree and its `static/_head` pointer.
@@ -114,7 +112,7 @@ async fn run(args: CliArgs) -> Result<String, String> {
         args.expect_model_id.as_deref(),
         args.expect_dim,
     )
-    .map_err(describe_activate_error)?;
+    .map_err(|err| err.to_string())?;
     let release_id = manifest.release_id.clone();
 
     let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
@@ -197,7 +195,7 @@ async fn run(args: CliArgs) -> Result<String, String> {
     // 3) CAS-flip the pointer.
     let result = activate_static_pointer(&storage, &release_id, current_time_millis())
         .await
-        .map_err(describe_activate_error)?;
+        .map_err(|err| err.to_string())?;
 
     let previous = result.previous_release_id.as_deref().unwrap_or("<none>");
     Ok(format!(
@@ -216,21 +214,6 @@ fn is_create_only_conflict(error: &PublishError) -> bool {
         PublishError::Operation { message }
             if message.contains(CREATE_ONLY_CONFLICT_PHRASE)
     )
-}
-
-/// Renders [`StaticActivateError`] (which only derives `Debug`) as a readable
-/// one-line summary, matching `app.rs`'s local-CLI mapping.
-fn describe_activate_error(error: StaticActivateError) -> String {
-    match error {
-        StaticActivateError::Verify { message } => {
-            format!("release verification failed: {message}")
-        }
-        StaticActivateError::LostCas { release_id } => {
-            format!("static pointer CAS lost for release {release_id} (concurrent writer won)")
-        }
-        StaticActivateError::Storage(error) => format!("publish storage error: {error}"),
-        StaticActivateError::Io { message } => format!("install failed: {message}"),
-    }
 }
 
 fn current_time_millis() -> i64 {
