@@ -14,7 +14,8 @@ use serde_json::{json, Value};
 
 use ltsearch::error::PublishError;
 use ltsearch::index::{
-    EmbeddingProfile, ReleaseSource, StaticChunk, StaticReleaseBuilder,
+    derive_release_id, EmbeddingProfile, ReleaseManifest, ReleaseSource, StaticChunk,
+    StaticReleaseBuilder,
 };
 use ltsearch::indexing::{
     activate_static_pointer, install_into_managed_store, verify_release_dir, StaticActivateError,
@@ -121,6 +122,42 @@ fn verify_rejects_unexpected_model_id() {
     let dir = build_v3_release_fixture();
     assert!(matches!(
         verify_release_dir(&dir, Some("wrong-model"), None).unwrap_err(),
+        StaticActivateError::Verify { .. }
+    ));
+}
+
+#[test]
+fn verify_rejects_manifest_with_missing_output_entry() {
+    // A crafted manifest that drops one of the nine v3 `.bin` outputs, with
+    // `release_id` re-derived over the *reduced* output set so the forged
+    // manifest stays self-consistent through steps 1-4. The file still exists on
+    // disk (MmapIndex would still read it by fixed name), so only an explicit
+    // "outputs must cover all nine artifacts" check can catch this.
+    let dir = build_v3_release_fixture();
+    let manifest_path = dir.join("release_manifest.json");
+    let mut manifest: ReleaseManifest =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+
+    // Drop one listed output (its file is left on disk untouched).
+    let dropped = manifest
+        .outputs
+        .iter()
+        .position(|output| output.name == "turbo_static_title.bin")
+        .expect("fixture must list turbo_static_title.bin");
+    manifest.outputs.remove(dropped);
+
+    // Re-derive release_id over the reduced set so steps 1-4 all pass.
+    manifest.release_id = derive_release_id(
+        manifest.turbo_version,
+        &manifest.embedding_profile,
+        &manifest.codec,
+        &manifest.input_fingerprint.content_digest,
+        &manifest.outputs,
+    );
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+    assert!(matches!(
+        verify_release_dir(&dir, None, None).unwrap_err(),
         StaticActivateError::Verify { .. }
     ));
 }

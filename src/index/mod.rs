@@ -27,7 +27,7 @@ pub use release_manifest::{
     RELEASE_MANIFEST_FILE,
 };
 pub use static_builder::{StaticChunk, StaticIndexBuildResult, StaticIndexBuilder};
-pub use static_release::StaticReleaseBuilder;
+pub use static_release::{StaticReleaseBuilder, V3_RELEASE_OUTPUT_FILES};
 #[cfg(feature = "aws")]
 pub use static_source::load_static_chunks_from_s3;
 pub use static_source::{parse_static_source_lines, StaticSourceConfig, TurboBuildConfig};

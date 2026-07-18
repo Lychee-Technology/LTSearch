@@ -28,6 +28,25 @@ use super::static_builder::{
 };
 use super::{CentroidTable, MetaExtRecord, MetaRecord, ProjectionMatrix, TurboHeader};
 
+/// The exact set of `.bin` artifact file names a v3 static release must
+/// contain, in ascending `name` order.
+///
+/// This is the single source of truth for both the writer (which hashes
+/// exactly these files into `outputs[]`) and the verify layer (which rejects
+/// any manifest whose `outputs[]` names deviate from this set). Keeping one
+/// const prevents the two sides from drifting.
+pub const V3_RELEASE_OUTPUT_FILES: [&str; 9] = [
+    "centroids.bin",
+    "projection.bin",
+    "turbo_static.bin",
+    "turbo_static_docid.bin",
+    "turbo_static_meta.bin",
+    "turbo_static_meta_ext.bin",
+    "turbo_static_meta_json.bin",
+    "turbo_static_text.bin",
+    "turbo_static_title.bin",
+];
+
 /// Writes self-describing TurboQuant v3 static releases.
 pub struct StaticReleaseBuilder;
 
@@ -350,17 +369,7 @@ fn write_release_files(
 /// name ascending. Excludes `release_manifest.json`, which is written after and
 /// cannot describe its own hash.
 fn collect_outputs(staged_dir: &Path) -> Result<Vec<OutputFile>, IndexError> {
-    let names = [
-        "centroids.bin",
-        "projection.bin",
-        "turbo_static.bin",
-        "turbo_static_docid.bin",
-        "turbo_static_meta.bin",
-        "turbo_static_meta_ext.bin",
-        "turbo_static_meta_json.bin",
-        "turbo_static_text.bin",
-        "turbo_static_title.bin",
-    ];
+    let names = V3_RELEASE_OUTPUT_FILES;
     // `names` is authored in ascending order; assert it so a future edit that
     // breaks the ordering fails loudly instead of silently changing release_id.
     debug_assert!(names.windows(2).all(|pair| pair[0] < pair[1]));

@@ -13,6 +13,7 @@ use std::path::Path;
 use crate::error::PublishError;
 use crate::index::{
     derive_release_id, sha256_hex, MmapIndex, ReleaseManifest, RELEASE_MANIFEST_FILE,
+    V3_RELEASE_OUTPUT_FILES,
 };
 use crate::storage::{static_release_dir_key, StaticReleaseHead, STATIC_HEAD_KEY};
 
@@ -54,8 +55,10 @@ pub struct StaticActivationResult {
 ///
 /// 1. Parse `release_manifest.json` into a [`ReleaseManifest`].
 /// 2. `manifest_schema_version == 1 && turbo_version == 3`.
-/// 3. Recompute every `outputs[]` entry's `sha256` + `size_bytes` from disk and
-///    compare field-by-field.
+/// 3. `outputs[]` names exactly the nine v3 artifact files (name-ascending),
+///    then recompute every entry's `sha256` + `size_bytes` from disk and
+///    compare field-by-field. Pinning the set is what stops a self-consistent
+///    manifest that simply omits `.bin` files from serving them unchecked.
 /// 4. Recompute `derive_release_id(..)` and require it to equal `release_id`.
 /// 5. Lance provenance is coherent (`kind == "lance"`, non-empty `dataset_path`,
 ///    positive `table_version`, `table_row_count == doc_count`).
@@ -99,7 +102,37 @@ pub fn verify_release_dir(
         )));
     }
 
-    // Step 3: recompute each output's hash + size from the file on disk.
+    // Step 3a: `outputs[]` must name EXACTLY the nine v3 artifact files, no more
+    // and no less. Step 3b only re-hashes the files the manifest lists, and
+    // step 4's release_id is derived over that same list, so a crafted manifest
+    // that omits some `.bin` files (with release_id recomputed over the reduced
+    // set) would be self-consistent through steps 1-4 — yet `MmapIndex::load`
+    // reads every artifact by fixed filename from disk, serving the omitted
+    // files unchecked. Pinning the set to the canonical writer const closes that
+    // gap and keeps the two sides from drifting.
+    let mut actual_names: Vec<&str> =
+        manifest.outputs.iter().map(|o| o.name.as_str()).collect();
+    actual_names.sort_unstable();
+    if actual_names != V3_RELEASE_OUTPUT_FILES {
+        let missing: Vec<&str> = V3_RELEASE_OUTPUT_FILES
+            .iter()
+            .copied()
+            .filter(|expected| !actual_names.contains(expected))
+            .collect();
+        let unexpected: Vec<&str> = actual_names
+            .iter()
+            .copied()
+            .filter(|name| !V3_RELEASE_OUTPUT_FILES.contains(name))
+            .collect();
+        return Err(verify_err(format!(
+            "outputs must list exactly the {} v3 artifact files; missing {:?}, unexpected {:?}",
+            V3_RELEASE_OUTPUT_FILES.len(),
+            missing,
+            unexpected
+        )));
+    }
+
+    // Step 3b: recompute each output's hash + size from the file on disk.
     for output in &manifest.outputs {
         let output_path = dir.join(&output.name);
         let bytes = fs::read(&output_path).map_err(|error| {
