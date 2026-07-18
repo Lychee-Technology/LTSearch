@@ -13,10 +13,10 @@ use std::env;
 use std::fs;
 use std::path::Path;
 
+use aws_sdk_s3::config::ResponseChecksumValidation;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::bootstrap::s3_client_from_env;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 
@@ -54,11 +54,8 @@ pub fn model_asset_source_from_env(side: &str) -> Result<Option<ModelAssetSource
     }
 }
 
-fn sha256_hex(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+fn to_hex(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// warm 快查：本地 manifest 可解析且所有文件尺寸匹配即视为就绪
@@ -95,9 +92,51 @@ async fn get_object(
             )
         })?;
     let data = output.body.collect().await.map_err(|error| {
-        format!("model assets not provisioned: reading s3://{bucket}/{key} body failed: {error}")
+        format!("model assets not provisioned: reading s3://{bucket}/{key} body failed: {error:?}")
     })?;
     Ok(data.into_bytes().to_vec())
+}
+
+/// 大文件(model.ort ~118MB)流式落盘:边读边写边哈希,不整块驻留内存;
+/// 返回 (bytes, sha256_hex)。
+async fn download_to_file(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    key: &str,
+    dest: &Path,
+) -> Result<(u64, String), String> {
+    use std::io::Write;
+
+    let output = client
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "model assets not provisioned: GET s3://{bucket}/{key} failed: {}",
+                aws_sdk_s3::error::DisplayErrorContext(&error)
+            )
+        })?;
+    let mut body = output.body;
+    let mut hasher = Sha256::new();
+    let mut file = std::fs::File::create(dest).map_err(|error| {
+        format!("model assets not provisioned: creating {}: {error}", dest.display())
+    })?;
+    let mut total: u64 = 0;
+    while let Some(chunk) = body.try_next().await.map_err(|error| {
+        format!(
+            "model assets not provisioned: streaming s3://{bucket}/{key} after {total} bytes: {error:?}"
+        )
+    })? {
+        total += chunk.len() as u64;
+        hasher.update(&chunk);
+        file.write_all(&chunk).map_err(|error| {
+            format!("model assets not provisioned: writing {}: {error}", dest.display())
+        })?;
+    }
+    Ok((total, to_hex(&hasher.finalize())))
 }
 
 pub async fn provision_model_assets(
@@ -128,26 +167,20 @@ pub async fn provision_model_assets(
 
     for file in &manifest.files {
         let key = format!("{}/{}", source.prefix, file.name);
-        let data = get_object(client, &source.bucket, &key).await?;
-        if data.len() as u64 != file.bytes {
+        let partial = dir.join(format!(".partial-{}", file.name));
+        let (bytes, actual) = download_to_file(client, &source.bucket, &key, &partial).await?;
+        if bytes != file.bytes {
             return Err(format!(
-                "model assets not provisioned: s3://{}/{key} is {} bytes, manifest says {}",
-                source.bucket,
-                data.len(),
-                file.bytes
+                "model assets not provisioned: s3://{}/{key} is {bytes} bytes, manifest says {}",
+                source.bucket, file.bytes
             ));
         }
-        let actual = sha256_hex(&data);
         if actual != file.sha256 {
             return Err(format!(
                 "model assets not provisioned: s3://{}/{key} sha256 {actual} does not match manifest {}",
                 source.bucket, file.sha256
             ));
         }
-        let partial = dir.join(format!(".partial-{}", file.name));
-        fs::write(&partial, &data).map_err(|error| {
-            format!("model assets not provisioned: writing {}: {error}", partial.display())
-        })?;
         fs::rename(&partial, dir.join(&file.name)).map_err(|error| {
             format!("model assets not provisioned: staging {}: {error}", file.name)
         })?;
@@ -178,8 +211,20 @@ pub async fn provision_from_env(side: &str) -> Result<(), String> {
         format!("LTSEARCH_{side}_LTEMBED_S3_BUCKET is set but {bundle_dir_var} is missing")
     })?;
     let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let client = s3_client_from_env(&sdk_config);
-    provision_model_assets(&client, &source, &bundle_dir).await
+    provision_model_assets(&provisioning_s3_client(&sdk_config), &source, &bundle_dir).await
+}
+
+/// 供给专用 S3 client：跳过可选的响应 CRC 校验（`WhenRequired`）——完整性由
+/// manifest 的逐文件 sha256 保证（强于 CRC），且 moto 对 multipart 上传对象
+/// 返回的复合 checksum 会让 SDK 默认校验在大文件（model.ort）上误报
+/// ChecksumMismatch。endpoint 处理与 bootstrap::s3_client_from_env 对齐。
+fn provisioning_s3_client(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client {
+    let mut builder = aws_sdk_s3::config::Builder::from(config)
+        .response_checksum_validation(ResponseChecksumValidation::WhenRequired);
+    if let Ok(endpoint_url) = env::var("AWS_ENDPOINT_URL_S3") {
+        builder = builder.endpoint_url(endpoint_url).force_path_style(true);
+    }
+    aws_sdk_s3::Client::from_conf(builder.build())
 }
 
 #[cfg(test)]
@@ -210,9 +255,9 @@ mod tests {
     }
 
     #[test]
-    fn sha256_hex_matches_known_vector() {
+    fn sha256_to_hex_matches_known_vector() {
         assert_eq!(
-            sha256_hex(b"abc"),
+            to_hex(&Sha256::digest(b"abc")),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }

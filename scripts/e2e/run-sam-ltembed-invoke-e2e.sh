@@ -78,6 +78,7 @@ WRITE_RESPONSE_JSON="$E2E_OUTPUT_DIR/ltembed-write-response.json"
 sam local invoke WriteFunction \
   --template-file "$LTEMBED_E2E_TEMPLATE" \
   --env-vars "$ENV_VARS_JSON" \
+  --region "$LTSEARCH_E2E_AWS_REGION" \
   --event "$WRITE_EVENT_JSON" \
   --docker-network ltsearch-e2e \
   > "$WRITE_RESPONSE_JSON"
@@ -92,6 +93,7 @@ BUILD_RESPONSE_JSON="$E2E_OUTPUT_DIR/ltembed-build-response.json"
 sam local invoke BuildFunction \
   --template-file "$LTEMBED_E2E_TEMPLATE" \
   --env-vars "$ENV_VARS_JSON" \
+  --region "$LTSEARCH_E2E_AWS_REGION" \
   --event "$BUILD_EVENT_JSON" \
   --docker-network ltsearch-e2e \
   > "$BUILD_RESPONSE_JSON"
@@ -107,6 +109,7 @@ QUERY_RESPONSE_JSON="$E2E_OUTPUT_DIR/ltembed-query-response.json"
 sam local invoke QueryFunction \
   --template-file "$LTEMBED_E2E_TEMPLATE" \
   --env-vars "$ENV_VARS_JSON" \
+  --region "$LTSEARCH_E2E_AWS_REGION" \
   --event "$QUERY_EVENT_JSON" \
   --docker-network ltsearch-e2e \
   > "$QUERY_RESPONSE_JSON"
