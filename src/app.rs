@@ -29,7 +29,10 @@ use crate::http::{port_from_env, serve};
 use crate::index::{
     load_lance_snapshot, LanceStaticSourceConfig, ReleaseSource, StaticReleaseBuilder,
 };
-use crate::indexing::{BuildIndexRequest, IndexPublisher, LocalIndexBuilder, PublishRequest};
+use crate::indexing::{
+    activate_static_pointer, install_into_managed_store, verify_release_dir, BuildIndexRequest,
+    IndexPublisher, LocalIndexBuilder, PublishRequest, StaticActivateError,
+};
 use crate::local::{
     LocalPublishStorage, SqliteBuildJobSource, SqliteBuildQueue, SqliteDb, SqliteWalStorage,
 };
@@ -220,6 +223,130 @@ where
     })
 }
 
+/// static-activate 角色：一次性 CLI（非服务）。验证一个已构建的 release 目录 →
+/// 安装进受管存储 `<root>/static/releases/<id>/` → CAS 切换 `static/_head` 静态指针。
+/// 三步严格有序：验证在安装（会 move 掉 src 目录）之前，安装在 CAS 之前，只有
+/// 全部通过才落库指针。控制面库与其余本地角色共用 `<root>/ltsearch.db`。
+pub async fn run_static_activate<I, S>(args: I) -> Result<String, AppError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let parsed = parse_static_activate_args(args)?;
+    let root = std::path::PathBuf::from(&parsed.root);
+    let release_dir = std::path::PathBuf::from(&parsed.release_dir);
+
+    // 与 open_local 同形：先建根,再打开(顺带幂等建表)共享控制面库。
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("failed to create local root {root:?}: {error}"))?;
+    let db = SqliteDb::open(root.join("ltsearch.db"))?;
+
+    // 1) 验证:自洽性 + 可选的 model_id/dim 期望。产出可信 manifest。
+    let manifest = verify_release_dir(
+        &release_dir,
+        parsed.expect_model_id.as_deref(),
+        parsed.expect_dim,
+    )
+    .map_err(describe_activate_error)?;
+    let release_id = manifest.release_id.clone();
+
+    // 2) 安装进受管存储(幂等;快路径为 rename,会移动 src 目录)。
+    install_into_managed_store(&root, &release_id, &release_dir)
+        .map_err(describe_activate_error)?;
+
+    // 3) CAS 切换静态指针(head 落 SQLite `static_release_head`)。
+    let storage = LocalPublishStorage::new(db, &root);
+    let result = activate_static_pointer(&storage, &release_id, current_time_millis())
+        .await
+        .map_err(describe_activate_error)?;
+
+    let previous = result.previous_release_id.as_deref().unwrap_or("<none>");
+    Ok(format!(
+        "activated static release {} (previous {previous})",
+        result.release_id
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StaticActivateArgs {
+    release_dir: String,
+    root: String,
+    expect_model_id: Option<String>,
+    expect_dim: Option<u32>,
+}
+
+/// 手写 `--release/--root [--expect-model-id --expect-dim]` 解析（对齐
+/// `parse_static_build_args` 的风格,不引 clap）。
+fn parse_static_activate_args<I, S>(args: I) -> Result<StaticActivateArgs, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut release_dir = None;
+    let mut root = None;
+    let mut expect_model_id = None;
+    let mut expect_dim = None;
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_ref() {
+            "--release" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --release".to_string())?;
+                release_dir = Some(value.as_ref().to_string());
+            }
+            "--root" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --root".to_string())?;
+                root = Some(value.as_ref().to_string());
+            }
+            "--expect-model-id" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --expect-model-id".to_string())?;
+                expect_model_id = Some(value.as_ref().to_string());
+            }
+            "--expect-dim" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "missing value for --expect-dim".to_string())?;
+                let dim = value.as_ref().parse::<u32>().map_err(|_| {
+                    format!(
+                        "--expect-dim must be a positive integer, got {}",
+                        value.as_ref()
+                    )
+                })?;
+                expect_dim = Some(dim);
+            }
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+
+    Ok(StaticActivateArgs {
+        release_dir: release_dir.ok_or_else(|| "missing required --release".to_string())?,
+        root: root.ok_or_else(|| "missing required --root".to_string())?,
+        expect_model_id,
+        expect_dim,
+    })
+}
+
+/// 把 [`StaticActivateError`] 转成可读的一行摘要（该错误只 derive Debug,不实现
+/// Display,故 CLI 侧集中在此渲染）。
+fn describe_activate_error(error: StaticActivateError) -> String {
+    match error {
+        StaticActivateError::Verify { message } => {
+            format!("release verification failed: {message}")
+        }
+        StaticActivateError::LostCas { release_id } => {
+            format!("static pointer CAS lost for release {release_id} (concurrent writer won)")
+        }
+        StaticActivateError::Storage(error) => format!("publish storage error: {error}"),
+        StaticActivateError::Io { message } => format!("install failed: {message}"),
+    }
+}
+
 /// build 闭包：按序读取全部 `wal_keys`（SQLite WAL）→ 构建 embedding 引擎 →
 /// `LocalIndexBuilder`（spawn_blocking）。与 `index_builder_server.rs` 的 AWS 版
 /// 同构，仅把 WAL 后端从 S3 换成 SQLite、制品根换成本地根。
@@ -358,5 +485,62 @@ mod tests {
         assert!(parse_static_build_args(["--output", "o"])
             .unwrap_err()
             .contains("--config"));
+    }
+
+    #[test]
+    fn parse_static_activate_args_accepts_release_and_root() {
+        let parsed =
+            parse_static_activate_args(["--release", "/tmp/rel", "--root", "/tmp/root"]).unwrap();
+        assert_eq!(parsed.release_dir, "/tmp/rel");
+        assert_eq!(parsed.root, "/tmp/root");
+        assert_eq!(parsed.expect_model_id, None);
+        assert_eq!(parsed.expect_dim, None);
+    }
+
+    #[test]
+    fn parse_static_activate_args_accepts_optional_expectations() {
+        let parsed = parse_static_activate_args([
+            "--release",
+            "/tmp/rel",
+            "--root",
+            "/tmp/root",
+            "--expect-model-id",
+            "jina-v5-nano/512",
+            "--expect-dim",
+            "512",
+        ])
+        .unwrap();
+        assert_eq!(parsed.expect_model_id.as_deref(), Some("jina-v5-nano/512"));
+        assert_eq!(parsed.expect_dim, Some(512));
+    }
+
+    #[test]
+    fn parse_static_activate_args_requires_release_and_root() {
+        assert!(parse_static_activate_args(["--release", "r"])
+            .unwrap_err()
+            .contains("--root"));
+        assert!(parse_static_activate_args(["--root", "o"])
+            .unwrap_err()
+            .contains("--release"));
+    }
+
+    #[test]
+    fn parse_static_activate_args_rejects_unknown_flag() {
+        let error = parse_static_activate_args(["--bogus"]).unwrap_err();
+        assert!(error.contains("unknown argument"));
+    }
+
+    #[test]
+    fn parse_static_activate_args_rejects_non_numeric_expect_dim() {
+        let error = parse_static_activate_args([
+            "--release",
+            "r",
+            "--root",
+            "o",
+            "--expect-dim",
+            "not-a-number",
+        ])
+        .unwrap_err();
+        assert!(error.contains("--expect-dim"), "error: {error}");
     }
 }
