@@ -55,6 +55,14 @@ pub enum MmapIndexError {
         expected: u64,
         actual: u64,
     },
+    MetaExtBlobOutOfBounds {
+        index: u64,
+        blob: &'static str,
+    },
+    MetaExtBlobInvalidUtf8 {
+        index: u64,
+        blob: &'static str,
+    },
     AssetDimensionMismatch {
         file: &'static str,
         expected: u32,
@@ -88,6 +96,18 @@ impl fmt::Display for MmapIndexError {
                 write!(
                     f,
                     "meta ext record count mismatch: expected {expected}, got {actual}"
+                )
+            }
+            Self::MetaExtBlobOutOfBounds { index, blob } => {
+                write!(
+                    f,
+                    "meta ext {blob} blob out of bounds at record {index}"
+                )
+            }
+            Self::MetaExtBlobInvalidUtf8 { index, blob } => {
+                write!(
+                    f,
+                    "meta ext {blob} blob contains invalid UTF-8 at record {index}"
                 )
             }
             Self::AssetDimensionMismatch {
@@ -189,6 +209,38 @@ impl MmapIndex {
                     expected: header.record_count(),
                     actual: actual_meta_ext_count,
                 });
+            }
+
+            // Validate every record's blob slice at load time so the accessors
+            // (`original_doc_id` / `metadata_json`) can index the sidecars
+            // without bounds or UTF-8 panics. A corrupt sidecar fails here
+            // instead of deep inside a query path.
+            let docid_blob_len = docid_mmap.len();
+            let meta_json_blob_len = meta_json_mmap.len();
+            for i in 0..actual_meta_ext_count as usize {
+                let offset = i * META_EXT_RECORD_SIZE;
+                // Safety: the sidecar length was validated above to be exactly
+                // `record_count * META_EXT_RECORD_SIZE`, and `offset` is a
+                // multiple of 8, matching `MetaExtRecord`'s alignment.
+                let ext =
+                    unsafe { &*(meta_ext_mmap[offset..].as_ptr() as *const MetaExtRecord) };
+
+                validate_ext_blob(
+                    &docid_mmap,
+                    docid_blob_len,
+                    ext.docid_offset,
+                    ext.docid_len,
+                    i as u64,
+                    "docid",
+                )?;
+                validate_ext_blob(
+                    &meta_json_mmap,
+                    meta_json_blob_len,
+                    ext.meta_json_offset,
+                    ext.meta_json_len,
+                    i as u64,
+                    "meta_json",
+                )?;
             }
 
             (Some(meta_ext_mmap), Some(docid_mmap), Some(meta_json_mmap))
@@ -394,6 +446,33 @@ impl MmapIndex {
     pub(crate) fn load_from_dir_for_tests(dir: &Path) -> Result<Self, MmapIndexError> {
         Self::load(dir)
     }
+}
+
+/// Verifies that `offset + len` stays within `blob` and that the resulting
+/// slice is valid UTF-8, mapping failures to the two blob error variants.
+fn validate_ext_blob(
+    blob: &[u8],
+    blob_len: usize,
+    offset: u64,
+    len: u32,
+    index: u64,
+    blob_name: &'static str,
+) -> Result<(), MmapIndexError> {
+    let start = offset as usize;
+    let end = start
+        .checked_add(len as usize)
+        .filter(|end| *end <= blob_len)
+        .ok_or(MmapIndexError::MetaExtBlobOutOfBounds {
+            index,
+            blob: blob_name,
+        })?;
+    if std::str::from_utf8(&blob[start..end]).is_err() {
+        return Err(MmapIndexError::MetaExtBlobInvalidUtf8 {
+            index,
+            blob: blob_name,
+        });
+    }
+    Ok(())
 }
 
 fn mmap_file(path: &Path) -> Result<Mmap, MmapIndexError> {
