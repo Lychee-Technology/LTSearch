@@ -156,8 +156,34 @@ prepare_local_ltembed_checkout() {
   fi
 
   if [[ -z "$source_checkout" ]]; then
-    echo "Missing LTEmbed checkout. Looked at: ${configured_checkout:-<unset>}, $nested_checkout, $sibling_checkout, ${cargo_checkout:-<cargo-cache-miss>}" >&2
-    return 1
+    # cargo fetch 只保证 git db(bare 仓库),不一定物化 checkouts/(CI 冷
+    # CARGO_HOME 即如此)。按 Cargo.lock 锁定的 rev 物化一份:优先从本地
+    # db 克隆(无网络),否则直接从 GitHub 按 rev 取(LTEmbed 为公开仓库;
+    # GitHub 支持按任意 commit SHA fetch)。
+    local locked_rev
+    locked_rev="$(sed -n 's|.*git+https://github.com/Lychee-Technology/LTEmbed?[^#]*#\([0-9a-f]\{40\}\)".*|\1|p' "$repo_root/Cargo.lock" | head -n 1)"
+    if [[ -z "$locked_rev" ]]; then
+      echo "Missing LTEmbed checkout and no locked rev in Cargo.lock. Looked at: ${configured_checkout:-<unset>}, $nested_checkout, $sibling_checkout, ${cargo_checkout:-<cargo-cache-miss>}" >&2
+      return 1
+    fi
+    local git_db=""
+    if [[ -d "$cargo_home/git/db" ]]; then
+      git_db="$(find "$cargo_home/git/db" -maxdepth 1 -type d -name 'ltembed-*' 2>/dev/null | head -n 1)"
+    fi
+    rm -rf "$vendor_root"
+    mkdir -p "$(dirname "$vendor_root")"
+    if [[ -n "$git_db" ]] && git clone --quiet "$git_db" "$vendor_root" 2>/dev/null \
+        && git -C "$vendor_root" checkout --quiet "$locked_rev" 2>/dev/null; then
+      :
+    else
+      rm -rf "$vendor_root"
+      git init --quiet "$vendor_root"
+      git -C "$vendor_root" remote add origin https://github.com/Lychee-Technology/LTEmbed
+      git -C "$vendor_root" fetch --quiet --depth 1 origin "$locked_rev"
+      git -C "$vendor_root" checkout --quiet FETCH_HEAD
+    fi
+    rm -rf "$vendor_root/.git"
+    return 0
   fi
 
   python3 - <<'PY' "$source_checkout" "$vendor_root"
