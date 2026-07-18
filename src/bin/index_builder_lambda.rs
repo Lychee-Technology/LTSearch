@@ -41,14 +41,18 @@ async fn function_handler(
 
 fn main() -> Result<(), Error> {
     tokio::runtime::Runtime::new()?.block_on(async {
+        let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         // ZIP 部署不带模型：provider=ltembed 且配置了 S3 供给时，冷启动先把
         // 模型资产下载校验到 /tmp（#111）。失败即 init 报错，不进 handler 循环。
+        // client 在 composition root（bootstrap）构造后注入。
         #[cfg(feature = "ltembed")]
-        ltsearch::embedding::model_assets::provision_from_env("BUILD")
-            .await
-            .map_err(Error::from)?;
+        {
+            let client = ltsearch::bootstrap::model_assets_s3_client_from_env(&sdk_config);
+            ltsearch::embedding::model_assets::provision_from_env("BUILD", &client)
+                .await
+                .map_err(Error::from)?;
+        }
         let config = BuildConfig::from_env()?;
-        let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let s3_client = s3_client_from_env(&sdk_config);
 
         let state = BuildServerState {

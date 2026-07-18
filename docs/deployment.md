@@ -127,7 +127,7 @@ the default `LTEMBED_MODE=stub` builds the `fixed` provider with no model — CI
   (`COPY --from=builder /ltembed-assets /ltembed-assets`) and point
   `LTSEARCH_{QUERY,BUILD}_LTEMBED_BUNDLE_DIR=/ltembed-assets` /
   `LTSEARCH_{QUERY,BUILD}_LTEMBED_MODEL_PATH=/ltembed-assets/model.ort` at the baked path.
-  （兼容形态；ZIP + Layer 为 #106 之后的默认交付。）
+  （兼容形态；ZIP + S3→/tmp 资产供给为 #106 之后的默认交付。）
 - **HTTP server images** (`sam/*_server.Dockerfile`, published to GHCR) do **not** contain model
   assets. Operators mount an LTEmbed bundle (model.ort / tokenizer.json / build-info.json /
   libonnxruntime.so, from a `minimal-ort-builder` release) into the container and set
