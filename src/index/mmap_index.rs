@@ -454,9 +454,21 @@ fn validate_ext_blob(
     index: u64,
     blob_name: &'static str,
 ) -> Result<(), MmapIndexError> {
-    let start = offset as usize;
+    // Convert the on-disk `u64` offset to `usize` fallibly: on a 32-bit target a
+    // bare `as usize` would truncate, so a forged huge offset could wrap into
+    // bounds and pass the check below. `try_from` rejects any offset that does
+    // not fit the address space up front. `len` is `u32`, infallible into `usize`
+    // on every target we build for, but convert it via `try_from` too for symmetry.
+    let start = usize::try_from(offset).map_err(|_| MmapIndexError::MetaExtBlobOutOfBounds {
+        index,
+        blob: blob_name,
+    })?;
+    let len = usize::try_from(len).map_err(|_| MmapIndexError::MetaExtBlobOutOfBounds {
+        index,
+        blob: blob_name,
+    })?;
     let end = start
-        .checked_add(len as usize)
+        .checked_add(len)
         .filter(|end| *end <= blob_len)
         .ok_or(MmapIndexError::MetaExtBlobOutOfBounds {
             index,
@@ -566,5 +578,21 @@ mod tests {
         let second =
             MmapIndex::global_from_dir_for_tests(&dir, &TEST_INDEX).unwrap() as *const MmapIndex;
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn validate_ext_blob_rejects_huge_offset_without_wrapping() {
+        // A forged offset near `u64::MAX` must be rejected. On 64-bit targets the
+        // value fits `usize` so the `checked_add`/bounds path catches it; on 32-bit
+        // targets it would not fit `usize` and the new `usize::try_from` guard
+        // catches it before any truncating cast could wrap it into bounds. Either
+        // way the result must be the out-of-bounds error, never a false pass.
+        let blob = [0u8; 8];
+        let err = super::validate_ext_blob(&blob, blob.len(), u64::MAX - 3, 4, 0, "docid")
+            .expect_err("huge offset must be rejected as out of bounds");
+        assert!(matches!(
+            err,
+            super::MmapIndexError::MetaExtBlobOutOfBounds { blob: "docid", .. }
+        ));
     }
 }
