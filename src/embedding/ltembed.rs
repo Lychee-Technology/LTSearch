@@ -139,12 +139,19 @@ mod tests {
             bundle_dir: "/tmp/ltembed-nonexistent-test".to_string(),
             model_path: "/tmp/ltembed-nonexistent-test/model.ort".to_string(),
         };
-        let error = LTEmbedEmbeddingGenerator::from_config(&config, EmbeddingInputKind::Query)
-            .err()
-            .expect("missing bundle dir must fail");
+        let Err(error) = LTEmbedEmbeddingGenerator::from_config(&config, EmbeddingInputKind::Query)
+        else {
+            panic!("missing bundle dir must fail");
+        };
         let message = error.to_string();
-        assert!(message.contains("/tmp/ltembed-nonexistent-test"), "{message}");
-        assert!(message.contains("model assets not provisioned"), "{message}");
+        assert!(
+            message.contains("/tmp/ltembed-nonexistent-test"),
+            "{message}"
+        );
+        assert!(
+            message.contains("model assets not provisioned"),
+            "{message}"
+        );
         assert!(message.contains("LTEMBED_S3_BUCKET"), "{message}");
     }
 }

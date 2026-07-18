@@ -107,8 +107,13 @@ impl AssetFetcher for S3Fetcher<'_> {
     }
 
     async fn fetch_bytes(&self, name: &str) -> Result<Vec<u8>, String> {
-        let output = send_get(self.client, &self.source.bucket, &self.key(name), &self.uri(name))
-            .await?;
+        let output = send_get(
+            self.client,
+            &self.source.bucket,
+            &self.key(name),
+            &self.uri(name),
+        )
+        .await?;
         let data = output.body.collect().await.map_err(|error| {
             format!(
                 "model assets not provisioned: reading {} body failed: {error:?}",
@@ -122,8 +127,13 @@ impl AssetFetcher for S3Fetcher<'_> {
     async fn fetch_to_file(&self, name: &str, dest: &Path) -> Result<(u64, String), String> {
         use std::io::Write;
 
-        let output = send_get(self.client, &self.source.bucket, &self.key(name), &self.uri(name))
-            .await?;
+        let output = send_get(
+            self.client,
+            &self.source.bucket,
+            &self.key(name),
+            &self.uri(name),
+        )
+        .await?;
         let mut body = output.body;
         let mut hasher = Sha256::new();
         let mut file = std::fs::File::create(dest).map_err(|error| {
@@ -284,7 +294,10 @@ mod tests {
         env::set_var("LTSEARCH_MA_PART_LTEMBED_S3_BUCKET", "bucket");
         env::remove_var("LTSEARCH_MA_PART_LTEMBED_S3_PREFIX");
         let error = model_asset_source_from_env("MA_PART").unwrap_err();
-        assert!(error.contains("LTSEARCH_MA_PART_LTEMBED_S3_PREFIX"), "{error}");
+        assert!(
+            error.contains("LTSEARCH_MA_PART_LTEMBED_S3_PREFIX"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -387,7 +400,10 @@ mod tests {
         }
     }
 
-    fn fake_bundle(model: &'static [u8], tokenizer: &'static [u8]) -> Vec<(&'static str, &'static [u8])> {
+    fn fake_bundle(
+        model: &'static [u8],
+        tokenizer: &'static [u8],
+    ) -> Vec<(&'static str, &'static [u8])> {
         vec![("model.ort", model), ("tokenizer.json", tokenizer)]
     }
 
@@ -401,9 +417,14 @@ mod tests {
             .files
             .insert(MANIFEST_FILE, FakeFetcher::manifest_json(&entries));
 
-        provision_with(&fetcher, bundle_dir).await.expect("provision");
+        provision_with(&fetcher, bundle_dir)
+            .await
+            .expect("provision");
         assert!(assets_ready(dir.path()));
-        assert_eq!(fs::read(dir.path().join("model.ort")).unwrap(), b"weights-v1");
+        assert_eq!(
+            fs::read(dir.path().join("model.ort")).unwrap(),
+            b"weights-v1"
+        );
     }
 
     /// P1 回归（PR #137 review）：refresh 中途失败不得残留旧 manifest——
@@ -449,9 +470,17 @@ mod tests {
         fetcher_v2
             .files
             .insert(MANIFEST_FILE, FakeFetcher::manifest_json(&v2));
-        provision_with(&fetcher_v2, bundle_dir).await.expect("retry");
+        provision_with(&fetcher_v2, bundle_dir)
+            .await
+            .expect("retry");
         assert!(assets_ready(dir.path()));
-        assert_eq!(fs::read(dir.path().join("model.ort")).unwrap(), b"weights-v2");
-        assert_eq!(fs::read(dir.path().join("tokenizer.json")).unwrap(), b"tok-v2");
+        assert_eq!(
+            fs::read(dir.path().join("model.ort")).unwrap(),
+            b"weights-v2"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("tokenizer.json")).unwrap(),
+            b"tok-v2"
+        );
     }
 }

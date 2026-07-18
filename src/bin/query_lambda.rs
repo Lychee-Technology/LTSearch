@@ -61,8 +61,7 @@ fn main() -> Result<(), Error> {
         // client 在 composition root（bootstrap）构造后注入。
         #[cfg(feature = "ltembed")]
         {
-            let sdk_config =
-                aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+            let sdk_config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
             let client = ltsearch::bootstrap::model_assets_s3_client_from_env(&sdk_config);
             ltsearch::embedding::model_assets::provision_from_env("QUERY", &client)
                 .await
