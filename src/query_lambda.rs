@@ -18,7 +18,8 @@ use crate::query::{
     VectorSearcher,
 };
 use crate::storage::{
-    ActiveManifest, LocalManifestStore, ManifestHead, ManifestStore, ManifestStoreError,
+    ActiveManifest, LocalManifestStore, LocalStaticReleaseStore, ManifestHead, ManifestStore,
+    ManifestStoreError, StaticReleaseStore,
 };
 
 pub type QueryRequestHandler =
@@ -88,6 +89,33 @@ fn manifest_store_for(artifact_root: &Path) -> Result<Box<dyn ManifestStore>, Qu
         }
     }
     Ok(Box::new(LocalManifestStore::new(artifact_root)))
+}
+
+/// 按制品根选择静态发布指针（`static/_head`）的真源，严格镜像 [`manifest_store_for`]：
+/// 本地 profile 下若 `<root>/ltsearch.db` 存在，指针活在 SQLite 的 `static_release_head`
+/// 行，用 [`crate::local::SqliteStaticReleaseStore`]；否则（AWS 把指针从 S3 同步成文件、
+/// 或纯文件部署）回落到文件版 [`LocalStaticReleaseStore`]。按库文件是否存在做运行时分发，
+/// AWS 行为逐字不变。
+///
+/// 读侧脚手架：由后续任务（T9/T11）的静态检索 bootstrap 消费。
+#[allow(dead_code)]
+fn static_release_store_for(
+    artifact_root: &Path,
+) -> Result<Box<dyn StaticReleaseStore>, QueryLambdaError> {
+    #[cfg(feature = "local")]
+    {
+        let db_path = artifact_root.join("ltsearch.db");
+        if db_path.exists() {
+            let db = crate::local::SqliteDb::open(&db_path).map_err(|error| {
+                bootstrap_error(format!(
+                    "failed to open local control-plane db {}: {error}",
+                    db_path.display()
+                ))
+            })?;
+            return Ok(Box::new(crate::local::SqliteStaticReleaseStore::new(db)));
+        }
+    }
+    Ok(Box::new(LocalStaticReleaseStore::new(artifact_root)))
 }
 
 pub fn load_active_query_version_from_env() -> Result<u64, QueryLambdaError> {
@@ -289,5 +317,56 @@ impl ManifestStore for FixedManifestStore {
 
     fn load_active_manifest(&self) -> Result<ActiveManifest, ManifestStoreError> {
         Ok(self.active_manifest.clone())
+    }
+}
+
+#[cfg(all(test, feature = "local"))]
+mod static_release_store_for_tests {
+    use super::*;
+    use crate::indexing::PublishStorage;
+    use crate::storage::{StaticReleaseHead, STATIC_HEAD_KEY};
+
+    fn write_head_file(root: &Path, head: &StaticReleaseHead) {
+        let path = root.join(STATIC_HEAD_KEY);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, head.to_json_pretty()).unwrap();
+    }
+
+    /// 无 `ltsearch.db` → 文件版：读盘上的 `static/_head`。
+    #[test]
+    fn dispatches_to_file_store_without_db() {
+        let root = tempfile::tempdir().unwrap();
+        let head = StaticReleaseHead::new("a".repeat(64), 1_700_000_000_000);
+        write_head_file(root.path(), &head);
+
+        let store = static_release_store_for(root.path()).unwrap();
+        assert_eq!(store.load_active_release().unwrap(), Some(head));
+    }
+
+    /// 有 `ltsearch.db` → SQLite 版：真源是 `static_release_head` 行，盘上同名
+    /// 文件被忽略。这里刻意在盘上也写了 `static/_head` 文件却断言 `None`，坐实
+    /// 分发确实切到了 SQLite（否则文件版会读出 `Some`）。
+    #[tokio::test]
+    async fn dispatches_to_sqlite_store_with_db_ignoring_head_file() {
+        let root = tempfile::tempdir().unwrap();
+        // 建库（使 <root>/ltsearch.db 存在），但不种任何 static_release_head 行。
+        let db = crate::local::SqliteDb::open(root.path().join("ltsearch.db")).unwrap();
+        // 盘上写一个会误导文件版的 static/_head 文件。
+        let file_head = StaticReleaseHead::new("b".repeat(64), 1_700_000_000_000);
+        write_head_file(root.path(), &file_head);
+
+        // SQLite 行为空 → None（证明没走文件版）。
+        let store = static_release_store_for(root.path()).unwrap();
+        assert_eq!(store.load_active_release().unwrap(), None);
+
+        // 经写侧 CAS 种入 SQLite 行后，分发器读出的是该行的值，而非盘上文件。
+        let publish = crate::local::LocalPublishStorage::new(db, root.path());
+        let row_head = StaticReleaseHead::new("c".repeat(64), 1_700_000_000_001);
+        assert!(publish
+            .compare_and_swap(STATIC_HEAD_KEY, None, row_head.to_json_pretty().as_bytes())
+            .await
+            .unwrap());
+        let store = static_release_store_for(root.path()).unwrap();
+        assert_eq!(store.load_active_release().unwrap(), Some(row_head));
     }
 }
