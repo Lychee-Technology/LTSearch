@@ -9,6 +9,3 @@ target/
 
 # Lambda packaging artifacts
 dist/
-
-# TurboQuant binary index files (generated artifacts)
-static/*.bin

@@ -86,7 +86,8 @@ cargo build --features lambda --bin query_lambda
 | `LTSEARCH_QUERY_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
 | `LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR` | Dir with `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
 | `LTSEARCH_QUERY_LTEMBED_MODEL_PATH` | Path to `model.ort` |
-| `LTSEARCH_QUERY_STATIC_DIR` | Optional: parent dir for static TurboQuant index (`static/` subdir). Default: `LTSEARCH_QUERY_ARTIFACT_ROOT`. Set to `/app` when using Docker image. |
+
+Static TurboQuant retrieval uses no implicit `static/` directory or `LTSEARCH_QUERY_STATIC_DIR` override: it resolves through the activation pointer `static/_head` → `static/releases/<id>/` under `LTSEARCH_QUERY_ARTIFACT_ROOT` (see the static-activate flow).
 
 ### write_lambda
 

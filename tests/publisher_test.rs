@@ -135,8 +135,13 @@ async fn publisher_uploads_artifacts_and_manifest_before_updating_head() {
 }
 
 #[tokio::test]
-async fn publisher_uploads_static_artifacts_before_updating_head() {
-    let build_root = temp_fixture_dir("publisher-static-upload-order");
+async fn dynamic_publish_produces_no_static_keys() {
+    // Dynamic publish is pointer-only: even when the build root still carries a
+    // `static/` directory (the legacy implicit convention), publish must never
+    // emit any `static`-prefixed key. Static retrieval is served exclusively
+    // through the activation pointer (`static/_head` → `static/releases/<id>/`),
+    // which the static-activate flow owns — not the dynamic publisher.
+    let build_root = temp_fixture_dir("publisher-no-static-keys");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
     create_static_source_build(&build_root);
@@ -155,21 +160,17 @@ async fn publisher_uploads_static_artifacts_before_updating_head() {
         .unwrap();
 
     let calls = storage.calls();
-    assert!(calls.iter().any(|call| call == "upload_directory:static"));
-    assert!(calls
+    let static_calls: Vec<&String> = calls
         .iter()
-        .any(|call| call == "upload_file:static/turbo_static.bin"));
-    assert!(calls
-        .iter()
-        .any(|call| call == "upload_file:static/centroids.bin"));
-    assert_eq!(
-        storage.file_bytes("static/turbo_static.bin").unwrap(),
-        b"turbo"
+        .filter(|call| {
+            call.starts_with("upload_directory:static") || call.starts_with("upload_file:static")
+        })
+        .collect();
+    assert!(
+        static_calls.is_empty(),
+        "dynamic publish must not emit any static-prefixed key, found: {static_calls:?}"
     );
-    assert_eq!(
-        storage.file_bytes("static/centroids.bin").unwrap(),
-        b"centroids"
-    );
+    assert!(storage.file_bytes("static/turbo_static.bin").is_none());
 }
 
 #[tokio::test]
