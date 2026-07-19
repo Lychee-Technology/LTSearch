@@ -15,15 +15,21 @@ use async_trait::async_trait;
 
 use crate::error::PublishError;
 use crate::indexing::{PublishStorage, UploadMode, VersionedObject};
-use crate::storage::INDEX_HEAD_KEY;
+use crate::storage::{INDEX_HEAD_KEY, STATIC_HEAD_KEY};
 
-/// `index/_head` 的文件系统路径已退役：任何触达都是接线错误，报错而非静默服务。
-fn reject_retired_head(key: &str, operation: &str) -> Result<(), PublishError> {
-    if key == INDEX_HEAD_KEY {
+/// 指针 key 的文件系统路径已退役：活跃版本指针 `index/_head`（#123）与静态发布
+/// 指针 `static/_head`（#112）唯一活在 SQLite，只经 `sqlite::LocalPublishStorage`
+/// 的 CAS 变更。任何经文件适配器触达这些 key（upload/read/CAS）都是接线错误，报错
+/// 而非静默落盘或服务——否则指针可能绕过 CAS 被 upload 直接写盘。
+///
+/// 精确相等匹配：只拦这两个指针 key 本身，不误伤 `static/releases/<id>/…` 这类
+/// 以 `static/` 起头的不可变制品字节。
+fn reject_head_key(key: &str, operation: &str) -> Result<(), PublishError> {
+    if key == INDEX_HEAD_KEY || key == STATIC_HEAD_KEY {
         return Err(PublishError::Operation {
             message: format!(
-                "filesystem {operation} of {INDEX_HEAD_KEY} is retired (#123): the active \
-                 head lives in SQLite; route through sqlite::LocalPublishStorage"
+                "filesystem {operation} of {key} is retired: the pointer lives in SQLite; \
+                 route through sqlite::LocalPublishStorage"
             ),
         });
     }
@@ -84,6 +90,7 @@ impl PublishStorage for LocalFsPublishStorage {
         source: &Path,
         mode: UploadMode,
     ) -> Result<(), PublishError> {
+        reject_head_key(key, "upload_directory")?;
         let dest = self.path_for(key);
         if mode == UploadMode::CreateOnly && dest.exists() {
             return Err(PublishError::Operation {
@@ -101,6 +108,7 @@ impl PublishStorage for LocalFsPublishStorage {
         source: &Path,
         mode: UploadMode,
     ) -> Result<(), PublishError> {
+        reject_head_key(key, "upload_file")?;
         let dest = self.path_for(key);
         if mode == UploadMode::CreateOnly && dest.exists() {
             return Err(PublishError::Operation {
@@ -113,7 +121,7 @@ impl PublishStorage for LocalFsPublishStorage {
     }
 
     async fn read(&self, key: &str) -> Result<Option<VersionedObject>, PublishError> {
-        reject_retired_head(key, "read")?;
+        reject_head_key(key, "read")?;
         match std::fs::read(self.path_for(key)) {
             Ok(bytes) => {
                 let etag = etag_of(&bytes);
@@ -132,7 +140,7 @@ impl PublishStorage for LocalFsPublishStorage {
         expected_etag: Option<&str>,
         new_value: &[u8],
     ) -> Result<bool, PublishError> {
-        reject_retired_head(key, "compare_and_swap")?;
+        reject_head_key(key, "compare_and_swap")?;
         // 持锁跨整个读-比较-写；临界区内无 `.await`，future 仍是 Send。
         let _guard = self
             .cas_lock
@@ -166,6 +174,7 @@ impl PublishStorage for LocalFsPublishStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{static_release_dir_key, STATIC_HEAD_KEY};
 
     // 非 head 键的通用 CAS 语义（head 已退役到 SQLite，此处用制品类键验证）。
     const CAS_KEY: &str = "index/versions/1/manifest.json";
@@ -247,5 +256,62 @@ mod tests {
         assert!(cas_err.contains("retired"), "got: {cas_err}");
         // 拒绝必须发生在写盘之前：不得留下 _head 文件。
         assert!(!dir.path().join(INDEX_HEAD_KEY).exists());
+    }
+
+    // #112 携带项①：static/_head 指针同样唯一活在 SQLite。文件适配器对该 key 的
+    // upload_file / upload_directory / read / compare_and_swap 一律报错拒绝，堵住
+    // 「指针经目录/文件上传绕过 CAS 落盘」的口子。
+    #[tokio::test]
+    async fn static_head_key_upload_file_is_rejected_before_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsPublishStorage::new(dir.path());
+
+        let source = dir.path().join("payload");
+        std::fs::write(&source, b"pointer bytes").unwrap();
+
+        let err = store
+            .upload_file(STATIC_HEAD_KEY, &source, UploadMode::Overwrite)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("retired"), "got: {err}");
+        // 拒绝必须发生在写盘之前：不得留下 static/_head 文件。
+        assert!(!dir.path().join(STATIC_HEAD_KEY).exists());
+    }
+
+    #[tokio::test]
+    async fn static_head_key_read_and_cas_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsPublishStorage::new(dir.path());
+
+        let read_err = store.read(STATIC_HEAD_KEY).await.unwrap_err().to_string();
+        assert!(read_err.contains("retired"), "got: {read_err}");
+
+        let cas_err = store
+            .compare_and_swap(STATIC_HEAD_KEY, None, b"ptr")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(cas_err.contains("retired"), "got: {cas_err}");
+        assert!(!dir.path().join(STATIC_HEAD_KEY).exists());
+    }
+
+    // 精确相等匹配不得误伤 release 制品目录（static/releases/<id>）：这些是不可变
+    // 制品字节，照常走文件系统。
+    #[tokio::test]
+    async fn static_release_dir_upload_is_not_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsPublishStorage::new(dir.path());
+
+        let source = dir.path().join("release-src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("release_manifest.json"), b"{}").unwrap();
+
+        let key = static_release_dir_key(&"a".repeat(64));
+        store
+            .upload_directory(&key, &source, UploadMode::CreateOnly)
+            .await
+            .expect("release artifact directory must upload normally");
+        assert!(dir.path().join(&key).join("release_manifest.json").exists());
     }
 }
