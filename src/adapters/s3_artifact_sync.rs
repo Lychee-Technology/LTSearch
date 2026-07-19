@@ -255,6 +255,37 @@ async fn sync_prefix(
     sync_prefix_to(client, bucket, prefix, &|key| Ok(artifact_root.join(key))).await
 }
 
+/// Rejects any S3 object key that would not resolve to a plain relative path
+/// under the mapper's base directory. Every component must be a normal path
+/// segment — no `..` (parent escape), no `.`, no absolute root / drive prefix —
+/// and the key must be non-empty. Kept a pure function so both the mapper-based
+/// pulls and the unit tests can exercise it without S3.
+fn validate_object_key(key: &str) -> Result<(), String> {
+    use std::path::Component;
+
+    if key.is_empty() {
+        return Err("refusing empty S3 key".to_string());
+    }
+    // `..` (ParentDir), a leading `/` (RootDir) and a Windows drive (Prefix) all
+    // surface here as non-`Normal` components.
+    for component in Path::new(key).components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(format!(
+                "refusing S3 key with non-normal path component: {key}"
+            ));
+        }
+    }
+    // `Path::components()` silently normalizes away `.` segments, so scan the raw
+    // segments to reject them too — the layout mappers must only ever see plain
+    // forward-relative keys.
+    if key.split('/').any(|segment| segment == ".") {
+        return Err(format!(
+            "refusing S3 key with non-normal path component: {key}"
+        ));
+    }
+    Ok(())
+}
+
 /// Downloads every object under `prefix`, writing each to the path returned by
 /// `destination_for(key)`. The mirrored-layout batch pull (`sync_prefix`) and
 /// the staged release pull (which redirects keys into a staging dir) share this
@@ -286,6 +317,13 @@ async fn sync_prefix_to(
             if key.ends_with('/') {
                 continue;
             }
+            // Central path-escape defense for *both* mappers (mirrored batch pull
+            // via `artifact_root.join(key)` and the staged release pull via
+            // `staging.join(relative)`): an S3 key may legally contain `..`, so a
+            // key like `static/releases/<id>/../../../ltsearch.db` would escape the
+            // target dir and clobber the artifact root (SQLite control plane
+            // included). Reject any non-normal component before the mapper runs.
+            validate_object_key(key)?;
 
             let body = client
                 .get_object()
@@ -333,5 +371,40 @@ mod tests {
             !prefixes.contains(&"static/"),
             "static/ is pulled lazily by release_id, never as a batch prefix"
         );
+    }
+
+    #[test]
+    fn validate_object_key_rejects_non_normal_and_empty_keys() {
+        // Any non-`Normal` path component (`..`, `.`, absolute root) or an empty
+        // key must be refused before it reaches a path-join mapper — an S3 key
+        // may legally contain `..`, which would otherwise escape the target dir.
+        for bad in [
+            "a/../b",
+            "../x",
+            "/abs",
+            "a/./b",
+            "",
+            "static/releases/../../x",
+        ] {
+            let error = validate_object_key(bad).expect_err(&format!(
+                "expected {bad:?} to be rejected as a path-escape key"
+            ));
+            assert!(
+                error.contains(bad) || bad.is_empty(),
+                "error message should quote the offending key: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_object_key_accepts_normal_keys() {
+        for good in [
+            "static/releases/abc/file.bin",
+            "index/_head",
+            "lance/v7/shard_0/data.lance",
+        ] {
+            validate_object_key(good)
+                .unwrap_or_else(|error| panic!("expected {good:?} to be accepted: {error}"));
+        }
     }
 }

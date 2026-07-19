@@ -478,6 +478,89 @@ async fn s3_sync_stages_release_pull_and_recovers_from_dirty_staging() {
     );
 }
 
+/// Path-escape defense: an S3 key may legally contain `..`, so a listed key like
+/// `index/../../../ltsearch.db` would, via `artifact_root.join(key)`, escape the
+/// artifact root and clobber files outside it (the SQLite control plane included).
+/// The shared download engine must refuse any key with a non-normal path
+/// component *before* the layout mapper runs, and write nothing. This seeds such a
+/// key under the batch-pulled `index/` prefix and asserts the sync errors out with
+/// no escaped file on disk.
+#[tokio::test]
+async fn s3_sync_refuses_path_traversal_key_and_writes_nothing() {
+    use ltsearch::adapters::s3_artifact_sync::S3ArtifactSync;
+    use ltsearch::contracts::ArtifactSync;
+
+    let harness = MotoHarness::new("s3-sync-traversal").await;
+
+    // A malicious/buggy key that escapes the artifact root by three levels.
+    // It still lexically starts with `index/`, so it is returned by the
+    // prefix-filtered ListObjectsV2 the batch pull issues.
+    let evil_key = "index/../../../ltsearch.db";
+    let put = harness
+        .s3
+        .put_object()
+        .bucket(&harness.bucket)
+        .key(evil_key)
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"pwned"))
+        .send()
+        .await;
+
+    // Record whatever key Moto/the SDK actually stored — some stacks normalize
+    // `..` client- or server-side. If it did not survive verbatim, the escape
+    // vector never materializes and the pure-function unit tests are the
+    // authoritative guard; skip the on-disk assertion in that case.
+    let stored_key = harness
+        .s3
+        .list_objects_v2()
+        .bucket(&harness.bucket)
+        .prefix("index/")
+        .send()
+        .await
+        .unwrap()
+        .contents()
+        .iter()
+        .filter_map(|o| o.key())
+        .find(|k| k.contains(".."))
+        .map(|k| k.to_string());
+
+    let artifact_root = harness.new_artifact_root();
+    // The escape target: `<root>/../../../ltsearch.db`, i.e. three levels above.
+    let escape_target = artifact_root
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(|p| p.join("ltsearch.db"));
+
+    let result = S3ArtifactSync::with_client(harness.bucket.clone(), harness.s3.clone())
+        .sync(&artifact_root)
+        .await;
+
+    if put.is_ok() && stored_key.as_deref() == Some(evil_key) {
+        // The escape key survived into S3 verbatim — the defense must trip.
+        let error = result.expect_err("sync must reject a key with a non-normal path component");
+        assert!(
+            error.contains("non-normal path component"),
+            "unexpected error: {error}"
+        );
+        if let Some(target) = &escape_target {
+            assert!(
+                !target.exists(),
+                "path-traversal key must not write outside the artifact root: {}",
+                target.display()
+            );
+        }
+        assert!(
+            !artifact_root.join("ltsearch.db").exists(),
+            "no escaped artifact may be written under the root either"
+        );
+    } else {
+        eprintln!(
+            "note: Moto/SDK did not store `{evil_key}` verbatim (stored: {stored_key:?}); \
+             on-disk escape assertion skipped — pure-function unit tests remain authoritative"
+        );
+    }
+}
+
 /// Runs the real `static_activate` bin as a subprocess pointed at Moto, so the
 /// tests exercise the bin's actual install orchestration end-to-end (not a
 /// reproduction of it). Credentials + endpoint are injected via env to match the
