@@ -15,19 +15,19 @@ use ltsearch::adapters::s3_publish::AwsPublishStorage;
 use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::adapters::sqs_build_queue::AwsSqsBuildQueue;
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
-use ltsearch::index::{
-    EmbeddingProfile, ReleaseSource, StaticChunk, StaticReleaseBuilder, V3_RELEASE_OUTPUT_FILES,
-};
+use ltsearch::index::V3_RELEASE_OUTPUT_FILES;
 use ltsearch::indexing::PublishStorage;
 use ltsearch::indexing::{
     activate_static_pointer, verify_release_dir, BuildIndexRequest, BuildIndexResult,
     IndexPublisher, LocalIndexBuilder, PublishRequest, UploadMode,
 };
-use ltsearch::models::CorpusType;
 use ltsearch::storage::{
     static_release_dir_key, static_release_manifest_key, StaticReleaseHead, STATIC_HEAD_KEY,
 };
 use ltsearch::write::{BuildQueue, WalStorage};
+
+mod support;
+use support::build_v3_release_fixture;
 
 struct MotoHarness {
     artifact_root: std::path::PathBuf,
@@ -505,74 +505,6 @@ async fn aws_static_activate_bin_rejects_preexisting_corrupt_object() {
             .is_none(),
         "manifest completeness marker must not be uploaded when activation aborts"
     );
-}
-
-/// Builds a real, self-consistent v3 static release directory via
-/// `StaticReleaseBuilder` (same pattern as `tests/static_activation_test.rs`),
-/// returning the release dir. Each call gets a uniquely-named directory.
-fn build_v3_release_fixture() -> std::path::PathBuf {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir()
-        .join(format!(
-            "ltsearch-aws-static-activate-{}-{suffix}",
-            std::process::id()
-        ))
-        .join("release");
-    std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
-
-    let finite_embedding = |seed: f32| -> Vec<f32> {
-        (0..512)
-            .map(|i| ((i as f32) * 0.001 + seed).sin())
-            .collect()
-    };
-    let citation_metadata = |title: &str, resource_id: &str| {
-        let mut metadata = std::collections::HashMap::new();
-        metadata.insert("title".to_string(), serde_json::json!(title));
-        metadata.insert("resource_id".to_string(), serde_json::json!(resource_id));
-        metadata.insert("source_type".to_string(), serde_json::json!("statute"));
-        metadata.insert("source_ref".to_string(), serde_json::json!("第一条"));
-        metadata.insert(
-            "url".to_string(),
-            serde_json::json!("https://example.com/law"),
-        );
-        metadata.insert("section".to_string(), serde_json::json!("总则"));
-        metadata
-    };
-
-    let chunks = vec![
-        StaticChunk {
-            doc_id: "文档-1".to_string(),
-            text: "第一条文本".to_string(),
-            metadata: citation_metadata("宪法总纲", "res-1"),
-            corpus_type: CorpusType::Legal,
-        },
-        StaticChunk {
-            doc_id: "文档-2".to_string(),
-            text: "第二条文本".to_string(),
-            metadata: citation_metadata("合同法则", "res-2"),
-            corpus_type: CorpusType::Contract,
-        },
-    ];
-    let embeddings = vec![finite_embedding(0.1), finite_embedding(0.2)];
-    let profile = EmbeddingProfile {
-        model_id: "jina-embeddings-v2".to_string(),
-        dim: 512,
-    };
-    let source = ReleaseSource {
-        kind: "lance".to_string(),
-        dataset_path: "/data/corpus.lance".to_string(),
-        table_version: 9,
-        table_row_count: 2,
-        corpus_type: CorpusType::Legal,
-    };
-
-    StaticReleaseBuilder
-        .build_release(&dir, &chunks, &embeddings, &profile, &source)
-        .expect("build_release should succeed");
-    dir
 }
 
 #[tokio::test]
