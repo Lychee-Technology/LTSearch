@@ -307,6 +307,177 @@ async fn aws_static_activate_uploads_release_and_flips_pointer() {
     assert_eq!(manifest_object.bytes, on_disk);
 }
 
+/// Query-side cold start (Task 12): once a static release is activated remotely,
+/// the first `S3ArtifactSync::sync` must land both the `static/_head` pointer and
+/// the pointed-at release directory under `<root>/static/releases/<id>/` on local
+/// disk. To make cache-hit vs erroneous-re-pull *observably distinct* (a deleted
+/// remote would let a list-based re-pull silently succeed on an empty set), the
+/// remote manifest is then overwritten with sentinel bytes: a second sync must
+/// still be `Ok(())` and the local manifest must NOT contain the sentinel —
+/// proving the release pull is gated on the local cache. Finally, deleting the
+/// local release directory and syncing a third time must re-pull (the local
+/// manifest now IS the sentinel), pinning the other half of the lazy predicate:
+/// absent locally ⇒ pull.
+#[tokio::test]
+async fn s3_sync_pulls_pointer_and_active_release_once() {
+    use ltsearch::adapters::s3_artifact_sync::S3ArtifactSync;
+    use ltsearch::contracts::ArtifactSync;
+
+    let harness = MotoHarness::new("s3-sync-pointer").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+
+    // Seed the remote: immutable release upload + pointer activation.
+    let dir = build_v3_release_fixture();
+    let manifest = verify_release_dir(&dir, None, None).unwrap();
+    storage
+        .upload_directory(
+            &static_release_dir_key(&manifest.release_id),
+            &dir,
+            UploadMode::CreateOnly,
+        )
+        .await
+        .unwrap();
+    activate_static_pointer(&storage, &manifest.release_id, 1_700_000_000_000)
+        .await
+        .unwrap();
+
+    let artifact_root = harness.new_artifact_root();
+
+    // First sync: pointer + release land on local disk.
+    S3ArtifactSync::with_client(harness.bucket.clone(), harness.s3.clone())
+        .sync(&artifact_root)
+        .await
+        .unwrap();
+
+    let local_head = artifact_root.join(STATIC_HEAD_KEY);
+    let local_manifest = artifact_root.join(static_release_manifest_key(&manifest.release_id));
+    assert!(
+        local_head.exists(),
+        "static/_head pointer must land locally after first sync"
+    );
+    assert!(
+        local_manifest.exists(),
+        "active release manifest must land locally after first sync"
+    );
+
+    // Overwrite the remote manifest with sentinel bytes (raw put_object —
+    // CreateOnly immutability is an AwsPublishStorage upload-layer semantic,
+    // not an S3-enforced one). A correct implementation never reads it back; a
+    // buggy always-re-pull implementation would copy the sentinel to local disk.
+    const SENTINEL: &[u8] = b"TAMPERED";
+    harness
+        .s3
+        .put_object()
+        .bucket(&harness.bucket)
+        .key(static_release_manifest_key(&manifest.release_id))
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(SENTINEL))
+        .send()
+        .await
+        .unwrap();
+
+    // Second sync: cache hit on the already-present release_id ⇒ no re-pull.
+    S3ArtifactSync::with_client(harness.bucket.clone(), harness.s3.clone())
+        .sync(&artifact_root)
+        .await
+        .unwrap();
+    let after_second = std::fs::read(&local_manifest).unwrap();
+    assert_ne!(
+        after_second, SENTINEL,
+        "second sync must hit the local cache and never re-pull the (tampered) remote manifest"
+    );
+
+    // Third sync after wiping the local release dir: the lazy predicate's other
+    // half — absent locally ⇒ pull. The sentinel landing on disk proves the
+    // re-pull actually happened.
+    std::fs::remove_dir_all(artifact_root.join(static_release_dir_key(&manifest.release_id)))
+        .unwrap();
+    S3ArtifactSync::with_client(harness.bucket.clone(), harness.s3.clone())
+        .sync(&artifact_root)
+        .await
+        .unwrap();
+    let after_third = std::fs::read(&local_manifest).unwrap();
+    assert_eq!(
+        after_third, SENTINEL,
+        "third sync must re-pull the release once it is absent locally"
+    );
+}
+
+/// Crash-safety guard for the query-side release pull: the download must go
+/// through a per-attempt-unique `.<id>-staging-*` directory that is atomically
+/// renamed into the final `static/releases/<id>/` location (mirroring
+/// `install_into_managed_store`). A staging dir left by a *different* attempt
+/// (crashed process or concurrent pull) is foreign territory: the pull must
+/// never wipe or reuse it — a shared deterministic staging path with an entry
+/// wipe would let two concurrent pulls delete each other's half-downloaded
+/// files and promote an incomplete final dir. This test seeds a foreign
+/// staging dir and asserts three things after a sync: the final dir is
+/// complete (manifest AND every `.bin`), the foreign staging dir survives
+/// byte-for-byte untouched, and the pull leaked no staging dir of its own.
+#[tokio::test]
+async fn s3_sync_stages_release_pull_and_recovers_from_dirty_staging() {
+    use ltsearch::adapters::s3_artifact_sync::S3ArtifactSync;
+    use ltsearch::contracts::ArtifactSync;
+
+    let harness = MotoHarness::new("s3-sync-staging").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+
+    let dir = build_v3_release_fixture();
+    let manifest = verify_release_dir(&dir, None, None).unwrap();
+    storage
+        .upload_directory(
+            &static_release_dir_key(&manifest.release_id),
+            &dir,
+            UploadMode::CreateOnly,
+        )
+        .await
+        .unwrap();
+    activate_static_pointer(&storage, &manifest.release_id, 1_700_000_000_000)
+        .await
+        .unwrap();
+
+    // Simulate residue from a crashed (or concurrent) foreign pull attempt:
+    // a dirty staging dir the sync must treat as untouchable. No final dir.
+    let artifact_root = harness.new_artifact_root();
+    let releases_parent = artifact_root.join("static/releases");
+    let foreign_staging = releases_parent.join(format!(".{}-staging-junk", manifest.release_id));
+    std::fs::create_dir_all(&foreign_staging).unwrap();
+    std::fs::write(foreign_staging.join("junk-from-crashed-pull"), b"partial").unwrap();
+
+    S3ArtifactSync::with_client(harness.bucket.clone(), harness.s3.clone())
+        .sync(&artifact_root)
+        .await
+        .unwrap();
+
+    // The final dir is complete: manifest plus every v3 artifact file.
+    let final_dir = artifact_root.join(static_release_dir_key(&manifest.release_id));
+    for name in V3_RELEASE_OUTPUT_FILES {
+        assert!(
+            final_dir.join(name).exists(),
+            "final release dir must contain {name} after a staged pull"
+        );
+    }
+    // The foreign staging dir survives untouched: no pull may wipe another
+    // attempt's staging territory.
+    assert_eq!(
+        std::fs::read(foreign_staging.join("junk-from-crashed-pull")).unwrap(),
+        b"partial",
+        "foreign staging residue must be left exactly as found"
+    );
+    // And this pull converged: besides the foreign dir, no `.<id>-staging-*`
+    // residue of its own was leaked.
+    let staging_prefix = format!(".{}-staging", manifest.release_id);
+    let leftover_stagings: Vec<String> = std::fs::read_dir(&releases_parent)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(&staging_prefix))
+        .collect();
+    assert_eq!(
+        leftover_stagings,
+        vec![format!("{staging_prefix}-junk")],
+        "the pull must leave exactly the foreign staging dir behind, none of its own"
+    );
+}
+
 /// Runs the real `static_activate` bin as a subprocess pointed at Moto, so the
 /// tests exercise the bin's actual install orchestration end-to-end (not a
 /// reproduction of it). Credentials + endpoint are injected via env to match the
