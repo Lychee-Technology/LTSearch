@@ -492,7 +492,8 @@ async fn s3_sync_refuses_path_traversal_key_and_writes_nothing() {
 
     let harness = MotoHarness::new("s3-sync-traversal").await;
 
-    // A malicious/buggy key that escapes the artifact root by three levels.
+    // A malicious/buggy key that escapes above the artifact root (`index/..`
+    // cancels first, the remaining `../..` climb two levels past the root).
     // It still lexically starts with `index/`, so it is returned by the
     // prefix-filtered ListObjectsV2 the batch pull issues.
     let evil_key = "index/../../../ltsearch.db";
@@ -524,10 +525,10 @@ async fn s3_sync_refuses_path_traversal_key_and_writes_nothing() {
         .map(|k| k.to_string());
 
     let artifact_root = harness.new_artifact_root();
-    // The escape target: `<root>/../../../ltsearch.db`, i.e. three levels above.
+    // The escape target: `<root>/index/../../../ltsearch.db` resolves to two
+    // levels above the artifact root (`index/..` cancels in place first).
     let escape_target = artifact_root
         .parent()
-        .and_then(|p| p.parent())
         .and_then(|p| p.parent())
         .map(|p| p.join("ltsearch.db"));
 

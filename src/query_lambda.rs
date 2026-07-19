@@ -121,8 +121,8 @@ fn manifest_store_for(artifact_root: &Path) -> Result<Box<dyn ManifestStore>, Qu
 /// AWS 行为逐字不变。
 ///
 /// 读侧脚手架：由 [`resolve_active_static_release_id`] 消费——既组合进缓存键
-/// [`load_active_query_key_from_env`]（`/health` 经 `cached_static_release_id()`
-/// 上报），也供非缓存的 [`bootstrap_query_handler_from_env`] 就地解析 release。
+/// [`load_active_query_key_from_env`]（`/health` 经 `cached_pair()` 原子上报），
+/// 也供非缓存的 [`bootstrap_query_handler_from_env`] 就地解析 release。
 fn static_release_store_for(
     artifact_root: &Path,
 ) -> Result<Box<dyn StaticReleaseStore>, QueryLambdaError> {
