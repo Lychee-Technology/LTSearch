@@ -130,3 +130,11 @@ required-features = ["aws"]
 name = "static_activate"
 path = "src/bin/static_activate.rs"
 required-features = ["aws"]
+
+# 静态 release v3 端到端流（#112 PR-2 Task 14）的 Lance fixture 生成器：
+# arrow+lancedb 造 512 维 documents 表，供 scripts/e2e/run-static-release-flow.sh
+# 驱动 static-build→activate→query。仅 local profile 需要（与 ltsearch bin 同 gated）。
+[[example]]
+name = "emit_static_lance_fixture"
+path = "examples/emit_static_lance_fixture.rs"
+required-features = ["local"]
