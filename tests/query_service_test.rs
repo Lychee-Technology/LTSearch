@@ -1,3 +1,5 @@
+mod common;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -6,11 +8,79 @@ use ltsearch::query_lambda::{QueryLambdaError, QueryRequestHandler};
 use ltsearch::query_service::{
     resolve_versioned_handler, resolve_versioned_handler_with_retry, QueryService,
 };
+use ltsearch::storage::{version_manifest_key, StaticReleaseHead, INDEX_HEAD_KEY, STATIC_HEAD_KEY};
 
 #[test]
 fn fresh_service_reports_no_cached_version() {
     let service = QueryService::new();
     assert_eq!(service.cached_version(), None);
+}
+
+// `cached_pair` reads both halves of the cache key under a *single* mutex lock,
+// so `/health` can report `(index_version, static_release_id)` from one atomic
+// read of the same cache generation — never a cross-generation mix (issue #112
+// AC4). A fresh service holds no pair; after a successful resolve the pair
+// equals the `(version, release_id)` the handler was bootstrapped for.
+#[allow(clippy::await_holding_lock)]
+#[test]
+fn cached_pair_returns_both_components_from_single_key() {
+    let _guard = common::ENV_LOCK.lock().unwrap();
+
+    let service = QueryService::new();
+    assert_eq!(service.cached_pair(), None, "fresh service holds no pair");
+
+    let root = common::temp_fixture_dir("query-service-cached-pair");
+    common::write_fixture(&root, INDEX_HEAD_KEY, &common::sample_head_json(7));
+    common::write_fixture(
+        &root,
+        &version_manifest_key(7),
+        &common::sample_manifest_json(7),
+    );
+    common::write_index(
+        &root,
+        "index/v7/shard_0",
+        &[("doc-1", "rust hybrid search"), ("doc-2", "rust keyword")],
+    );
+    common::write_lance_fixture(
+        &root,
+        "lance/v7/shard_0",
+        &[
+            serde_json::json!({"doc_id":"doc-1","text":"rust hybrid search","embedding":[0.9,0.0,0.0]}),
+            serde_json::json!({"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0]}),
+        ],
+    );
+    let release_id = "c".repeat(64);
+    common::write_static_release_fixture(
+        &root,
+        &release_id,
+        &[common::StaticFixtureDoc {
+            doc_id: 10,
+            corpus_type: 0,
+            text: "static legal ten",
+            embedding: common::padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+        }],
+    );
+    let head = StaticReleaseHead::new(release_id.clone(), 1_700_000_000_000);
+    common::write_fixture(&root, STATIC_HEAD_KEY, &head.to_json_pretty());
+
+    std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "fixed");
+    std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
+    std::env::set_var("LTSEARCH_QUERY_FIXED_EMBEDDING", "0.1,0.2,0.3");
+    std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
+
+    service
+        .resolve_handler()
+        .expect("expected a successful resolve against the disk fixture");
+
+    assert_eq!(
+        service.cached_pair(),
+        Some((7, Some(release_id))),
+        "cached_pair must return both halves of the resolved cache key"
+    );
+
+    std::env::remove_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER");
+    std::env::remove_var("LTSEARCH_QUERY_ARTIFACT_ROOT");
+    std::env::remove_var("LTSEARCH_QUERY_FIXED_EMBEDDING");
 }
 
 #[test]

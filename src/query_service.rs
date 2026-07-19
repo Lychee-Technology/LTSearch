@@ -60,22 +60,26 @@ impl QueryService {
         })
     }
 
-    pub fn cached_version(&self) -> Option<u64> {
+    /// 当前缓存条目的完整键 `(dynamic_version, static_release_id)`，在**单次**
+    /// mutex 持锁内整对克隆。`/health` 成功分支据此一次读出两个字段，二者必来自
+    /// 同一缓存代次——并发重建只会让整对一起翻新，绝不会跨代混合上报（issue
+    /// #112 AC4）。`cached_version` / `cached_static_release_id` 均委托本方法。
+    pub fn cached_pair(&self) -> Option<(u64, Option<String>)> {
         self.cache
             .lock()
             .expect("query handler cache lock poisoned")
             .as_ref()
-            .map(|cached| cached.key.0)
+            .map(|cached| cached.key.clone())
+    }
+
+    pub fn cached_version(&self) -> Option<u64> {
+        self.cached_pair().map(|(version, _)| version)
     }
 
     /// 当前缓存条目所固定的静态 release id（键的第二半）。`/health` 在 handler
     /// 解析成功后读取本值上报，与刚写入缓存的 pair 一致——无 TOCTOU 窗口。
     pub fn cached_static_release_id(&self) -> Option<String> {
-        self.cache
-            .lock()
-            .expect("query handler cache lock poisoned")
-            .as_ref()
-            .and_then(|cached| cached.key.1.clone())
+        self.cached_pair().and_then(|(_, release_id)| release_id)
     }
 }
 
