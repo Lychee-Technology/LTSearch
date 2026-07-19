@@ -1,7 +1,8 @@
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
 use rayon::prelude::*;
+use serde_json::Value;
 
 use crate::error::SearchError;
 use crate::index::{encode_vector, score_query_against_record_512, MmapIndex, TurboRecordSlice};
@@ -82,31 +83,60 @@ impl StaticRetriever for TurboQuantSearcher {
 
         // Materialize text/title only for the selected top-K, keeping the
         // parallel scan above zero-copy over the mmap.
+        let is_v3 = self.index.version() == 3;
         Ok(ranked
             .into_iter()
             .map(|candidate| {
-                let doc_id = candidate.doc_id.to_string();
                 let corpus_type =
                     CorpusType::from_id(self.index.meta(candidate.record_index).corpus_type);
                 let text = self.index.text(candidate.record_index).to_string();
-                // A title makes the chunk citable: ContextBuilder reads
-                // `citation.title` to render `[法规 #1] <title>`. Without one,
-                // `citation` stays None and the bare label is rendered.
-                let citation = self
-                    .index
-                    .title(candidate.record_index)
-                    .map(|title| Citation {
-                        resource_id: doc_id.clone(),
-                        source_type: corpus_type_label(Some(&corpus_type)).to_string(),
-                        source_ref: doc_id.clone(),
-                        title: Some(title.to_string()),
-                        url: None,
+
+                // v3 images carry a doc_id/metadata sidecar; v2 images do not,
+                // so v2 keeps its legacy behavior verbatim (hashed u64 doc_id,
+                // `metadata: None`, title-only citation). Only the top-K
+                // materialization differs — the scan/scoring path is shared.
+                let (doc_id, metadata) = if is_v3 {
+                    // Prefer the original string doc_id; fall back to the hashed
+                    // u64 only if the sidecar is missing for this record.
+                    let doc_id = self
+                        .index
+                        .original_doc_id(candidate.record_index as usize)
+                        .map(|id| id.to_string())
+                        .unwrap_or_else(|| candidate.doc_id.to_string());
+                    let metadata = self
+                        .index
+                        .metadata_json(candidate.record_index as usize)
+                        .and_then(|json| parse_metadata(json, &doc_id));
+                    (doc_id, metadata)
+                } else {
+                    (candidate.doc_id.to_string(), None)
+                };
+
+                // A metadata-derived citation wins for v3 records; otherwise fall
+                // back to the title-only citation shared with v2. A title makes
+                // the chunk citable: ContextBuilder reads `citation.title` to
+                // render `[法规 #1] <title>`. Without either, `citation` stays
+                // None and the bare label is rendered.
+                let citation = metadata
+                    .as_ref()
+                    .and_then(Citation::from_metadata)
+                    .or_else(|| {
+                        self.index
+                            .title(candidate.record_index)
+                            .map(|title| Citation {
+                                resource_id: doc_id.clone(),
+                                source_type: corpus_type_label(Some(&corpus_type)).to_string(),
+                                source_ref: doc_id.clone(),
+                                title: Some(title.to_string()),
+                                url: None,
+                            })
                     });
+
                 SearchResult {
                     doc_id,
                     score: candidate.score,
                     text,
-                    metadata: None,
+                    metadata,
                     source: SearchSource::Static,
                     chunk_source: ChunkSource::Static,
                     corpus_type: Some(corpus_type),
@@ -114,6 +144,22 @@ impl StaticRetriever for TurboQuantSearcher {
                 }
             })
             .collect())
+    }
+}
+
+/// Parses a v3 metadata JSON blob into a map. On failure (malformed JSON or a
+/// non-object top level) the record's metadata is conservatively dropped to
+/// `None` with a warning — a single bad record must not fail the whole request.
+fn parse_metadata(json: &str, doc_id: &str) -> Option<HashMap<String, Value>> {
+    match serde_json::from_str::<HashMap<String, Value>>(json) {
+        Ok(metadata) => Some(metadata),
+        Err(error) => {
+            eprintln!(
+                "warning: turbo static doc {doc_id} has unparseable metadata json, \
+                 falling back to metadata: None ({error})"
+            );
+            None
+        }
     }
 }
 
