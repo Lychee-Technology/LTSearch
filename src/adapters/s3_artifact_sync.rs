@@ -169,7 +169,7 @@ async fn pull_release_via_staging(
         .map_err(|error| format!("failed to create staging {}: {error}", staging.display()))?;
 
     let release_prefix = format!("{}/", static_release_dir_key(release_id));
-    sync_prefix_to(client, bucket, &release_prefix, &|key| {
+    if let Err(error) = sync_prefix_to(client, bucket, &release_prefix, &|key| {
         // Map `static/releases/<id>/<file...>` under the staging dir. The list
         // is prefix-filtered, so a key outside the prefix is an S3/SDK bug —
         // fail loudly instead of silently writing somewhere unexpected.
@@ -178,7 +178,13 @@ async fn pull_release_via_staging(
         })?;
         Ok(staging.join(relative))
     })
-    .await?;
+    .await
+    {
+        // Self-clean the partial staging dir before surfacing the download
+        // error, mirroring the manifest-check and rename-race branches below.
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
 
     if !staging.join(crate::index::RELEASE_MANIFEST_FILE).exists() {
         let _ = fs::remove_dir_all(&staging);

@@ -104,7 +104,9 @@ async fn handle_health(State(state): State<QueryServerState>) -> Response {
                     component: COMPONENT.into(),
                     index_version: Some(version),
                     // handler 已解析成功：直接读缓存键固定的 release id 上报，与本
-                    // 请求装载的静态 release 一致（无 TOCTOU）。指针不可读时上面的
+                    // 请求装载的静态 release 一致（single-resolve consistent）。并发
+                    // 重建间隙里 index_version 与 static_release_id 可能瞬时跨代，健康
+                    // 端点仅作信息上报，不据此保证二者同代。指针不可读时上面的
                     // resolve_handler 已按硬错误走 503，不会到这里。
                     static_release_id: state.service.cached_static_release_id(),
                     detail: None,

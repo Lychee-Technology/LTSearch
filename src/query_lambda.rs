@@ -63,6 +63,9 @@ pub fn bootstrap_query_handler_from_env() -> Result<QueryRequestHandler, QueryLa
     }
 }
 
+/// Test-only：静态检索侧硬编码 `None`，故生产接线绝不能走此入口，否则会静默丢弃
+/// 静态检索结果。生产热路径请用 [`bootstrap_query_handler_for_key_from_env`] 变体，
+/// 由缓存键携带 `(dynamic_version, static_release_id)`。
 pub fn bootstrap_query_handler_for_version_from_env(
     expected_version: u64,
 ) -> Result<QueryRequestHandler, QueryLambdaError> {

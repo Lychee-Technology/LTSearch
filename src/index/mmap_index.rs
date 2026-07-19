@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_image_dir_returns_index() {
+    fn load_from_dir_returns_index() {
         let dir = temp_dir("load-from-dir");
         write_test_index(&dir);
 
