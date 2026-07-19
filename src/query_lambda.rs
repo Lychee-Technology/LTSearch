@@ -97,8 +97,8 @@ fn manifest_store_for(artifact_root: &Path) -> Result<Box<dyn ManifestStore>, Qu
 /// 或纯文件部署）回落到文件版 [`LocalStaticReleaseStore`]。按库文件是否存在做运行时分发，
 /// AWS 行为逐字不变。
 ///
-/// 读侧脚手架：由后续任务（T9/T11）的静态检索 bootstrap 消费。
-#[allow(dead_code)]
+/// 读侧脚手架：由后续任务（T9/T11）的静态检索 bootstrap 消费；T10 起亦由
+/// [`load_active_static_release_id_from_env_opt`] 消费以供 `/health` 上报。
 fn static_release_store_for(
     artifact_root: &Path,
 ) -> Result<Box<dyn StaticReleaseStore>, QueryLambdaError> {
@@ -145,6 +145,22 @@ pub fn load_active_query_version_from_env_opt() -> Result<Option<u64>, QueryLamb
             "failed to load active version: {source}"
         ))),
     }
+}
+
+/// 读取当前活跃静态 release 指针的 `release_id`，供 HTTP `/health` 上报。
+///
+/// 过渡实现（T10）：直接经 [`static_release_store_for`] 读 `static/_head` 指针。
+/// 任何失败（env 缺失、库/文件打开或读取错误、指针损坏、指针未设）一律降级为
+/// `None`，绝不影响健康判定——指针不可读时 `/health` 仍按索引/模型状态如常报告。
+/// T11 缓存落地后由 `QueryService::cached_static_release_id()` 取代本读路径。
+pub fn load_active_static_release_id_from_env_opt() -> Option<String> {
+    let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT").ok()?;
+    let store = static_release_store_for(Path::new(&artifact_root)).ok()?;
+    store
+        .load_active_release()
+        .ok()
+        .flatten()
+        .map(|head| head.release_id)
 }
 
 /// 模型完整性探针：按 `LTSEARCH_QUERY_EMBEDDING_PROVIDER` 构建 embedding

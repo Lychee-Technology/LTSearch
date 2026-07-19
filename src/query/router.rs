@@ -93,6 +93,7 @@ pub struct QueryRouter<M, E, K, V, S = NoopStaticRetriever, W = NoopWarningSink>
     static_retriever: S,
     warning_sink: W,
     ranker: HybridRanker,
+    static_release_id: Option<String>,
 }
 
 impl<M, E, K, V> QueryRouter<M, E, K, V, NoopStaticRetriever, NoopWarningSink>
@@ -116,6 +117,7 @@ where
             static_retriever: NoopStaticRetriever,
             warning_sink: NoopWarningSink,
             ranker: HybridRanker::new(60.0),
+            static_release_id: None,
         }
     }
 }
@@ -141,6 +143,7 @@ where
             static_retriever,
             warning_sink: self.warning_sink,
             ranker: self.ranker,
+            static_release_id: self.static_release_id,
         }
     }
 
@@ -156,7 +159,16 @@ where
             static_retriever: self.static_retriever,
             warning_sink,
             ranker: self.ranker,
+            static_release_id: self.static_release_id,
         }
+    }
+
+    /// 设置本路由上报的活跃静态 release id：写入每个 [`SearchResponse`] 的
+    /// `static_release_id` 字段。数据字段 builder（`mut self` 改字段返回 `Self`），
+    /// 不改变类型参数——与 `with_static_retriever`/`with_warning_sink` 的泛型换型不同。
+    pub fn with_static_release_id(mut self, static_release_id: Option<String>) -> Self {
+        self.static_release_id = static_release_id;
+        self
     }
 
     pub fn search(&self, request: &SearchRequest) -> Result<SearchResponse, SearchError> {
@@ -200,6 +212,7 @@ where
             dynamic_count,
             latency_ms: started_at.elapsed().as_millis() as u64,
             index_version,
+            static_release_id: self.static_release_id.clone(),
         };
         response.validate(max_chunks_per_path)?;
 

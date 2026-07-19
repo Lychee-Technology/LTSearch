@@ -726,6 +726,38 @@ fn router_runs_static_keyword_vector_in_three_way_parallel() {
 }
 
 #[test]
+fn router_reports_no_static_release_id_by_default() {
+    let start = Arc::new(Instant::now());
+    let router = QueryRouter::new(
+        StubManifestStore::new(42),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        StubKeywordRetriever::new(vec![], Duration::from_millis(0), start.clone(), 42, 9),
+        StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 42, 9),
+    );
+
+    let response = router.search(&sample_request()).unwrap();
+
+    assert_eq!(response.static_release_id, None);
+}
+
+#[test]
+fn router_reports_configured_static_release_id() {
+    let start = Arc::new(Instant::now());
+    let release_id = "a".repeat(64);
+    let router = QueryRouter::new(
+        StubManifestStore::new(42),
+        StubEmbeddingGenerator::success(vec![0.1, 0.2, 0.3]),
+        StubKeywordRetriever::new(vec![], Duration::from_millis(0), start.clone(), 42, 9),
+        StubVectorRetriever::new(vec![], Duration::from_millis(0), start, 42, 9),
+    )
+    .with_static_release_id(Some(release_id.clone()));
+
+    let response = router.search(&sample_request()).unwrap();
+
+    assert_eq!(response.static_release_id, Some(release_id));
+}
+
+#[test]
 fn router_returns_grouped_static_and_dynamic_results() {
     let start = Arc::new(Instant::now());
     let static_retriever = StubStaticRetriever::new(

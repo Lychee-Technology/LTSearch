@@ -20,6 +20,7 @@ fn health_response_uses_503_when_not_ok() {
         status: "ok".into(),
         component: "query".into(),
         index_version: Some(3),
+        static_release_id: None,
         detail: None,
     });
     assert_eq!(ok.status(), StatusCode::OK);
@@ -28,6 +29,7 @@ fn health_response_uses_503_when_not_ok() {
         status: "unavailable".into(),
         component: "query".into(),
         index_version: None,
+        static_release_id: None,
         detail: Some("LTEmbed bundle missing".into()),
     });
     assert_eq!(bad.status(), StatusCode::SERVICE_UNAVAILABLE);

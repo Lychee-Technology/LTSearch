@@ -151,6 +151,7 @@ fn success_handler(_request: SearchRequest) -> Result<SearchResponse, SearchErro
         dynamic_count: 0,
         latency_ms: 12,
         index_version: 7,
+        static_release_id: None,
     })
 }
 

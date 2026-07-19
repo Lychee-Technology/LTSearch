@@ -14,7 +14,7 @@ use tower::ServiceExt;
 
 use ltsearch::http::query::{query_router, QueryServerState};
 use ltsearch::query_service::QueryService;
-use ltsearch::storage::{version_manifest_key, INDEX_HEAD_KEY};
+use ltsearch::storage::{version_manifest_key, StaticReleaseHead, INDEX_HEAD_KEY, STATIC_HEAD_KEY};
 
 fn state_with_probe(
     probe: impl Fn() -> Result<usize, String> + Send + Sync + 'static,
@@ -200,6 +200,63 @@ async fn query_and_health_serve_index_version_from_disk_fixture() {
     let health_json = body_json(health_response).await;
     assert_eq!(health_json["status"], "ok");
     assert_eq!(health_json["index_version"], 7);
+    // No static release pointer seeded → static_release_id omitted (serde skip → null).
+    assert!(health_json["static_release_id"].is_null());
+}
+
+// probe 通过、`_head` 指向某版本、handler bootstrap 成功，且 `<root>/static/_head`
+// 静态 release 指针已就位 → /health 200 且上报该指针的 release_id。STATIC_DIR 改指
+// 一个空目录，避免指针文件创建的 `<root>/static/` 目录被 TurboQuant 静态索引加载器
+// 误当作索引；指针读取仍经 ARTIFACT_ROOT 解析。
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn health_reports_static_release_id_when_pointer_seeded() {
+    let _guard = common::ENV_LOCK.lock().unwrap();
+    let root = common::temp_fixture_dir("http-query-router-static-release");
+    common::write_fixture(&root, INDEX_HEAD_KEY, &common::sample_head_json(7));
+    common::write_fixture(
+        &root,
+        &version_manifest_key(7),
+        &common::sample_manifest_json(7),
+    );
+    common::write_index(
+        &root,
+        "index/v7/shard_0",
+        &[("doc-1", "rust hybrid search"), ("doc-2", "rust keyword")],
+    );
+    common::write_lance_fixture(
+        &root,
+        "lance/v7/shard_0",
+        &[
+            json!({"doc_id":"doc-1","text":"rust hybrid search","embedding":[0.9,0.0,0.0]}),
+            json!({"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0]}),
+        ],
+    );
+    // Seed the static release pointer at <root>/static/_head (file store path).
+    let release_id = "a".repeat(64);
+    let head = StaticReleaseHead::new(release_id.clone(), 1_700_000_000_000);
+    common::write_fixture(&root, STATIC_HEAD_KEY, &head.to_json_pretty());
+
+    let static_probe = common::temp_fixture_dir("http-query-router-static-release-probe");
+
+    std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "fixed");
+    std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
+    std::env::set_var("LTSEARCH_QUERY_FIXED_EMBEDDING", "0.1,0.2,0.3");
+    std::env::set_var("LTSEARCH_QUERY_STATIC_DIR", &static_probe);
+    std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
+
+    let app = query_router(state_with_probe(|| Ok(3)));
+    let response = app
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["index_version"], 7);
+    assert_eq!(json["static_release_id"], release_id);
+
+    std::env::remove_var("LTSEARCH_QUERY_STATIC_DIR");
 }
 
 #[allow(clippy::await_holding_lock)]

@@ -104,6 +104,7 @@ fn search_models_round_trip_through_serde() {
         dynamic_count: 1,
         latency_ms: 12,
         index_version: 7,
+        static_release_id: None,
     };
     assert!(response.validate(10).is_ok());
 
@@ -129,6 +130,7 @@ fn search_models_round_trip_through_serde() {
         dynamic_count: 1,
         latency_ms: 1,
         index_version: 7,
+        static_release_id: None,
     };
     assert!(too_many_results.validate(10).is_err());
 
@@ -142,6 +144,7 @@ fn search_models_round_trip_through_serde() {
         dynamic_count: 2,
         latency_ms: 1,
         index_version: 7,
+        static_release_id: None,
     };
     assert!(exceeds_requested_top_k.validate(1).is_err());
 }

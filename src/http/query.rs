@@ -92,6 +92,7 @@ async fn handle_health(State(state): State<QueryServerState>) -> Response {
             status: "ok".into(),
             component: COMPONENT.into(),
             index_version: None,
+            static_release_id: None,
             detail: Some("索引尚未发布（无 _head），等待首次导入".into()),
         }),
         Ok(Some(version)) => {
@@ -102,6 +103,10 @@ async fn handle_health(State(state): State<QueryServerState>) -> Response {
                     status: "ok".into(),
                     component: COMPONENT.into(),
                     index_version: Some(version),
+                    // 过渡实现（T10）：直接读 `static/_head` 指针上报；读取失败降级为
+                    // None，绝不影响已判定的健康态。T11 缓存落地后改走缓存 pair。
+                    static_release_id:
+                        crate::query_lambda::load_active_static_release_id_from_env_opt(),
                     detail: None,
                 }),
                 Ok(Err(error)) => unavailable(Some(version), error.message),
@@ -121,6 +126,7 @@ fn unavailable(index_version: Option<u64>, detail: impl Into<String>) -> Respons
         status: "unavailable".into(),
         component: COMPONENT.into(),
         index_version,
+        static_release_id: None,
         detail: Some(detail.into()),
     })
 }

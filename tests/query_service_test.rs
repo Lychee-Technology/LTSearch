@@ -33,6 +33,7 @@ fn versioned_cache_reuses_current_version_and_rebootstraps_after_version_change(
                     dynamic_count: 0,
                     latency_ms: 1,
                     index_version: version,
+                    static_release_id: None,
                 })
             }) as QueryRequestHandler))
         },
@@ -62,6 +63,7 @@ fn versioned_cache_reuses_current_version_and_rebootstraps_after_version_change(
                     dynamic_count: 0,
                     latency_ms: 1,
                     index_version: version,
+                    static_release_id: None,
                 })
             }) as QueryRequestHandler))
         },
@@ -118,6 +120,7 @@ fn versioned_cache_retries_once_when_bootstrap_loses_version_race() {
                     dynamic_count: 0,
                     latency_ms: 1,
                     index_version: version,
+                    static_release_id: None,
                 })
             }) as QueryRequestHandler))
         },
