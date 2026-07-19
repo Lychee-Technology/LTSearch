@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ltsearch::error::{SearchError, ValidationError};
 use ltsearch::index::{
@@ -144,8 +145,7 @@ fn write_test_index(dir: &Path, dim: u32, docs: &[FixtureDoc<'_>]) {
 }
 
 fn load_searcher(dir: &Path) -> TurboQuantSearcher {
-    let index = Box::new(MmapIndex::load(dir).unwrap());
-    TurboQuantSearcher::new(Box::leak(index))
+    TurboQuantSearcher::new(Arc::new(MmapIndex::load(dir).unwrap()))
 }
 
 #[test]

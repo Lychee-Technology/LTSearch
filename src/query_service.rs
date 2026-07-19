@@ -1,20 +1,26 @@
 use std::sync::Mutex;
 
 use crate::query_lambda::{
-    bootstrap_query_handler_for_version_from_env, is_retriable_bootstrap_version_change,
-    load_active_query_version_from_env, QueryLambdaError, SharedQueryRequestHandler,
+    bootstrap_query_handler_for_key_from_env, is_retriable_bootstrap_version_change,
+    load_active_query_key_from_env, QueryLambdaError, SharedQueryRequestHandler,
 };
 
+/// 缓存键类型：`(dynamic_version, static_release_id)`。查询按这一对解析与复用
+/// handler，任一半变化都触发重建，单个请求绝不混用两个不同的静态 release。
+type QueryCacheKey = (u64, Option<String>);
+
+/// 版本化 handler 缓存条目，泛型于键 `K`（`QueryService` 固化为
+/// [`QueryCacheKey`]；`tests/query_service_test.rs` 的护栏用例以 `K = u64` 复用）。
 #[derive(Clone)]
-pub struct CachedQueryHandler {
-    version_id: u64,
+pub struct CachedQueryHandler<K> {
+    key: K,
     handler: SharedQueryRequestHandler,
 }
 
-/// 版本化 handler 缓存服务：封装 S3 制品同步与按索引版本复用 handler 的逻辑，
-/// 供 Lambda bin 与后续 HTTP 查询服务共用。
+/// 版本化 handler 缓存服务：封装 S3 制品同步与按 `(version, release_id)` 对复用
+/// handler 的逻辑，供 Lambda bin 与 HTTP 查询服务共用。
 pub struct QueryService {
-    cache: Mutex<Option<CachedQueryHandler>>,
+    cache: Mutex<Option<CachedQueryHandler<QueryCacheKey>>>,
 }
 
 impl QueryService {
@@ -49,22 +55,31 @@ impl QueryService {
     }
 
     pub fn resolve_handler(&self) -> Result<SharedQueryRequestHandler, QueryLambdaError> {
-        resolve_versioned_handler_with_retry(
-            &self.cache,
-            load_active_query_version_from_env,
-            |expected_version| {
-                bootstrap_query_handler_for_version_from_env(expected_version)
-                    .map(SharedQueryRequestHandler::new)
-            },
-        )
+        resolve_versioned_handler_with_retry(&self.cache, load_active_query_key_from_env, |key| {
+            bootstrap_query_handler_for_key_from_env(key).map(SharedQueryRequestHandler::new)
+        })
     }
 
-    pub fn cached_version(&self) -> Option<u64> {
+    /// 当前缓存条目的完整键 `(dynamic_version, static_release_id)`，在**单次**
+    /// mutex 持锁内整对克隆。`/health` 成功分支据此一次读出两个字段，二者必来自
+    /// 同一缓存代次——并发重建只会让整对一起翻新，绝不会跨代混合上报（issue
+    /// #112 AC4）。`cached_version` / `cached_static_release_id` 均委托本方法。
+    pub fn cached_pair(&self) -> Option<(u64, Option<String>)> {
         self.cache
             .lock()
             .expect("query handler cache lock poisoned")
             .as_ref()
-            .map(|cached| cached.version_id)
+            .map(|cached| cached.key.clone())
+    }
+
+    pub fn cached_version(&self) -> Option<u64> {
+        self.cached_pair().map(|(version, _)| version)
+    }
+
+    /// 当前缓存条目所固定的静态 release id（键的第二半）。`/health` 在 handler
+    /// 解析成功后读取本值上报，与刚写入缓存的 pair 一致——无 TOCTOU 窗口。
+    pub fn cached_static_release_id(&self) -> Option<String> {
+        self.cached_pair().and_then(|(_, release_id)| release_id)
     }
 }
 
@@ -75,46 +90,50 @@ impl Default for QueryService {
 }
 
 // `pub` 而非 `pub(crate)`：搬迁后的缓存行为集成测试位于 `tests/`，需从 crate 外直接驱动这两个泛型函数。
-pub fn resolve_versioned_handler<V, B>(
-    cache: &Mutex<Option<CachedQueryHandler>>,
-    load_active_version: V,
+// 泛型于键 `K`：`QueryService` 以 `K = (u64, Option<String>)` 调用；护栏测试以
+// `K = u64` 调用（不改仍绿）。键相等即命中缓存，任一半变化即重建。
+pub fn resolve_versioned_handler<K, V, B>(
+    cache: &Mutex<Option<CachedQueryHandler<K>>>,
+    load_key: V,
     bootstrap: B,
 ) -> Result<SharedQueryRequestHandler, QueryLambdaError>
 where
-    V: FnOnce() -> Result<u64, QueryLambdaError>,
-    B: FnOnce(u64) -> Result<SharedQueryRequestHandler, QueryLambdaError>,
+    K: PartialEq + Clone,
+    V: FnOnce() -> Result<K, QueryLambdaError>,
+    B: FnOnce(K) -> Result<SharedQueryRequestHandler, QueryLambdaError>,
 {
-    let version_id = load_active_version()?;
+    let key = load_key()?;
     let mut state = cache.lock().expect("query handler cache lock poisoned");
 
     if let Some(cached) = state.as_ref() {
-        if cached.version_id == version_id {
+        if cached.key == key {
             return Ok(cached.handler.clone());
         }
     }
 
-    let handler = bootstrap(version_id)?;
+    let handler = bootstrap(key.clone())?;
     *state = Some(CachedQueryHandler {
-        version_id,
+        key,
         handler: handler.clone(),
     });
     Ok(handler)
 }
 
 // `pub` 而非 `pub(crate)`：同上，供 `tests/query_service_test.rs` 中搬迁的集成测试直接调用。
-pub fn resolve_versioned_handler_with_retry<V, B>(
-    cache: &Mutex<Option<CachedQueryHandler>>,
-    mut load_active_version: V,
+pub fn resolve_versioned_handler_with_retry<K, V, B>(
+    cache: &Mutex<Option<CachedQueryHandler<K>>>,
+    mut load_key: V,
     bootstrap: B,
 ) -> Result<SharedQueryRequestHandler, QueryLambdaError>
 where
-    V: FnMut() -> Result<u64, QueryLambdaError>,
-    B: Fn(u64) -> Result<SharedQueryRequestHandler, QueryLambdaError>,
+    K: PartialEq + Clone,
+    V: FnMut() -> Result<K, QueryLambdaError>,
+    B: Fn(K) -> Result<SharedQueryRequestHandler, QueryLambdaError>,
 {
-    match resolve_versioned_handler(cache, &mut load_active_version, &bootstrap) {
+    match resolve_versioned_handler(cache, &mut load_key, &bootstrap) {
         Ok(handler) => Ok(handler),
         Err(error) if is_retriable_bootstrap_version_change(&error) => {
-            resolve_versioned_handler(cache, load_active_version, &bootstrap)
+            resolve_versioned_handler(cache, load_key, &bootstrap)
         }
         Err(error) => Err(error),
     }

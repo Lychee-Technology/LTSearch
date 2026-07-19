@@ -1,193 +1,14 @@
-use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
-use ltsearch::error::PublishError;
-use ltsearch::indexing::{
-    IndexPublisher, PublishRequest, PublishStorage, RollbackRequest, UploadMode, VersionedObject,
-};
+use ltsearch::indexing::{IndexPublisher, PublishRequest, RollbackRequest};
 use ltsearch::models::{IndexManifest, ShardManifest};
 use ltsearch::storage::{version_manifest_key, INDEX_HEAD_KEY};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum StoredObject {
-    File { bytes: Vec<u8>, etag: String },
-    Directory,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RecordingPublishStorage {
-    objects: Arc<Mutex<HashMap<String, StoredObject>>>,
-    calls: Arc<Mutex<Vec<String>>>,
-    etag_counter: Arc<Mutex<u64>>,
-    last_expected: Arc<Mutex<Option<Option<String>>>>,
-    compare_and_swap_conflict: Arc<Mutex<Option<Vec<u8>>>>,
-}
-
-impl RecordingPublishStorage {
-    fn seed_file(&self, key: &str, bytes: Vec<u8>) {
-        let mut counter = self.etag_counter.lock().unwrap();
-        *counter += 1;
-        let etag = format!("\"etag-{}\"", *counter);
-        drop(counter);
-        self.objects
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), StoredObject::File { bytes, etag });
-    }
-
-    fn etag_of(&self, key: &str) -> Option<String> {
-        self.objects.lock().unwrap().get(key).and_then(|object| {
-            if let StoredObject::File { etag, .. } = object {
-                Some(etag.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    fn seed_directory(&self, key: &str) {
-        self.objects
-            .lock()
-            .unwrap()
-            .insert(key.to_string(), StoredObject::Directory);
-    }
-
-    fn calls(&self) -> Vec<String> {
-        self.calls.lock().unwrap().clone()
-    }
-
-    fn file_bytes(&self, key: &str) -> Option<Vec<u8>> {
-        self.objects.lock().unwrap().get(key).and_then(|object| {
-            if let StoredObject::File { bytes, .. } = object {
-                Some(bytes.clone())
-            } else {
-                None
-            }
-        })
-    }
-
-    fn last_expected(&self) -> Option<Option<String>> {
-        self.last_expected.lock().unwrap().clone()
-    }
-
-    fn conflict_on_compare_and_swap(&self, bytes: Vec<u8>) {
-        *self.compare_and_swap_conflict.lock().unwrap() = Some(bytes);
-    }
-}
-
-#[async_trait]
-impl PublishStorage for RecordingPublishStorage {
-    async fn upload_directory(
-        &self,
-        key: &str,
-        source: &Path,
-        mode: UploadMode,
-    ) -> Result<(), PublishError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("upload_directory:{key}"));
-
-        if !source.is_dir() {
-            return Err(PublishError::Operation {
-                message: format!("missing source directory {}", source.display()),
-            });
-        }
-
-        self.seed_directory(key);
-        for entry in fs::read_dir(source).map_err(|source_error| PublishError::Operation {
-            message: format!("failed to read {}: {source_error}", source.display()),
-        })? {
-            let entry = entry.map_err(|source_error| PublishError::Operation {
-                message: format!("failed to iterate {}: {source_error}", source.display()),
-            })?;
-            let path = entry.path();
-            let child_key = format!("{key}/{}", entry.file_name().to_string_lossy());
-            let file_type = entry
-                .file_type()
-                .map_err(|source_error| PublishError::Operation {
-                    message: format!("failed to inspect {}: {source_error}", path.display()),
-                })?;
-            if file_type.is_dir() {
-                self.upload_directory(&child_key, &path, mode).await?;
-            } else if file_type.is_file() {
-                self.upload_file(&child_key, &path, mode).await?;
-            }
-        }
-        Ok(())
-    }
-
-    async fn upload_file(
-        &self,
-        key: &str,
-        source: &Path,
-        mode: UploadMode,
-    ) -> Result<(), PublishError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("upload_file:{key}"));
-
-        if mode == UploadMode::CreateOnly && self.file_bytes(key).is_some() {
-            return Err(PublishError::Operation {
-                message: format!(
-                    "refusing to overwrite existing version artifact {key}: version artifacts are immutable"
-                ),
-            });
-        }
-
-        let bytes = fs::read(source).map_err(|source_error| PublishError::Operation {
-            message: format!("failed to read {}: {source_error}", source.display()),
-        })?;
-        self.seed_file(key, bytes);
-        Ok(())
-    }
-
-    async fn read(&self, key: &str) -> Result<Option<VersionedObject>, PublishError> {
-        self.calls.lock().unwrap().push(format!("read:{key}"));
-        Ok(self.objects.lock().unwrap().get(key).and_then(|object| {
-            if let StoredObject::File { bytes, etag } = object {
-                Some(VersionedObject {
-                    bytes: bytes.clone(),
-                    etag: etag.clone(),
-                })
-            } else {
-                None
-            }
-        }))
-    }
-
-    async fn compare_and_swap(
-        &self,
-        key: &str,
-        expected_etag: Option<&str>,
-        new_value: &[u8],
-    ) -> Result<bool, PublishError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(format!("compare_and_swap:{key}"));
-        *self.last_expected.lock().unwrap() = Some(expected_etag.map(|etag| etag.to_string()));
-
-        if let Some(conflict_bytes) = self.compare_and_swap_conflict.lock().unwrap().take() {
-            self.seed_file(key, conflict_bytes);
-            return Ok(false);
-        }
-
-        let current_etag = self.etag_of(key);
-        if current_etag.as_deref() != expected_etag {
-            return Ok(false);
-        }
-
-        self.seed_file(key, new_value.to_vec());
-        Ok(true)
-    }
-}
+mod support;
+use support::{RecordingPublishStorage, StoredObject};
 
 fn temp_fixture_dir(test_name: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -314,8 +135,13 @@ async fn publisher_uploads_artifacts_and_manifest_before_updating_head() {
 }
 
 #[tokio::test]
-async fn publisher_uploads_static_artifacts_before_updating_head() {
-    let build_root = temp_fixture_dir("publisher-static-upload-order");
+async fn dynamic_publish_produces_no_static_keys() {
+    // Dynamic publish is pointer-only: even when the build root still carries a
+    // `static/` directory (the legacy implicit convention), publish must never
+    // emit any `static`-prefixed key. Static retrieval is served exclusively
+    // through the activation pointer (`static/_head` → `static/releases/<id>/`),
+    // which the static-activate flow owns — not the dynamic publisher.
+    let build_root = temp_fixture_dir("publisher-no-static-keys");
     let manifest = sample_manifest(9);
     create_source_build(&build_root, &manifest);
     create_static_source_build(&build_root);
@@ -334,21 +160,17 @@ async fn publisher_uploads_static_artifacts_before_updating_head() {
         .unwrap();
 
     let calls = storage.calls();
-    assert!(calls.iter().any(|call| call == "upload_directory:static"));
-    assert!(calls
+    let static_calls: Vec<&String> = calls
         .iter()
-        .any(|call| call == "upload_file:static/turbo_static.bin"));
-    assert!(calls
-        .iter()
-        .any(|call| call == "upload_file:static/centroids.bin"));
-    assert_eq!(
-        storage.file_bytes("static/turbo_static.bin").unwrap(),
-        b"turbo"
+        .filter(|call| {
+            call.starts_with("upload_directory:static") || call.starts_with("upload_file:static")
+        })
+        .collect();
+    assert!(
+        static_calls.is_empty(),
+        "dynamic publish must not emit any static-prefixed key, found: {static_calls:?}"
     );
-    assert_eq!(
-        storage.file_bytes("static/centroids.bin").unwrap(),
-        b"centroids"
-    );
+    assert!(storage.file_bytes("static/turbo_static.bin").is_none());
 }
 
 #[tokio::test]

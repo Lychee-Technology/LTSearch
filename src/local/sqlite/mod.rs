@@ -11,11 +11,13 @@ mod head;
 mod manifest;
 mod queue;
 mod schema;
+mod static_release;
 mod wal;
 
 pub use head::LocalPublishStorage;
 pub use manifest::SqliteManifestStore;
 pub use queue::{SqliteBuildJobSource, SqliteBuildQueue};
+pub use static_release::SqliteStaticReleaseStore;
 pub use wal::SqliteWalStorage;
 
 use std::path::Path;

@@ -193,3 +193,6 @@ jobs:
           cache: true
       - run: cargo build --no-default-features --features local --bin ltsearch
       - run: bash scripts/e2e/run-local-server-flow.sh
+      # #112 PR-2 Task 14：静态 release v3 端到端流（build→activate→query）并入本地链路。
+      - run: cargo build --locked --no-default-features --features local --example emit_static_lance_fixture
+      - run: bash scripts/e2e/run-static-release-flow.sh

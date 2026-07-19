@@ -18,7 +18,11 @@ use arrow_array::{
     StringArray,
 };
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-use ltsearch::storage::version_manifest_key;
+use ltsearch::index::{
+    encode_vector, CentroidTable, MetaRecord, ProjectionMatrix, TurboHeader, TurboRecord512,
+    META_RECORD_SIZE,
+};
+use ltsearch::storage::{static_release_dir_key, version_manifest_key};
 use serde_json::json;
 use tantivy::collector::TopDocs;
 use tantivy::doc;
@@ -165,6 +169,103 @@ pub fn write_lance_fixture_with_dim(
     })
     .join()
     .unwrap();
+}
+
+/// TurboQuant 静态 release fixture 的单文档描述。
+pub struct StaticFixtureDoc<'a> {
+    pub doc_id: u64,
+    pub corpus_type: u8,
+    pub text: &'a str,
+    pub embedding: Vec<f32>,
+}
+
+/// 把长度 ≤512 的前缀补零成 512 维向量：静态索引固定按 512 维编码。
+pub fn padded_embedding(prefix: &[f32]) -> Vec<f32> {
+    let mut embedding = vec![0.0; 512];
+    embedding[..prefix.len()].copy_from_slice(prefix);
+    embedding
+}
+
+fn centroid_table(dim: u32, centroids_per_dim: u32, values: &[f32]) -> CentroidTable {
+    let mut bytes = Vec::with_capacity(8 + values.len() * 4);
+    bytes.extend_from_slice(&dim.to_le_bytes());
+    bytes.extend_from_slice(&centroids_per_dim.to_le_bytes());
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    CentroidTable::from_bytes(&bytes).unwrap()
+}
+
+fn identity_projection(dim: usize) -> ProjectionMatrix {
+    let mut rows = Vec::with_capacity(dim);
+    for row_index in 0..dim {
+        let mut row = vec![0.0; dim];
+        row[row_index] = 1.0;
+        rows.push(row);
+    }
+    ProjectionMatrix::from_rows(rows)
+}
+
+/// 写出一个内容寻址的静态 release fixture 到 `<root>/static/releases/<release_id>/`
+/// （与 [`static_release_dir_key`] 布局一致），供查询侧按指针装载 TurboQuant 静态
+/// 索引。调用方另需种 `static/_head` 指针指向同一 `release_id`。
+pub fn write_static_release_fixture(root: &Path, release_id: &str, docs: &[StaticFixtureDoc<'_>]) {
+    let static_dir = root.join(static_release_dir_key(release_id));
+    fs::create_dir_all(&static_dir).unwrap();
+
+    let dim = 512;
+    let mut centroid_values = Vec::with_capacity(dim as usize * 4);
+    for _ in 0..dim {
+        centroid_values.extend_from_slice(&[-1.0, 0.0, 1.0, 2.0]);
+    }
+    let centroids = centroid_table(dim, 4, &centroid_values);
+    let projection = identity_projection(dim as usize);
+    let header = TurboHeader::new(dim, docs.len() as u64);
+
+    let mut bin_data = header.to_bytes();
+    let mut meta_data = Vec::new();
+    let mut text_blob = Vec::new();
+
+    for doc in docs {
+        let encoded = encode_vector(&doc.embedding, &centroids, &projection).unwrap();
+        let record = TurboRecord512 {
+            doc_id: doc.doc_id,
+            idx: encoded.idx.clone().try_into().unwrap(),
+            qjl: encoded.qjl.clone().try_into().unwrap(),
+            gamma: encoded.gamma,
+            _reserved: [0; 4],
+        };
+        let record_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                &record as *const TurboRecord512 as *const u8,
+                std::mem::size_of::<TurboRecord512>(),
+            )
+        };
+        bin_data.extend_from_slice(record_bytes);
+
+        let text_offset = text_blob.len() as u64;
+        text_blob.extend_from_slice(doc.text.as_bytes());
+        let meta = MetaRecord {
+            doc_id: doc.doc_id,
+            corpus_type: doc.corpus_type,
+            _pad: [0; 7],
+            title_offset: 0,
+            title_len: 0,
+            text_offset,
+            text_len: doc.text.len() as u32,
+        };
+        let meta_bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(&meta as *const MetaRecord as *const u8, META_RECORD_SIZE)
+        };
+        meta_data.extend_from_slice(meta_bytes);
+    }
+
+    fs::write(static_dir.join("turbo_static.bin"), &bin_data).unwrap();
+    fs::write(static_dir.join("turbo_static_meta.bin"), &meta_data).unwrap();
+    fs::write(static_dir.join("turbo_static_text.bin"), &text_blob).unwrap();
+    fs::write(static_dir.join("turbo_static_title.bin"), []).unwrap();
+    fs::write(static_dir.join("centroids.bin"), centroids.to_bytes()).unwrap();
+    fs::write(static_dir.join("projection.bin"), projection.to_bytes()).unwrap();
 }
 
 pub fn sample_head_json(version_id: u64) -> String {

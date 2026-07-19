@@ -35,6 +35,8 @@ pub struct HealthBody {
     pub status: String,
     pub component: String,
     pub index_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_release_id: Option<String>,
     pub detail: Option<String>,
 }
 

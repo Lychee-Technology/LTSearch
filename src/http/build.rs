@@ -119,6 +119,7 @@ async fn handle_health(State(state): State<BuildServerState>) -> Response {
             status: "unavailable".into(),
             component: COMPONENT.into(),
             index_version: None,
+            static_release_id: None,
             detail: Some(format!(
                 "{detail}；请重新拉取 LTEmbed bundle 到挂载目录后重启容器"
             )),
@@ -129,6 +130,7 @@ async fn handle_health(State(state): State<BuildServerState>) -> Response {
         status: "ok".into(),
         component: COMPONENT.into(),
         index_version: None,
+        static_release_id: None,
         detail: None,
     })
 }

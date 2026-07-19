@@ -14,7 +14,7 @@ use tower::ServiceExt;
 
 use ltsearch::http::query::{query_router, QueryServerState};
 use ltsearch::query_service::QueryService;
-use ltsearch::storage::{version_manifest_key, INDEX_HEAD_KEY};
+use ltsearch::storage::{version_manifest_key, StaticReleaseHead, INDEX_HEAD_KEY, STATIC_HEAD_KEY};
 
 fn state_with_probe(
     probe: impl Fn() -> Result<usize, String> + Send + Sync + 'static,
@@ -72,7 +72,6 @@ async fn health_returns_503_with_version_when_head_present_but_bootstrap_fails()
     // manifest embedding_dim 为 3，此处固定向量维度为 2 → bootstrap 维度校验失败。
     std::env::set_var("LTSEARCH_QUERY_FIXED_EMBEDDING", "0.1,0.2");
     std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
-    std::env::remove_var("LTSEARCH_QUERY_STATIC_DIR");
 
     let app = query_router(state_with_probe(|| Ok(3)));
     let response = app
@@ -164,7 +163,6 @@ async fn query_and_health_serve_index_version_from_disk_fixture() {
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
     std::env::set_var("LTSEARCH_QUERY_FIXED_EMBEDDING", "0.1,0.2,0.3");
     std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
-    std::env::remove_var("LTSEARCH_QUERY_STATIC_DIR");
 
     // probe 复用 fixed provider 的固定向量维度（3），与 manifest 一致。
     let app = query_router(state_with_probe(|| Ok(3)));
@@ -200,6 +198,69 @@ async fn query_and_health_serve_index_version_from_disk_fixture() {
     let health_json = body_json(health_response).await;
     assert_eq!(health_json["status"], "ok");
     assert_eq!(health_json["index_version"], 7);
+    // No static release pointer seeded → static_release_id omitted (serde skip → null).
+    assert!(health_json["static_release_id"].is_null());
+}
+
+// probe 通过、`_head` 指向某版本、handler bootstrap 成功，且 `static/_head` 指针
+// 与其指向的 release 目录 `static/releases/<id>/` 均已就位 → /health 200 且经缓存
+// 键上报该 release_id。指针与 release 一并落盘：T11 起 /health 走完整 resolve，缺
+// release 目录会按硬错误 503，故 fixture 必须写实静态制品（内容寻址、512 维）。
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn health_reports_static_release_id_when_pointer_seeded() {
+    let _guard = common::ENV_LOCK.lock().unwrap();
+    let root = common::temp_fixture_dir("http-query-router-static-release");
+    common::write_fixture(&root, INDEX_HEAD_KEY, &common::sample_head_json(7));
+    common::write_fixture(
+        &root,
+        &version_manifest_key(7),
+        &common::sample_manifest_json(7),
+    );
+    common::write_index(
+        &root,
+        "index/v7/shard_0",
+        &[("doc-1", "rust hybrid search"), ("doc-2", "rust keyword")],
+    );
+    common::write_lance_fixture(
+        &root,
+        "lance/v7/shard_0",
+        &[
+            json!({"doc_id":"doc-1","text":"rust hybrid search","embedding":[0.9,0.0,0.0]}),
+            json!({"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0]}),
+        ],
+    );
+    // Seed both the release payload (<root>/static/releases/<id>/) and the
+    // pointer (<root>/static/_head) that resolves to it.
+    let release_id = "a".repeat(64);
+    common::write_static_release_fixture(
+        &root,
+        &release_id,
+        &[common::StaticFixtureDoc {
+            doc_id: 10,
+            corpus_type: 0,
+            text: "static legal ten",
+            embedding: common::padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+        }],
+    );
+    let head = StaticReleaseHead::new(release_id.clone(), 1_700_000_000_000);
+    common::write_fixture(&root, STATIC_HEAD_KEY, &head.to_json_pretty());
+
+    std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "fixed");
+    std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
+    std::env::set_var("LTSEARCH_QUERY_FIXED_EMBEDDING", "0.1,0.2,0.3");
+    std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
+
+    let app = query_router(state_with_probe(|| Ok(3)));
+    let response = app
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["index_version"], 7);
+    assert_eq!(json["static_release_id"], release_id);
 }
 
 #[allow(clippy::await_holding_lock)]

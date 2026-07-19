@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use ltsearch::index::{
@@ -154,12 +155,12 @@ fn turbo_searcher_benchmark_reports_typed_512d_search_latency() {
         .collect::<Vec<_>>();
     write_benchmark_index(&dir, &docs);
 
-    let index = Box::new(MmapIndex::load(&dir).unwrap());
+    let index = Arc::new(MmapIndex::load(&dir).unwrap());
     assert_eq!(index.layout(), KnownRecordLayout::V2Dim512);
     match index.records() {
         TurboRecordSlice::V2Dim512(records) => assert_eq!(records.len(), docs.len()),
     }
-    let searcher = TurboQuantSearcher::new(Box::leak(index));
+    let searcher = TurboQuantSearcher::new(index);
     let query = padded_embedding(0);
     let top_k = 10;
     let start = Instant::now();

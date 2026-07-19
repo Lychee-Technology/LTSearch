@@ -1,7 +1,6 @@
 use std::fmt;
 use std::fs::File;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use memmap2::Mmap;
 
@@ -10,9 +9,6 @@ use super::header::{KnownRecordLayout, TurboHeader, TurboHeaderError, TURBO_VERS
 use super::meta::{MetaRecord, META_RECORD_SIZE};
 use super::meta_ext::{MetaExtRecord, META_EXT_RECORD_SIZE};
 use super::record::{TurboRecord512, TurboRecordRef, TurboRecordSlice};
-
-const IMAGE_STATIC_DIR: &str = "/app/static";
-static MMAP_INDEX: OnceLock<Result<MmapIndex, String>> = OnceLock::new();
 
 #[derive(Debug)]
 pub struct MmapIndex {
@@ -333,19 +329,6 @@ impl MmapIndex {
         Some(unsafe { &*(mmap[offset..].as_ptr() as *const MetaExtRecord) })
     }
 
-    pub fn load_from_image() -> Result<Self, MmapIndexError> {
-        Self::load(Path::new(IMAGE_STATIC_DIR))
-    }
-
-    pub fn global_from_image() -> Result<&'static Self, MmapIndexError> {
-        Self::global_from_dir_for_tests(Path::new(IMAGE_STATIC_DIR), &MMAP_INDEX).map_err(
-            |message| MmapIndexError::Io {
-                path: IMAGE_STATIC_DIR.to_string(),
-                source: std::io::Error::other(message),
-            },
-        )
-    }
-
     pub fn record_count(&self) -> u64 {
         self.header.record_count()
     }
@@ -424,23 +407,23 @@ impl MmapIndex {
     pub fn title_blob(&self) -> &[u8] {
         &self.title_mmap
     }
-
-    pub(crate) fn global_from_dir_for_tests<'a>(
-        dir: &Path,
-        cell: &'a OnceLock<Result<MmapIndex, String>>,
-    ) -> Result<&'a MmapIndex, String> {
-        let value = cell.get_or_init(|| Self::load(dir).map_err(|err| err.to_string()));
-        match value {
-            Ok(index) => Ok(index),
-            Err(error) => Err(error.clone()),
-        }
-    }
 }
 
 #[cfg(test)]
 impl MmapIndex {
     pub(crate) fn load_from_dir_for_tests(dir: &Path) -> Result<Self, MmapIndexError> {
         Self::load(dir)
+    }
+
+    pub(crate) fn global_from_dir_for_tests<'a>(
+        dir: &Path,
+        cell: &'a std::sync::OnceLock<Result<MmapIndex, String>>,
+    ) -> Result<&'a MmapIndex, String> {
+        let value = cell.get_or_init(|| Self::load(dir).map_err(|err| err.to_string()));
+        match value {
+            Ok(index) => Ok(index),
+            Err(error) => Err(error.clone()),
+        }
     }
 }
 
@@ -557,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_image_dir_returns_index() {
+    fn load_from_dir_returns_index() {
         let dir = temp_dir("load-from-dir");
         write_test_index(&dir);
 

@@ -196,6 +196,13 @@ class CiWorkflowTest(unittest.TestCase):
             local_e2e,
         )
         self.assertIn("run: bash scripts/e2e/run-local-server-flow.sh", local_e2e)
+        # #112 PR-2 Task 14: static build->activate->query v3 flow joins local-e2e.
+        self.assertIn(
+            "run: cargo build --locked --no-default-features --features local "
+            "--example emit_static_lance_fixture",
+            local_e2e,
+        )
+        self.assertIn("run: bash scripts/e2e/run-static-release-flow.sh", local_e2e)
         self.assertNotIn("docker", local_e2e)
         self.assertNotIn("awscli", local_e2e)
 

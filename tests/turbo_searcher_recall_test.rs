@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ltsearch::index::{
     encode_vector, CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader,
@@ -294,8 +295,7 @@ fn write_test_index(dir: &Path, documents: &[Vec<f32>]) {
 }
 
 fn load_searcher(dir: &Path) -> TurboQuantSearcher {
-    let index = Box::new(MmapIndex::load(dir).unwrap());
-    TurboQuantSearcher::new(Box::leak(index))
+    TurboQuantSearcher::new(Arc::new(MmapIndex::load(dir).unwrap()))
 }
 
 fn recall_report(

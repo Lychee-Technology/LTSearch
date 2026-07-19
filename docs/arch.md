@@ -698,9 +698,10 @@ pass-through config for the SQS-driven builder.
 
 Move each runtime image from `public.ecr.aws/lambda/provided:al2023-arm64` to a plain
 `public.ecr.aws/amazonlinux/amazonlinux:2023` (arm64) base, reusing the existing multi-stage
-`sam/builder.Dockerfile` compile stage. The divergent top-level `Dockerfile` (x86, bakes `static/`
-+ `CMD [bootstrap]`) is folded into this arm64 lineage so the static-index baking
-(`/app/static`, `LTSEARCH_QUERY_STATIC_DIR`) has a single source of truth.
+`sam/builder.Dockerfile` compile stage. The divergent top-level `Dockerfile` (x86,
+`CMD [bootstrap]`) is folded into this arm64 lineage as a single source of truth. Static
+retrieval bakes no index into the image; it is resolved at runtime through the activation
+pointer `static/_head` → `static/releases/<id>/` (see the static-activate flow).
 
 ## Platform mapping (all three components)
 

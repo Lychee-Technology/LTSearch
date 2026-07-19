@@ -271,8 +271,8 @@ fn static_title_flows_from_builder_into_assembled_context() {
         )
         .unwrap();
 
-    let index: &'static MmapIndex = Box::leak(Box::new(MmapIndex::load(&output).unwrap()));
-    let searcher = TurboQuantSearcher::new(index);
+    let index = Arc::new(MmapIndex::load(&output).unwrap());
+    let searcher = TurboQuantSearcher::new(Arc::clone(&index));
     let results = searcher
         .search(&stub_manifest(), &vec![0.5; 512], 2)
         .unwrap();

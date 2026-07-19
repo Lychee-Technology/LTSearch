@@ -18,9 +18,8 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use ltsearch::app::{run_static_activate, run_static_build};
-use ltsearch::indexing::PublishStorage;
-use ltsearch::local::{LocalPublishStorage, SqliteDb};
-use ltsearch::storage::{StaticReleaseHead, STATIC_HEAD_KEY};
+use ltsearch::local::{SqliteDb, SqliteStaticReleaseStore};
+use ltsearch::storage::StaticReleaseStore;
 use tempfile::TempDir;
 
 struct FixtureRow {
@@ -177,15 +176,13 @@ async fn run_static_activate_installs_and_flips_pointer() {
         installed_manifest.display()
     );
 
-    // SQLite static_release_head 行存在、可解析,且 release_id 与 manifest 一致。
+    // SQLite static_release_head 行存在、可经读侧 store 解析,且 release_id 与
+    // manifest 一致（读侧真源经 SqliteStaticReleaseStore，而非直读指针字节）。
     let db = SqliteDb::open(root.join("ltsearch.db")).unwrap();
-    let storage = LocalPublishStorage::new(db, &root);
-    let head_object = storage
-        .read(STATIC_HEAD_KEY)
-        .await
-        .unwrap()
+    let store = SqliteStaticReleaseStore::new(db);
+    let head = store
+        .load_active_release()
+        .expect("static release head must load")
         .expect("static/_head pointer row must exist after activation");
-    let head =
-        StaticReleaseHead::from_json(&head_object.bytes).expect("stored static/_head must parse");
     assert_eq!(head.release_id, release_id);
 }

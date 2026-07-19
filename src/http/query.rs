@@ -92,18 +92,33 @@ async fn handle_health(State(state): State<QueryServerState>) -> Response {
             status: "ok".into(),
             component: COMPONENT.into(),
             index_version: None,
+            static_release_id: None,
             detail: Some("索引尚未发布（无 _head），等待首次导入".into()),
         }),
         Ok(Some(version)) => {
             let service = state.service.clone();
             let resolved = tokio::task::spawn_blocking(move || service.resolve_handler()).await;
             match resolved {
-                Ok(Ok(_)) => health_response(HealthBody {
-                    status: "ok".into(),
-                    component: COMPONENT.into(),
-                    index_version: Some(version),
-                    detail: None,
-                }),
+                Ok(Ok(_)) => {
+                    // handler 已解析成功：两个字段都取自 `cached_pair()` 的单次持锁
+                    // 读取，同代一致——index_version 与 static_release_id 必来自同一
+                    // 缓存键。并发重建只会让整对一起翻新，不会跨代混合上报（issue
+                    // #112 AC4）。早期的磁盘 version 读仅用于 gate「无索引」分支与错误
+                    // /panic 分支的上报；此处不再单独使用，以免与缓存键错位。
+                    // cached_pair 意外为 None（理论不可达：resolve 刚成功）时，降级用早
+                    // 期 version + None。
+                    let (index_version, static_release_id) = match state.service.cached_pair() {
+                        Some((cached_version, release_id)) => (Some(cached_version), release_id),
+                        None => (Some(version), None),
+                    };
+                    health_response(HealthBody {
+                        status: "ok".into(),
+                        component: COMPONENT.into(),
+                        index_version,
+                        static_release_id,
+                        detail: None,
+                    })
+                }
                 Ok(Err(error)) => unavailable(Some(version), error.message),
                 Err(join_error) => unavailable(
                     Some(version),
@@ -121,6 +136,7 @@ fn unavailable(index_version: Option<u64>, detail: impl Into<String>) -> Respons
         status: "unavailable".into(),
         component: COMPONENT.into(),
         index_version,
+        static_release_id: None,
         detail: Some(detail.into()),
     })
 }

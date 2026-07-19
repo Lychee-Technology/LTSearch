@@ -13,10 +13,4 @@ FROM public.ecr.aws/lambda/provided:al2023
 
 COPY --from=builder /build/target/release/query_lambda /var/task/bootstrap
 
-# Static TurboQuant index — update this layer monthly/quarterly by rebuilding
-# after running turbo_index_builder.
-COPY static/ /app/static/
-
-ENV LTSEARCH_QUERY_STATIC_DIR=/app
-
 CMD ["bootstrap"]

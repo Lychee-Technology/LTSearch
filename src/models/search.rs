@@ -187,6 +187,8 @@ pub struct SearchResponse {
     pub dynamic_count: usize,
     pub latency_ms: u64,
     pub index_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_release_id: Option<String>,
 }
 
 impl SearchResponse {

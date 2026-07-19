@@ -13,5 +13,5 @@ pub use noop_sync::NoopArtifactSync;
 #[cfg(feature = "local")]
 pub use sqlite::{
     LocalPublishStorage, SqliteBuildJobSource, SqliteBuildQueue, SqliteDb, SqliteManifestStore,
-    SqliteWalStorage,
+    SqliteStaticReleaseStore, SqliteWalStorage,
 };

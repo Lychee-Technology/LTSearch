@@ -104,6 +104,7 @@ async fn handle_health() -> Response {
         status: "ok".into(),
         component: COMPONENT.into(),
         index_version: None,
+        static_release_id: None,
         detail: None,
     })
 }

@@ -3,6 +3,7 @@ pub mod manifest_store;
 pub mod s3_paths;
 pub mod staged_publish;
 pub mod static_head;
+pub mod static_release_store;
 
 pub use head::{HeadError, ManifestHead};
 pub use manifest_store::{ActiveManifest, LocalManifestStore, ManifestStore, ManifestStoreError};
@@ -11,3 +12,6 @@ pub use s3_paths::{
     STATIC_HEAD_KEY,
 };
 pub use static_head::{StaticHeadError, StaticReleaseHead};
+pub use static_release_store::{
+    LocalStaticReleaseStore, StaticReleaseStore, StaticReleaseStoreError,
+};

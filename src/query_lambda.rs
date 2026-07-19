@@ -18,7 +18,8 @@ use crate::query::{
     VectorSearcher,
 };
 use crate::storage::{
-    ActiveManifest, LocalManifestStore, ManifestHead, ManifestStore, ManifestStoreError,
+    static_release_dir_key, ActiveManifest, LocalManifestStore, LocalStaticReleaseStore,
+    ManifestHead, ManifestStore, ManifestStoreError, StaticReleaseStore,
 };
 
 pub type QueryRequestHandler =
@@ -51,16 +52,39 @@ impl From<SearchError> for QueryLambdaError {
 
 pub fn bootstrap_query_handler_from_env() -> Result<QueryRequestHandler, QueryLambdaError> {
     match required_provider_from_env("LTSEARCH_QUERY_EMBEDDING_PROVIDER") {
-        Ok(provider) => bootstrap_query_embedding_handler(provider, None),
+        Ok(provider) => {
+            // 无固定 pair 的入口（非缓存热路径）：就地解析当前活跃 release 指针，
+            // 装载对应 release 目录。指针缺省 → None → 无静态检索。
+            let artifact_root = query_artifact_root_from_env()?;
+            let static_release_id = resolve_active_static_release_id(&artifact_root)?;
+            bootstrap_query_embedding_handler(provider, None, static_release_id)
+        }
         Err(error) => Err(bootstrap_error(error.to_string())),
     }
 }
 
+/// Test-only：静态检索侧硬编码 `None`，故生产接线绝不能走此入口，否则会静默丢弃
+/// 静态检索结果。生产热路径请用 [`bootstrap_query_handler_for_key_from_env`] 变体，
+/// 由缓存键携带 `(dynamic_version, static_release_id)`。
 pub fn bootstrap_query_handler_for_version_from_env(
     expected_version: u64,
 ) -> Result<QueryRequestHandler, QueryLambdaError> {
     match required_provider_from_env("LTSEARCH_QUERY_EMBEDDING_PROVIDER") {
-        Ok(provider) => bootstrap_query_embedding_handler(provider, Some(expected_version)),
+        Ok(provider) => bootstrap_query_embedding_handler(provider, Some(expected_version), None),
+        Err(error) => Err(bootstrap_error(error.to_string())),
+    }
+}
+
+/// 缓存热路径的 bootstrap 入口：接过 [`load_active_query_key_from_env`] 捕获的
+/// `(dynamic_version, static_release_id)` 对，dynamic 侧照旧按 `expected_version`
+/// 冻结，static 侧按捕获的 `release_id` 装载——单请求内二者一致，无 TOCTOU。
+pub fn bootstrap_query_handler_for_key_from_env(
+    (expected_version, expected_release_id): (u64, Option<String>),
+) -> Result<QueryRequestHandler, QueryLambdaError> {
+    match required_provider_from_env("LTSEARCH_QUERY_EMBEDDING_PROVIDER") {
+        Ok(provider) => {
+            bootstrap_query_embedding_handler(provider, Some(expected_version), expected_release_id)
+        }
         Err(error) => Err(bootstrap_error(error.to_string())),
     }
 }
@@ -90,15 +114,72 @@ fn manifest_store_for(artifact_root: &Path) -> Result<Box<dyn ManifestStore>, Qu
     Ok(Box::new(LocalManifestStore::new(artifact_root)))
 }
 
-pub fn load_active_query_version_from_env() -> Result<u64, QueryLambdaError> {
-    let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
+/// 按制品根选择静态发布指针（`static/_head`）的真源，严格镜像 [`manifest_store_for`]：
+/// 本地 profile 下若 `<root>/ltsearch.db` 存在，指针活在 SQLite 的 `static_release_head`
+/// 行，用 [`crate::local::SqliteStaticReleaseStore`]；否则（AWS 把指针从 S3 同步成文件、
+/// 或纯文件部署）回落到文件版 [`LocalStaticReleaseStore`]。按库文件是否存在做运行时分发，
+/// AWS 行为逐字不变。
+///
+/// 读侧脚手架：由 [`resolve_active_static_release_id`] 消费——既组合进缓存键
+/// [`load_active_query_key_from_env`]（`/health` 经 `cached_pair()` 原子上报），
+/// 也供非缓存的 [`bootstrap_query_handler_from_env`] 就地解析 release。
+fn static_release_store_for(
+    artifact_root: &Path,
+) -> Result<Box<dyn StaticReleaseStore>, QueryLambdaError> {
+    #[cfg(feature = "local")]
+    {
+        let db_path = artifact_root.join("ltsearch.db");
+        if db_path.exists() {
+            let db = crate::local::SqliteDb::open(&db_path).map_err(|error| {
+                bootstrap_error(format!(
+                    "failed to open local control-plane db {}: {error}",
+                    db_path.display()
+                ))
+            })?;
+            return Ok(Box::new(crate::local::SqliteStaticReleaseStore::new(db)));
+        }
+    }
+    Ok(Box::new(LocalStaticReleaseStore::new(artifact_root)))
+}
+
+fn query_artifact_root_from_env() -> Result<PathBuf, QueryLambdaError> {
+    env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
         .map(PathBuf::from)
-        .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_ARTIFACT_ROOT"))?;
+        .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_ARTIFACT_ROOT"))
+}
+
+/// 读取当前活跃静态 release 指针的 `release_id`（无 release 激活 → `Ok(None)`）。
+/// 指针库/文件损坏或读取失败在查询路径上是硬错误：显式上抛 `Err`，绝不静默降级
+/// 为「无静态结果」（裁定 3）。由缓存键组合器与非缓存 bootstrap 入口共用。
+fn resolve_active_static_release_id(
+    artifact_root: &Path,
+) -> Result<Option<String>, QueryLambdaError> {
+    static_release_store_for(artifact_root)?
+        .load_active_release()
+        .map(|maybe_head| maybe_head.map(|head| head.release_id))
+        .map_err(|source| {
+            bootstrap_error(format!("failed to load active static release: {source}"))
+        })
+}
+
+pub fn load_active_query_version_from_env() -> Result<u64, QueryLambdaError> {
+    let artifact_root = query_artifact_root_from_env()?;
     let manifest_store = manifest_store_for(&artifact_root)?;
 
     manifest_store
         .load_active_version()
         .map_err(|source| bootstrap_error(format!("failed to load active version: {source}")))
+}
+
+/// 组合缓存键 `(dynamic_version, static_release_id)`：dynamic 半沿用
+/// [`load_active_query_version_from_env`]，static 半读活跃 release 指针。二者
+/// 在同一次 resolve 内一并捕获，交由 [`bootstrap_query_handler_for_key_from_env`]
+/// 冻结，保证单个请求不会混用两个不同的静态 release。
+pub fn load_active_query_key_from_env() -> Result<(u64, Option<String>), QueryLambdaError> {
+    let version = load_active_query_version_from_env()?;
+    let artifact_root = query_artifact_root_from_env()?;
+    let release_id = resolve_active_static_release_id(&artifact_root)?;
+    Ok((version, release_id))
 }
 
 /// 与 `load_active_query_version_from_env` 相同，但把「`_head` 尚不存在」
@@ -143,10 +224,9 @@ pub fn is_retriable_bootstrap_version_change(error: &QueryLambdaError) -> bool {
 fn bootstrap_query_embedding_handler(
     provider: EmbeddingProvider,
     expected_version: Option<u64>,
+    static_release_id: Option<String>,
 ) -> Result<QueryRequestHandler, QueryLambdaError> {
-    let artifact_root = env::var("LTSEARCH_QUERY_ARTIFACT_ROOT")
-        .map(PathBuf::from)
-        .map_err(|_| bootstrap_error("missing LTSEARCH_QUERY_ARTIFACT_ROOT"))?;
+    let artifact_root = query_artifact_root_from_env()?;
     let manifest_store = manifest_store_for(&artifact_root)?;
     let active_manifest = manifest_store
         .load_active_manifest()
@@ -181,12 +261,14 @@ fn bootstrap_query_embedding_handler(
         VectorSearcher::new(manifest_store, &artifact_root),
     );
 
-    let static_retriever: Box<dyn StaticRetriever> = match try_load_static_searcher(&artifact_root)?
-    {
-        Some(static_searcher) => Box::new(static_searcher),
-        None => Box::new(NoopStaticRetriever),
-    };
-    let router = router.with_static_retriever(static_retriever);
+    let static_retriever: Box<dyn StaticRetriever> =
+        match try_load_static_searcher(&artifact_root, static_release_id.as_deref())? {
+            Some(static_searcher) => Box::new(static_searcher),
+            None => Box::new(NoopStaticRetriever),
+        };
+    let router = router
+        .with_static_retriever(static_retriever)
+        .with_static_release_id(static_release_id);
 
     Ok(Box::new(move |request| router.search(&request)))
 }
@@ -249,17 +331,18 @@ fn bootstrap_error(message: impl Into<String>) -> QueryLambdaError {
     }
 }
 
+/// 按内容寻址装载静态 release 索引：`None`（无活跃 release）→ `Ok(None)`；
+/// `Some(id)` → 从 `<root>/static/releases/<id>/` 装载 [`MmapIndex`]。release
+/// 目录应已由激活/sync 落盘且内容不可变，故装载失败是硬错误（`Err`），不再以
+/// 「目录不存在」静默回落——与旧的静态目录 env 探测语义决裂。
 fn try_load_static_searcher(
     artifact_root: &Path,
+    release_id: Option<&str>,
 ) -> Result<Option<TurboQuantSearcher>, QueryLambdaError> {
-    let static_dir = env::var("LTSEARCH_QUERY_STATIC_DIR")
-        .map(PathBuf::from)
-        .ok();
-    let static_dir = static_dir.as_deref().unwrap_or(artifact_root);
-    let static_dir = static_dir.join("static");
-    if !static_dir.exists() {
+    let Some(release_id) = release_id else {
         return Ok(None);
-    }
+    };
+    let static_dir = artifact_root.join(static_release_dir_key(release_id));
 
     let index = MmapIndex::load(&static_dir).map_err(|error| {
         bootstrap_error(format!(
@@ -268,7 +351,10 @@ fn try_load_static_searcher(
         ))
     })?;
 
-    Ok(Some(TurboQuantSearcher::new(Box::leak(Box::new(index)))))
+    // The searcher owns the index via `Arc`; when a static-release flip replaces
+    // the cached handler and the last in-flight request drains, the Arc drops and
+    // the mmap is released (no `Box::leak` permanent leak across activations).
+    Ok(Some(TurboQuantSearcher::new(Arc::new(index))))
 }
 
 #[derive(Debug, Clone)]
@@ -289,5 +375,56 @@ impl ManifestStore for FixedManifestStore {
 
     fn load_active_manifest(&self) -> Result<ActiveManifest, ManifestStoreError> {
         Ok(self.active_manifest.clone())
+    }
+}
+
+#[cfg(all(test, feature = "local"))]
+mod static_release_store_for_tests {
+    use super::*;
+    use crate::indexing::PublishStorage;
+    use crate::storage::{StaticReleaseHead, STATIC_HEAD_KEY};
+
+    fn write_head_file(root: &Path, head: &StaticReleaseHead) {
+        let path = root.join(STATIC_HEAD_KEY);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, head.to_json_pretty()).unwrap();
+    }
+
+    /// 无 `ltsearch.db` → 文件版：读盘上的 `static/_head`。
+    #[test]
+    fn dispatches_to_file_store_without_db() {
+        let root = tempfile::tempdir().unwrap();
+        let head = StaticReleaseHead::new("a".repeat(64), 1_700_000_000_000);
+        write_head_file(root.path(), &head);
+
+        let store = static_release_store_for(root.path()).unwrap();
+        assert_eq!(store.load_active_release().unwrap(), Some(head));
+    }
+
+    /// 有 `ltsearch.db` → SQLite 版：真源是 `static_release_head` 行，盘上同名
+    /// 文件被忽略。这里刻意在盘上也写了 `static/_head` 文件却断言 `None`，坐实
+    /// 分发确实切到了 SQLite（否则文件版会读出 `Some`）。
+    #[tokio::test]
+    async fn dispatches_to_sqlite_store_with_db_ignoring_head_file() {
+        let root = tempfile::tempdir().unwrap();
+        // 建库（使 <root>/ltsearch.db 存在），但不种任何 static_release_head 行。
+        let db = crate::local::SqliteDb::open(root.path().join("ltsearch.db")).unwrap();
+        // 盘上写一个会误导文件版的 static/_head 文件。
+        let file_head = StaticReleaseHead::new("b".repeat(64), 1_700_000_000_000);
+        write_head_file(root.path(), &file_head);
+
+        // SQLite 行为空 → None（证明没走文件版）。
+        let store = static_release_store_for(root.path()).unwrap();
+        assert_eq!(store.load_active_release().unwrap(), None);
+
+        // 经写侧 CAS 种入 SQLite 行后，分发器读出的是该行的值，而非盘上文件。
+        let publish = crate::local::LocalPublishStorage::new(db, root.path());
+        let row_head = StaticReleaseHead::new("c".repeat(64), 1_700_000_000_001);
+        assert!(publish
+            .compare_and_swap(STATIC_HEAD_KEY, None, row_head.to_json_pretty().as_bytes())
+            .await
+            .unwrap());
+        let store = static_release_store_for(root.path()).unwrap();
+        assert_eq!(store.load_active_release().unwrap(), Some(row_head));
     }
 }
