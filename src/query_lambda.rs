@@ -351,7 +351,10 @@ fn try_load_static_searcher(
         ))
     })?;
 
-    Ok(Some(TurboQuantSearcher::new(Box::leak(Box::new(index)))))
+    // The searcher owns the index via `Arc`; when a static-release flip replaces
+    // the cached handler and the last in-flight request drains, the Arc drops and
+    // the mmap is released (no `Box::leak` permanent leak across activations).
+    Ok(Some(TurboQuantSearcher::new(Arc::new(index))))
 }
 
 #[derive(Debug, Clone)]

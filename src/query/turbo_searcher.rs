@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
+use std::sync::Arc;
 
 use rayon::prelude::*;
 use serde_json::Value;
@@ -13,13 +14,18 @@ use super::context_builder::corpus_type_label;
 use super::retrieval_common::{validate_embedding_dim, validate_query_embedding, validate_top_k};
 use super::StaticRetriever;
 
-#[derive(Debug, Clone, Copy)]
+/// Owns its `MmapIndex` via `Arc`, so the searcher — not a leaked `'static`
+/// allocation — is the sole owner of the mmap. When a static-release flip
+/// replaces the cached handler and the last in-flight request finishes, the
+/// `Arc` count reaches zero and the mmap is released. `Clone` is a cheap
+/// refcount bump; the parallel `rayon` scan borrows `&self` and is unaffected.
+#[derive(Debug, Clone)]
 pub struct TurboQuantSearcher {
-    pub index: &'static MmapIndex,
+    pub index: Arc<MmapIndex>,
 }
 
 impl TurboQuantSearcher {
-    pub fn new(index: &'static MmapIndex) -> Self {
+    pub fn new(index: Arc<MmapIndex>) -> Self {
         Self { index }
     }
 }

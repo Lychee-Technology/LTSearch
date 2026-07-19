@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ltsearch::index::{
     encode_vector, CentroidTable, MetaExtRecord, MetaRecord, MmapIndex, ProjectionMatrix,
@@ -196,8 +197,7 @@ fn write_index(dir: &Path, docs: &[Doc]) {
 }
 
 fn load_searcher(dir: &Path) -> TurboQuantSearcher {
-    let index = Box::new(MmapIndex::load(dir).unwrap());
-    TurboQuantSearcher::new(Box::leak(index))
+    TurboQuantSearcher::new(Arc::new(MmapIndex::load(dir).unwrap()))
 }
 
 fn alpha_metadata() -> String {
@@ -229,6 +229,32 @@ fn alpha_beta_docs() -> Vec<Doc> {
             embedding: padded_embedding(&[0.2, 0.4, -0.3, 0.1]),
         },
     ]
+}
+
+// The searcher now *owns* its `MmapIndex` via `Arc`, so dropping the searcher
+// (as a static-release flip does when it replaces the cached handler) releases
+// the mmap — no `Box::leak` permanent leak. A `Weak` handle proves the strong
+// count reaches zero once the searcher is gone.
+#[test]
+fn dropping_searcher_releases_index() {
+    let dir = temp_dir("drop-releases-index");
+    write_index(&dir, &alpha_beta_docs());
+
+    let index = Arc::new(MmapIndex::load(&dir).unwrap());
+    let weak = Arc::downgrade(&index);
+    let searcher = TurboQuantSearcher::new(index); // moves the only strong ref
+
+    assert!(
+        weak.upgrade().is_some(),
+        "index must stay alive while the searcher holds it"
+    );
+
+    drop(searcher);
+
+    assert!(
+        weak.upgrade().is_none(),
+        "dropping the searcher must release the last strong ref to the mmap index"
+    );
 }
 
 #[test]
