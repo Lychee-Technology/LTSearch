@@ -72,7 +72,6 @@ async fn health_returns_503_with_version_when_head_present_but_bootstrap_fails()
     // manifest embedding_dim 为 3，此处固定向量维度为 2 → bootstrap 维度校验失败。
     std::env::set_var("LTSEARCH_QUERY_FIXED_EMBEDDING", "0.1,0.2");
     std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
-    std::env::remove_var("LTSEARCH_QUERY_STATIC_DIR");
 
     let app = query_router(state_with_probe(|| Ok(3)));
     let response = app
@@ -164,7 +163,6 @@ async fn query_and_health_serve_index_version_from_disk_fixture() {
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
     std::env::set_var("LTSEARCH_QUERY_FIXED_EMBEDDING", "0.1,0.2,0.3");
     std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
-    std::env::remove_var("LTSEARCH_QUERY_STATIC_DIR");
 
     // probe 复用 fixed provider 的固定向量维度（3），与 manifest 一致。
     let app = query_router(state_with_probe(|| Ok(3)));
@@ -204,10 +202,10 @@ async fn query_and_health_serve_index_version_from_disk_fixture() {
     assert!(health_json["static_release_id"].is_null());
 }
 
-// probe 通过、`_head` 指向某版本、handler bootstrap 成功，且 `<root>/static/_head`
-// 静态 release 指针已就位 → /health 200 且上报该指针的 release_id。STATIC_DIR 改指
-// 一个空目录，避免指针文件创建的 `<root>/static/` 目录被 TurboQuant 静态索引加载器
-// 误当作索引；指针读取仍经 ARTIFACT_ROOT 解析。
+// probe 通过、`_head` 指向某版本、handler bootstrap 成功，且 `static/_head` 指针
+// 与其指向的 release 目录 `static/releases/<id>/` 均已就位 → /health 200 且经缓存
+// 键上报该 release_id。指针与 release 一并落盘：T11 起 /health 走完整 resolve，缺
+// release 目录会按硬错误 503，故 fixture 必须写实静态制品（内容寻址、512 维）。
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn health_reports_static_release_id_when_pointer_seeded() {
@@ -232,17 +230,25 @@ async fn health_reports_static_release_id_when_pointer_seeded() {
             json!({"doc_id":"doc-2","text":"rust keyword","embedding":[0.8,0.0,0.0]}),
         ],
     );
-    // Seed the static release pointer at <root>/static/_head (file store path).
+    // Seed both the release payload (<root>/static/releases/<id>/) and the
+    // pointer (<root>/static/_head) that resolves to it.
     let release_id = "a".repeat(64);
+    common::write_static_release_fixture(
+        &root,
+        &release_id,
+        &[common::StaticFixtureDoc {
+            doc_id: 10,
+            corpus_type: 0,
+            text: "static legal ten",
+            embedding: common::padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+        }],
+    );
     let head = StaticReleaseHead::new(release_id.clone(), 1_700_000_000_000);
     common::write_fixture(&root, STATIC_HEAD_KEY, &head.to_json_pretty());
-
-    let static_probe = common::temp_fixture_dir("http-query-router-static-release-probe");
 
     std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "fixed");
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
     std::env::set_var("LTSEARCH_QUERY_FIXED_EMBEDDING", "0.1,0.2,0.3");
-    std::env::set_var("LTSEARCH_QUERY_STATIC_DIR", &static_probe);
     std::env::remove_var("LTSEARCH_QUERY_S3_BUCKET");
 
     let app = query_router(state_with_probe(|| Ok(3)));
@@ -255,8 +261,6 @@ async fn health_reports_static_release_id_when_pointer_seeded() {
     assert_eq!(json["status"], "ok");
     assert_eq!(json["index_version"], 7);
     assert_eq!(json["static_release_id"], release_id);
-
-    std::env::remove_var("LTSEARCH_QUERY_STATIC_DIR");
 }
 
 #[allow(clippy::await_holding_lock)]

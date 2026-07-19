@@ -103,10 +103,10 @@ async fn handle_health(State(state): State<QueryServerState>) -> Response {
                     status: "ok".into(),
                     component: COMPONENT.into(),
                     index_version: Some(version),
-                    // 过渡实现（T10）：直接读 `static/_head` 指针上报；读取失败降级为
-                    // None，绝不影响已判定的健康态。T11 缓存落地后改走缓存 pair。
-                    static_release_id:
-                        crate::query_lambda::load_active_static_release_id_from_env_opt(),
+                    // handler 已解析成功：直接读缓存键固定的 release id 上报，与本
+                    // 请求装载的静态 release 一致（无 TOCTOU）。指针不可读时上面的
+                    // resolve_handler 已按硬错误走 503，不会到这里。
+                    static_release_id: state.service.cached_static_release_id(),
                     detail: None,
                 }),
                 Ok(Err(error)) => unavailable(Some(version), error.message),
