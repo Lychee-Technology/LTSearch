@@ -1,7 +1,7 @@
 mod common;
 
 #[cfg(feature = "ltembed")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use common::{padded_embedding, write_static_release_fixture, StaticFixtureDoc};
