@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DOCKERFILE_PATH = REPO_ROOT / "Dockerfile"
+DOCKERFILE_PATH = REPO_ROOT / "sam" / "local.Dockerfile"
 MMAP_INDEX_PATH = REPO_ROOT / "src" / "index" / "mmap_index.rs"
 
 # The forbidden tokens are assembled from fragments so this guard file itself
@@ -18,9 +18,10 @@ class ImageNoStaticConventionTest(unittest.TestCase):
     """Guards that the implicit `static/` directory convention is fully gone.
 
     Static retrieval now resolves exclusively through the activation pointer
-    (`static/_head` -> `static/releases/<id>/`), so the runtime image must not
-    bake an image static layer nor advertise the static-dir env override, and
-    the mmap index must not hardcode an image static directory constant.
+    (`static/_head` -> `static/releases/<id>/`), so the runtime image
+    (`sam/local.Dockerfile`, the released unified local image since #113) must
+    not bake an image static layer nor advertise the static-dir env override,
+    and the mmap index must not hardcode an image static directory constant.
     """
 
     def test_dockerfile_has_no_static_directory_convention(self) -> None:

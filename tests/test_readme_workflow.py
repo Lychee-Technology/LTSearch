@@ -26,6 +26,18 @@ class ReadmeWorkflowTest(unittest.TestCase):
         self.assertIn("fast Docker-free verification path", content)
         self.assertIn("Moto-backed integration path", content)
 
+    def test_readme_documents_release_artifacts(self) -> None:
+        content = README_PATH.read_text(encoding="utf-8")
+
+        # #113：README 必须描述 release 产物与统一 local 镜像，且不再引用已
+        # 退役的 GHCR server 组件镜像。
+        self.assertIn("## Releases", content)
+        self.assertIn("scripts/package-release.sh", content)
+        self.assertIn("ghcr.io/lychee-technology/ltsearch-local", content)
+        self.assertNotIn("ltsearch-query-server", content)
+        self.assertNotIn("ltsearch-write-server", content)
+        self.assertNotIn("ltsearch-index-builder-server", content)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,10 +7,16 @@ search. Dynamic results are fused with reciprocal-rank fusion; static results re
 The system has query, write, and index-builder deployables. Writes create document events, the
 builder materializes and publishes immutable index versions, and query resolves the active version.
 
-Current architecture work makes AWS optional: local deployment uses SQLite for durable events, build
-jobs, and active-release coordination, while AWS remains an adapter implementation. Static corpora
-are built from immutable Lance releases into versioned TurboQuant v3 releases and are activated
-separately from dynamic indexes.
+AWS is optional: local deployment uses SQLite for durable events, build jobs, and active-release
+coordination, while AWS remains an adapter implementation. Static corpora are built from immutable
+Lance releases into versioned TurboQuant v3 releases and are activated separately from dynamic
+indexes.
+
+Release artifacts (#113) are exactly one local OCI image (`ghcr.io/lychee-technology/ltsearch-local`,
+the unified `ltsearch` binary with write/build/query/static-build/static-activate subcommands) plus
+three Lambda function ZIPs and a `model-assets.zip`, published with checksums and provenance by the
+tag-triggered release workflow. The per-component HTTP server binaries and image-based Lambda
+deployment were removed in #113 (the `server` feature remains — it is the shared axum layer).
 
 ## Build profiles
 
@@ -21,5 +27,4 @@ handler binaries); `ltembed` is orthogonal. A bare `cargo build` is AWS-free; AW
 must name their profile (`--features aws` / `--features lambda`). The domain core depends only on the
 provider-neutral contracts in `src/contracts.rs`, each with a local and an AWS impl: document events →
 `WalStorage`; build jobs → `BuildQueue` + `BuildJobSource`; artifact access → `PublishStorage` +
-`ArtifactSync`; active-release coordination → `ManifestStore`. AWS-free local server binaries are
-deferred to #108.
+`ArtifactSync`; active-release coordination → `ManifestStore`.

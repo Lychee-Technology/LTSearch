@@ -1,6 +1,6 @@
 # LTSearch
 
-Hybrid search engine for RAG retrieval, combining a static TurboQuant index with vector similarity (LanceDB) and BM25 keyword search (Tantivy) via Reciprocal Rank Fusion. Ships as container images on AWS Lambda + S3 today; Fargate support is planned (see [`docs/deployment.md`](docs/deployment.md)).
+Hybrid search engine for RAG retrieval, combining a static TurboQuant index with vector similarity (LanceDB) and BM25 keyword search (Tantivy) via Reciprocal Rank Fusion. Ships as one AWS-free local Docker image (`ghcr.io/lychee-technology/ltsearch-local`, SQLite-backed) and as Lambda ZIP artifacts (`provided.al2023`, arm64) for AWS (see [`docs/deployment.md`](docs/deployment.md)).
 
 ## Project Status
 
@@ -62,14 +62,13 @@ CI mirrors the same split:
 
 AWS is an optional cargo feature (see [`docs/adr/0001-aws-optional-runtime-profiles.md`](docs/adr/0001-aws-optional-runtime-profiles.md)). The crate defaults to the AWS-free `local` profile (`default = ["local"]`), so a bare `cargo build` / `cargo test` pulls in **no** AWS SDK or Lambda runtime and produces no AWS/Lambda binary. Name a profile to build the cloud binaries:
 
+- The unified local binary (`ltsearch`: `write` / `build` / `query` / `static-build` / `static-activate` subcommands) requires `--features local` (the default).
 - Lambda handlers (`query_lambda`, `write_lambda`, `index_builder_lambda`) require `--features lambda`.
-- Server + offline binaries (`query_server`, `write_server`, `index_builder_server`, `turbo_index_builder`) require `--features aws`.
-
-AWS-free local server binaries are deferred to #108.
+- Offline/ops binaries (`turbo_index_builder`, `static_activate`) require `--features aws`.
 
 ## Lambda Binaries
 
-All binaries are auto-discovered from `src/bin/` — no `[[bin]]` entries in `Cargo.toml` needed.
+Cloud binaries are feature-gated via explicit `[[bin]]` entries in `Cargo.toml` (see Build Profiles above).
 
 ### query_lambda
 
@@ -122,7 +121,7 @@ cargo build --features lambda --bin index_builder_lambda
 
 ### turbo_index_builder
 
-Offline static index builder for TurboQuant (laws, contracts, RFCs). Writes compressed binary index files for bundling into the query Lambda Docker image.
+Offline static index builder for TurboQuant (laws, contracts, RFCs). Writes compressed binary index files; static releases are shipped and activated through the activation-pointer flow (see `docs/deployment.md`).
 
 ```bash
 cargo build --features aws --bin turbo_index_builder
@@ -143,13 +142,13 @@ turbo_index_builder --config turbo_config.json --output /path/to/static/
 
 ## Local E2E Workflow
 
-The SAM Local E2E scripts run the full write → build → query pipeline against a local Moto-backed AWS environment without deploying to real AWS.
+The Lambda ZIP E2E scripts run the full write → build → query pipeline against a local Moto-backed AWS environment without deploying to real AWS, using the production ZIP template (`template.yaml`).
 
 ### Prerequisites
 
 - **SAM CLI** — `brew install aws-sam-cli`
 - **AWS CLI** — for SQS polling helpers
-- **Docker** — for Lambda containers and Moto
+- **Docker** — for the builder image and Moto
 
 ### Embedding modes
 
@@ -160,75 +159,68 @@ The SAM Local E2E scripts run the full write → build → query pipeline agains
 
 The `ltembed` mode downloads an ort bundle (`model.ort`, `tokenizer.json`, `build-info.json`, `libonnxruntime.so`) during `docker build` from the public `minimal-ort-builder` release pinned in `sam/builder.Dockerfile` (override `LTEMBED_BUNDLE_URL` to test a different bundle). Rust tests that need real inference look for a sibling `../LTEmbed/ort_bundle/` checkout and skip when absent.
 
-### SAM invoke E2E (CI-compatible)
+### Lambda ZIP invoke E2E (CI-compatible)
 
-Runs the full pipeline via `sam local invoke` — no persistent SAM process needed.
+Packages the function ZIPs and drives them via `sam local invoke` against the production ZIP template.
 
 ```bash
 # Start Moto
 docker compose -f docker-compose.moto.yml up -d
 
-# Run fixed-embedding invoke flow (matches CI)
-bash scripts/e2e/run-sam-local-invoke-e2e.sh
+# Run stub-embedding ZIP flow (matches CI sam-zip-e2e)
+bash scripts/e2e/run-sam-zip-invoke-e2e.sh
 
-# Run LTEmbed invoke flow (downloads model on first run, ~471 MB)
-LTSEARCH_E2E_LTEMBED=true bash scripts/e2e/run-sam-local-invoke-e2e.sh
+# Run real-mode ZIP flow with S3→/tmp model assets (matches CI sam-ltembed-e2e;
+# downloads the pinned ort bundle on first run, ~471 MB)
+bash scripts/e2e/run-sam-ltembed-invoke-e2e.sh
 
 # Stop Moto
 docker compose -f docker-compose.moto.yml down -v
 ```
 
-### SAM start-api E2E (interactive / HTTP)
-
-Exposes `POST /write` and `POST /query` as a persistent local HTTP API. Useful for manual testing with curl or any HTTP client.
+### Native local flows (Docker-free / moto-free)
 
 ```bash
-# Start Moto + SAM API in background (fixed-embedding mode)
-bash scripts/e2e/start-sam-moto.sh
+# write → build → query with restart durability, native processes
+bash scripts/e2e/run-local-server-flow.sh
 
-# Run write → build → query HTTP flow with assertions
-bash scripts/e2e/run-http-flow.sh
-
-# Teardown
-bash scripts/e2e/stop-sam-moto.sh
+# static release build → activate → query (v3)
+bash scripts/e2e/run-static-release-flow.sh
 ```
 
-After `start-sam-moto.sh`, the API is available at `http://localhost:3000`:
+## Local Single-Image Mode
+
+The unified local image (`sam/local.Dockerfile`, published as `ghcr.io/lychee-technology/ltsearch-local`) is AWS-free: one image, five roles selected by subcommand (`write` / `build` / `query` / `static-build` / `static-activate`), backed by SQLite for durable events, build jobs, and release pointers.
 
 ```bash
-curl -X POST http://localhost:3000/write  -H 'Content-Type: application/json' -d @tests/fixtures/e2e/write_request.json
-curl -X POST http://localhost:3000/query  -H 'Content-Type: application/json' -d @tests/fixtures/e2e/query_request.json
+docker build --platform linux/arm64 -f sam/local.Dockerfile -t ltsearch-local:dev .
+docker compose -f docker-compose.local.yml up -d --wait
+bash scripts/e2e/run-local-image-flow.sh   # write → build → query + restart durability
+docker compose -f docker-compose.local.yml down -v
 ```
 
-`BuildFunction` has no HTTP route and must be invoked directly:
+To run a published release image instead of a local build, set
+`LTSEARCH_LOCAL_IMAGE=ghcr.io/lychee-technology/ltsearch-local:<tag>` for the compose commands
+(see [`docs/deployment.md`](docs/deployment.md)).
+
+`docker-compose.local.yml` runs three services (`write`, `build`, `query`) from the same image, sharing the named volume `ltsearch-local-data` mounted at `/var/lib/ltsearch` (`LTSEARCH_LOCAL_ROOT`). The volume holds the SQLite control plane (`ltsearch.db`) plus immutable index artifacts; `docker compose down` without `-v` preserves all state across restarts. See [`docs/deployment.md`](docs/deployment.md) for the operator guide.
+
+## Releases
+
+Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which:
+
+- assembles the release payload with `scripts/package-release.sh --mode real`: `query_lambda.zip`, `write_lambda.zip`, `index_builder_lambda.zip`, `model-assets.zip`, `release-provenance.json`, and `SHA256SUMS`;
+- builds and pushes exactly one local OCI image `ghcr.io/lychee-technology/ltsearch-local:<tag>` (arm64; `latest` only for stable semver tags);
+- creates a GitHub Release with all payload files attached (hyphenated tags are marked pre-release).
+
+Verify downloaded assets with `sha256sum -c SHA256SUMS`. `release-provenance.json` records the git SHA, workflow run, LTEmbed bundle pin, and per-artifact digests. Dry-run the assembly locally without publishing:
 
 ```bash
-sam local invoke BuildFunction \
-  --template-file .aws-sam/build/template.yaml \
-  --env-vars .e2e-tmp/env-vars.json \
-  --event .e2e-tmp/build-event.json \
-  --docker-network ltsearch-e2e
+bash scripts/package-release.sh --mode stub --version v0.0.0-dev
 ```
 
-## HTTP Server Mode
-
-除 Lambda 二进制外，三个组件还各有一个长驻 HTTP 服务二进制（`src/bin/{query,write,index_builder}_server.rs`），复用同一批 `handle_*` 请求核心，监听 `0.0.0.0:8080`，供 Fargate/ECS、本地 Compose 或 im4pe 侧编排直接以 HTTP 调用。
-
-| Image (ghcr.io/lychee-technology/…) | Endpoints | Key env |
-| --- | --- | --- |
-| ltsearch-query-server | POST /query, GET /health | LTSEARCH_QUERY_{EMBEDDING_PROVIDER,S3_BUCKET,ARTIFACT_ROOT,LTEMBED_BUNDLE_DIR,LTEMBED_MODEL_PATH} |
-| ltsearch-write-server | POST /write, POST /delete, GET /health | LTSEARCH_WRITE_{S3_BUCKET,SQS_QUEUE_URL} |
-| ltsearch-index-builder-server | POST /build, GET /health（设 LTSEARCH_BUILD_SQS_QUEUE_URL 后自动轮询建索引） | LTSEARCH_BUILD_{S3_BUCKET,SQS_QUEUE_URL,ARTIFACT_ROOT,EMBEDDING_PROVIDER,EMBEDDING_DIM,LTEMBED_BUNDLE_DIR,LTEMBED_MODEL_PATH} |
-
-镜像为 arm64、不内置 embedding 模型：`ltembed` 模式需把 LTEmbed bundle（model.ort / tokenizer.json /
-build-info.json / libonnxruntime.so，来自 minimal-ort-builder release）挂载进容器并用
-`*_LTEMBED_BUNDLE_DIR` / `*_LTEMBED_MODEL_PATH` 指向挂载路径；模型缺失或损坏时
-`GET /health` 返回 503 并附修复提示（query/index-builder 探测模型完整性，write 无模型依赖故 `/health` 恒 200；query 在无 `_head`
-的空索引下仍返回 200 且 `index_version` 为 null）。index-builder 设 `LTSEARCH_BUILD_SQS_QUEUE_URL` 后自动轮询
-构建队列（head+1 版本分配 + CAS 发布 `_head`），无需显式 POST /build；每次构建都列举 `wal/` 前缀下
-全部 WAL 段做全量快照重放，多次 write 的历史批次不会被新版本挤掉。本地全链路验证（write → SQS → 自动 build → query 命中）：
-`docker compose -f docker-compose.http.yml up -d --wait && bash scripts/e2e/run-http-server-flow.sh`
+CI validates the same assembly path on every PR via the `release-assembly` job (stub mode, checksum and provenance assertions, no publishing).
 
 ## Architecture
 
-See [`docs/arch.md`](docs/arch.md) for system architecture and [`docs/design.md`](docs/design.md) for the detailed design specification. Deployment (unified Docker image for Fargate + Lambda) is documented in [`docs/deployment.md`](docs/deployment.md).
+See [`docs/arch.md`](docs/arch.md) for system architecture and [`docs/design.md`](docs/design.md) for the detailed design specification. Deployment (local single image + Lambda ZIPs) is documented in [`docs/deployment.md`](docs/deployment.md).

@@ -12,18 +12,18 @@ high-quality retrieval for RAG pipelines and document search workloads:
 
 All three retrievers run **in-process, in parallel** inside one query binary — there is no
 per-retriever Lambda fan-out. The response is returned as two groups, `static_chunks` and
-`dynamic_chunks`. Compute is packaged as **Docker container images deployed on AWS Lambda today**;
-running the *same* image on **AWS Fargate is a planned target** (not yet implemented — see
-[`docs/deployment.md`](deployment.md) and [Known Gaps](#known-gaps-and-current-limitations)).
-Storage is S3.
+`dynamic_chunks`. Compute ships as **Lambda ZIP artifacts** (`provided.al2023`, arm64) on AWS and
+as an **AWS-free local single image** backed by SQLite (see
+[`docs/deployment.md`](deployment.md)). Storage is S3 (AWS) or a local volume (local image).
 
 The architecture supports moderate traffic (~20 QPS average, burst to 500 QPS) with sub-300ms
 latency SLA, handling datasets up to 10M documents. Updates are processed through near-real-time
 batch indexing, using versioned index publishing with an **ETag compare-and-swap** on the
 `index/_head` pointer for atomic, zero-downtime updates.
 
-Embeddings are produced locally by the `jina-embeddings-v5-text-nano-retrieval` ONNX model baked
-into the image; the model outputs 768-dim raw vectors that the engine Matryoshka-truncates and
+Embeddings are produced locally by the `jina-embeddings-v5-text-nano-retrieval` ONNX model
+(provisioned S3→/tmp at cold start on Lambda, mounted or bundled locally); the model outputs
+768-dim raw vectors that the engine Matryoshka-truncates and
 L2-renormalizes to **512-dim**, which is the dimension used end-to-end.
 
 > **Alignment note.** Earlier revisions of this document described a Lambda-only fan-out topology,
@@ -35,15 +35,15 @@ L2-renormalizes to **512-dim**, which is the dimension used end-to-end.
 
 The system follows a layered architecture with clear separation between query execution, storage, and indexing pipelines.
 
-The three deployables are `query`, `write`, and `index_builder` (each a container image running on
-Lambda or Fargate). Retrieval happens **in-process** inside the query image — the boxes inside
-`QueryRouter` below are parallel threads, not separate functions.
+The three deployables are `query`, `write`, and `index_builder` (Lambda ZIP functions on AWS;
+subcommands of the unified local image locally). Retrieval happens **in-process** inside the query
+process — the boxes inside `QueryRouter` below are parallel threads, not separate functions.
 
 ```mermaid
 graph TB
     Client[Client Application]
 
-    subgraph "Query image (one process, Lambda or Fargate)"
+    subgraph "Query process (Lambda ZIP or local image)"
         Router[QueryRouter]
         Static[Static retriever: TurboQuant mmap]
         VectorR[Vector retriever: LanceDB]
@@ -449,7 +449,8 @@ pub struct IndexCache {
 **Note**: `IndexCache` is a model/validator. On Lambda the query image syncs the `index/`, `lance/`,
 and `static/` prefixes from S3 into `LTSEARCH_QUERY_ARTIFACT_ROOT` per invocation and caches the
 bootstrapped handler per active `version_id`; the live vector path tracks cache stats via
-`LocalLanceCache`. On Fargate, the always-on process keeps the synced artifacts and handler warm.
+`LocalLanceCache`. In the local single image, the always-on query service keeps the artifacts and
+handler warm.
 
 ## Key Functions with Formal Specifications
 
@@ -1329,7 +1330,7 @@ Target latency budget (300ms SLA):
 **Trade-offs**:
 - Lower per-container memory per shard
 - Sequential shard iteration trades some latency for simplicity
-- Larger corpora are better served by the always-on Fargate path (no repeated cold sync)
+- Larger corpora are better served by an always-on deployment such as the local single image (no repeated cold sync)
 
 ### Memory Management
 
@@ -1442,19 +1443,18 @@ Target latency budget (300ms SLA):
 - `ltembed` (git dependency, `optional`, behind the `ltembed` feature): wraps the LTEmbed ONNX
   engine (`jina-embeddings-v5-text-nano-retrieval`, 512-dim output)
 - `ort` (2.0.0-rc, `load-dynamic`): ONNX Runtime bindings — the `libonnxruntime.so` ships in the
-  baked ort bundle, so the compiled binary is architecture-portable (arm64) across Lambda/Fargate
+  ort bundle, so the compiled binary is architecture-portable within arm64
 - Default build uses `--no-default-features`; the `fixed` deterministic stub provider replaces the
   model in CI and unit tests (vendored `ltembed-stub` crate satisfies the optional git dep)
 
 ### AWS Services
 
 **Compute**:
-- Container images (`PackageType: Image`, arm64) run on **AWS Lambda** today (custom-runtime base).
-  Running the same image on **AWS Fargate/ECS** (plain al2023 base + Lambda Web Adapter) is the
-  planned target — see `docs/deployment.md`.
-- Lambda function memory: 1-10 GB; (planned) Fargate task sized per corpus
-- Lambda timeout: 30 seconds (query), up to 15 minutes (indexing); a Fargate service would have no
-  such limit
+- Lambda ZIP functions (`provided.al2023` custom runtime, arm64, `bootstrap` at the zip root) —
+  see `template.yaml` and `docs/deployment.md`. Local deployments run the AWS-free single image
+  instead of Lambda.
+- Lambda function memory: 1-10 GB (query/build 3008 MB in the production template)
+- Lambda timeout: 30 seconds (query), up to 15 minutes (indexing)
 
 **Storage**:
 - Amazon S3 (Standard storage class)
@@ -1506,11 +1506,9 @@ time only.)
 This document describes the implemented system; the following are known gaps where behavior is
 incomplete or intentionally deferred. They are recorded so the spec does not overstate a closed loop.
 
-1. **SQS → build is not auto-wired end-to-end.** `BuildFunction` has no SQS `EventSource` in
-   `template.sam-e2e.yaml` (it is invoke-only), and the enqueued
-   `QueueBatch { batch_id, wal_key, accepted_count, wal_event_ids }` does not carry the
-   `version_id` / `embedding_dim` that `BuildRequest` requires. Version allocation and payload
-   translation are an external/missing orchestration step.
+1. ~~**SQS → build is not auto-wired end-to-end.**~~ **Closed** — the production `template.yaml`
+   wires `BuildFunction` to an SQS `EventSource` (partial-batch failure + DLQ redrive), and the
+   builder allocates head+1 versions and CAS-publishes `_head` (#105/#109).
 2. **`ContextBuilder` is not invoked in the query path.** `src/query/context_builder.rs` (the
    `6 * top_k` LLM-context assembler, token budgeting, corpus-weight system prompt) is fully
    implemented and unit-tested but `QueryRouter::search` returns the raw grouped chunks; context
@@ -1521,6 +1519,6 @@ incomplete or intentionally deferred. They are recorded so the spec does not ove
    bucket-relative keys is a separate, backward-compatibility-sensitive change (see
    `docs/architecture-review-2026-07-05.md`). Note `ManifestHead.manifest_path` is *already*
    bucket-relative and correct.
-4. **Deployment is Lambda container images today.** The unified Fargate + Lambda image (HTTP server
-   + Lambda Web Adapter) described in `docs/arch.md` §22 and `docs/deployment.md` is the target;
-   it is not yet implemented.
+4. ~~**Deployment is Lambda container images today.**~~ **Closed** — deployment is Lambda ZIP
+   artifacts + an AWS-free local single image (#106/#113); the earlier Fargate/Web-Adapter
+   container target was superseded (#103). See `docs/arch.md` §22 and `docs/deployment.md`.

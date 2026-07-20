@@ -11,6 +11,10 @@ readonly BUILDER_IMAGE="${LTSEARCH_BUILDER_IMAGE:-ltsearch-lambda-zip-builder}"
 # real = features lambda,ltembed（生产档，模型资产由 S3→/tmp 冷启动供给，#111；
 # 需 .sam-local-deps/LTEmbed vendored checkout）。
 readonly LTEMBED_MODE="${LTSEARCH_LTEMBED_MODE:-stub}"
+# 可复现性（#113 review P1）：zip 会把文件 mtime 写进条目头，docker cp 出来的
+# mtime 是构建时刻——归一化到 SOURCE_DATE_EPOCH（默认 HEAD 提交时间）并以
+# TZ=UTC 打包（zip 存 DOS 本地时间），同一 commit 的产物字节稳定。
+readonly SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$REPO_ROOT" log -1 --format=%ct)}"
 
 DOCKER_BUILDKIT=1 docker build \
   --platform linux/arm64 \
@@ -41,7 +45,9 @@ docker run --rm --platform linux/arm64 \
   bash -c 'strip /dist/query_lambda/bootstrap /dist/write_lambda/bootstrap /dist/index_builder_lambda/bootstrap'
 
 for fn in query_lambda write_lambda index_builder_lambda; do
-  (cd "$DIST_DIR/$fn" && zip -q -X "$DIST_DIR/$fn.zip" bootstrap)
+  python3 -c 'import os, sys; t = int(sys.argv[1]); os.utime(sys.argv[2], (t, t))' \
+    "$SOURCE_DATE_EPOCH" "$DIST_DIR/$fn/bootstrap"
+  (cd "$DIST_DIR/$fn" && TZ=UTC zip -q -X "$DIST_DIR/$fn.zip" bootstrap)
 done
 
 echo "packaged lambda zips into $DIST_DIR" >&2

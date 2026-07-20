@@ -28,12 +28,11 @@ class CiWorkflowTest(unittest.TestCase):
                 "fast",
                 "feature-matrix",
                 "integration",
-                "sam-e2e",
                 "sam-zip-e2e",
                 "sam-ltembed-e2e",
-                "http-e2e",
                 "local-image-e2e",
                 "local-e2e",
+                "release-assembly",
             },
         )
 
@@ -50,6 +49,7 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("cache: true", fast)
         self.assertIn("run: python3 -B tests/test_ci_workflow.py", fast)
         self.assertIn("run: python3 -B tests/test_readme_workflow.py", fast)
+        self.assertIn("run: python3 -B tests/test_release_workflow.py", fast)
         self.assertIn("run: bash scripts/verify-fast.sh", fast)
         self.assertNotIn("docker compose -f docker-compose.moto.yml up -d", fast)
 
@@ -112,44 +112,23 @@ class CiWorkflowTest(unittest.TestCase):
             "run: cargo clippy --all-targets --all-features -- -D warnings", integration
         )
 
-        sam_e2e = jobs["sam-e2e"]
-        self.assertIn("needs: integration", sam_e2e)
-        self.assertIn("runs-on: ubuntu-24.04-arm", sam_e2e)
-        self.assertIn("timeout-minutes: 120", sam_e2e)
-        self.assertIn("uses: actions/checkout@v6", sam_e2e)
-        self.assertIn("uses: actions/setup-python@v6", sam_e2e)
-        self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", sam_e2e)
-        self.assertIn("run: python3 -B tests/test_sam_invoke_e2e.py", sam_e2e)
+        # release 组装校验（#113）：stub 模式跑通 package-release.sh 全链路并回验
+        # checksums/provenance 结构；绝不发布（无 ghcr、无 gh release）。
+        release_assembly = jobs["release-assembly"]
+        self.assertIn("needs: integration", release_assembly)
+        self.assertIn("runs-on: ubuntu-24.04-arm", release_assembly)
+        self.assertIn("timeout-minutes: 120", release_assembly)
+        self.assertIn("uses: actions/checkout@v6", release_assembly)
+        self.assertIn("uses: actions/setup-python@v6", release_assembly)
+        self.assertIn("run: python3 -B tests/test_release_workflow.py", release_assembly)
         self.assertIn(
-            "run: python3 -m pip install --upgrade pip awscli aws-sam-cli", sam_e2e
+            "run: bash scripts/package-release.sh --mode stub --version v0.0.0-ci",
+            release_assembly,
         )
-        self.assertIn("run: docker compose -f docker-compose.moto.yml up -d", sam_e2e)
-        self.assertIn("run: bash scripts/e2e/run-sam-local-invoke-e2e.sh", sam_e2e)
-        self.assertIn(
-            "if: always()\n        run: docker compose -f docker-compose.moto.yml down -v",
-            sam_e2e,
-        )
-
-        http_e2e = jobs["http-e2e"]
-        self.assertIn("needs: integration", http_e2e)
-        self.assertIn("runs-on: ubuntu-24.04-arm", http_e2e)
-        self.assertIn("timeout-minutes: 120", http_e2e)
-        self.assertIn("uses: actions/checkout@v6", http_e2e)
-        self.assertIn("uses: actions/setup-python@v6", http_e2e)
-        self.assertIn(
-            "docker build --platform linux/arm64 -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=stub .",
-            http_e2e,
-        )
-        # #130：产物架构守卫——构建后必须 docker inspect 断言 arm64。
-        self.assertIn("docker inspect --format '{{.Architecture}}'", http_e2e)
-        self.assertIn(
-            "docker compose -f docker-compose.http.yml up -d --wait", http_e2e
-        )
-        self.assertIn("bash scripts/e2e/run-http-server-flow.sh", http_e2e)
-        self.assertIn(
-            "if: always()\n        run: docker compose -f docker-compose.http.yml down -v",
-            http_e2e,
-        )
+        self.assertIn("sha256sum -c SHA256SUMS", release_assembly)
+        self.assertIn("release-provenance.json", release_assembly)
+        self.assertNotIn("ghcr", release_assembly)
+        self.assertNotIn("gh release", release_assembly)
 
         # 单镜像 SQLite 本地链路（#125）：moto-free、无 awscli/sam，一个镜像三个
         # 角色 + 保留卷重启断言（在 run-local-image-flow.sh 内）。
