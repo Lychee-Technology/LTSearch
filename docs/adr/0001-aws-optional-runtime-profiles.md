@@ -130,3 +130,19 @@ Adapter public signatures, the server binaries, and the AWS-free local
 profile guarantee (the guard invariant above) are unaffected. See
 `docs/superpowers/plans/2026-07-16-issue-109-lambda-zip.md` and #109 for the
 full contract migration; deployment-doc calibration follows in #113.
+
+## Addendum (2026-07-19, #113)
+
+The per-component HTTP server binaries (`query_server`, `write_server`,
+`index_builder_server`) and their GHCR server images were **removed** together
+with the image-based Lambda deployment surfaces (component-image publishing is
+replaced by the tag-triggered release workflow shipping one local image + three
+Lambda ZIPs). Consequence updates:
+
+- The "Server + offline binaries" bullet above now reads: offline/ops binaries
+  (`turbo_index_builder`, `static_activate`) require `--features aws`.
+- The **feature graph is unchanged**: `server` remains the shared axum HTTP
+  layer pulled by both `local` and `aws`; the guard invariant and the
+  `feature-matrix` job are unaffected.
+- The local single image (`sam/local.Dockerfile`, unified `ltsearch` binary) is
+  the shipped always-on deployment; AWS ships as ZIP functions only.

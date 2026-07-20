@@ -7,27 +7,27 @@
 This document describes the architecture of a **hybrid search system** built using:
 
 * **Rust runtime**
-* **Docker container images** on **AWS Lambda** today; **AWS Fargate** is the planned target (see [§22](#22-deployment-topology-docker-fargate--lambda))
+* **Lambda ZIP artifacts** (`provided.al2023`, arm64) on **AWS Lambda**, plus an **AWS-free local single image** backed by SQLite (see [§22](#22-deployment-topology-local-single-image--lambda-zip))
 * **Amazon S3 (storage)**
 * **TurboQuant** — a custom zero-copy mmap index for the **static** authoritative corpus (see `docs/TurboQuant.md`)
 * **LanceDB** — vector search for the **dynamic** user corpus
 * **Tantivy** — BM25 keyword search
-* **jina-embeddings-v5-text-nano-retrieval** — a local ONNX embedding model (512-dim), baked into the image
+* **jina-embeddings-v5-text-nano-retrieval** — a local ONNX embedding model (512-dim), provisioned S3→/tmp at cold start (§21)
 
 The system is designed for **RAG retrieval and document search workloads** with moderate traffic and burst elasticity.
 
 The architecture emphasizes:
 
 * **low infrastructure cost**
-* **elastic scalability** (event-driven on Lambda today; always-on on Fargate is the planned target)
+* **elastic scalability** (event-driven on Lambda; the local single image serves AWS-free deployments)
 * **simplified operational management**
 
 > **Note on "serverless" and deployment status.** The original design targeted a Lambda-only,
 > fan-out-per-retriever topology. The implemented system is a single-process engine that runs all
-> retrieval in-process, packaged as a **container image deployed on AWS Lambda today**. Running the
-> *same* image on AWS Fargate is a **planned target, not yet implemented** (tracked in #103); it is
-> described under [§22 Deployment Topology](#22-deployment-topology-docker-fargate--lambda). Except
-> for that §22 material, sections below reflect the current implementation.
+> retrieval in-process, shipped as **Lambda ZIP artifacts** on AWS and as an **AWS-free local
+> single image**（#106/#113）. The earlier Fargate/Web-Adapter container target was superseded
+> (#103); see [§22 Deployment Topology](#22-deployment-topology-local-single-image--lambda-zip).
+> Sections below reflect the current implementation.
 
 ---
 
@@ -80,11 +80,11 @@ The system follows three design principles.
 
 Data stored in **S3 object storage**.
 
-Compute provided by **stateless container images** — deployed as Lambda functions today; the same
-image is intended to run as always-on Fargate services/tasks (planned, see §22).
+Compute provided by **stateless function artifacts** — Lambda ZIP functions on AWS; the local
+single image runs the same cores as long-lived services against SQLite + local volume (see §22).
 
 Storage → persistent  
-Compute → ephemeral (Lambda) or long-lived (planned Fargate)
+Compute → ephemeral (Lambda) or long-lived (local services)
 
 Advantages:
 
@@ -100,8 +100,8 @@ All search operations execute on demand.
 
 request → Lambda invocation
 
-No always-running infrastructure in the current (Lambda) deployment. The planned Fargate path (§22)
-deliberately trades this for an always-on service that keeps the embedding model warm.
+No always-running infrastructure in the AWS (Lambda) deployment. The local single-image deployment
+deliberately trades this for always-on services that keep the embedding model warm.
 
 ---
 
@@ -130,8 +130,8 @@ query binary runs three retrievers in parallel **in-process** (`std::thread::sco
                      Query API / HTTP
                           |
                   +-------v--------+
-                  |  QueryRouter   |   one process (query image)
-                  |  (Rust)        |   runs on Lambda OR Fargate
+                  |  QueryRouter   |   one process
+                  |  (Rust)        |   Lambda ZIP or local image
                   +-------+--------+
                           |
      +--------------------+--------------------+
@@ -616,23 +616,23 @@ docker build --platform linux/arm64 \
   → downloads and unpacks the bundle into /ltembed-assets/
   → compiles Rust binaries with --features ltembed
     (against the LTEmbed checkout staged at .sam-local-deps/LTEmbed)
-
-sam build
-  → index_builder_lambda.Dockerfile: COPY --from=builder /ltembed-assets /ltembed-assets
-  → query_lambda.Dockerfile:         COPY --from=builder /ltembed-assets /ltembed-assets
 ```
+
+ZIP + S3→/tmp 是唯一的 AWS 资产谱系（image-based Lambda 已于 #113 移除）；
+release 自动化把同一份 `dist/model-assets/` 打成 `model-assets.zip` 随 GitHub
+Release 交付（`scripts/package-release.sh`），运维解压后整目录上传 S3。
 
 The default `LTEMBED_MODE=stub` skips the download and satisfies the ltembed git dependency with the vendored stub crate; binaries are built without the `ltembed` feature and use the `fixed` provider. This is the CI default. `LTEMBED_MODE=real` downloads the pinned default `LTEMBED_BUNDLE_URL` (overridable to bump the model version) and fails the build loudly only if that URL is explicitly emptied or unreachable.
 
-Bundle files by delivery lineage:
+Bundle files (Lambda ZIP lineage, S3→/tmp, #111):
 
-| File | Container image path | Lambda ZIP path (S3→/tmp, #111) |
-| ---- | -------------------- | ------------------------------- |
-| `model.ort` | `/ltembed-assets/model.ort` | `/tmp/ltembed/model.ort` |
-| `tokenizer.json` | `/ltembed-assets/tokenizer.json` | `/tmp/ltembed/tokenizer.json` |
-| `build-info.json` | `/ltembed-assets/build-info.json` | `/tmp/ltembed/build-info.json` |
-| `libonnxruntime.so` | `/ltembed-assets/libonnxruntime.so` | `/tmp/ltembed/libonnxruntime.so` (both resolved automatically by the engine; `ort` is built with `load-dynamic`) |
-| `manifest.json` | –（镜像 bake 不需要） | `/tmp/ltembed/manifest.json`（完整性标记，最后落盘） |
+| File | Runtime path |
+| ---- | ------------ |
+| `model.ort` | `/tmp/ltembed/model.ort` |
+| `tokenizer.json` | `/tmp/ltembed/tokenizer.json` |
+| `build-info.json` | `/tmp/ltembed/build-info.json` |
+| `libonnxruntime.so` | `/tmp/ltembed/libonnxruntime.so`（引擎自动解析；`ort` 以 `load-dynamic` 构建） |
+| `manifest.json` | `/tmp/ltembed/manifest.json`（完整性标记，最后落盘） |
 
 ---
 
@@ -651,69 +651,46 @@ With `ltembed`, embedding generation adds latency versus the fixed stub:
 | Embedding generation | ~0 ms | 20–40 ms |
 | Total query latency | 50–150 ms (warm) | 70–190 ms (warm) |
 
-The model is loaded once per container lifetime (warm path reuse). On Fargate this is once per
-task; on Lambda, once per warm container.
+The model is loaded once per container lifetime (warm path reuse): on Lambda, once per warm
+container; in the local single image, once per long-lived service process.
 
 ---
 
-# **22\. Deployment Topology (Docker: Fargate + Lambda)**
+# **22\. Deployment Topology (Local single image + Lambda ZIP)**
 
-> **Status: target/planned.** The serving path already ships as a Lambda **container image**.
-> This section documents the intended unified topology so one image per component runs unchanged
-> on **both AWS Fargate and AWS Lambda**. The concrete runbook lives in
-> [`docs/deployment.md`](deployment.md); the code/Dockerfile/template changes are follow-up work.
+> **Status: shipped（#106/#113）.** 两个部署形态，各自最贴合的载体；早先的
+> 「统一镜像跑 Fargate + Lambda（Web Adapter）」目标拓扑已被取代（#103
+> superseded，组件 server 镜像与 image-based Lambda 于 #113 移除）。运维 runbook
+> 见 [`docs/deployment.md`](deployment.md)。
 
-## Why Docker for both
+## Local: one AWS-free image, five roles
 
-#111 实测更正：模型资产（~139 MiB unzipped）本身装得进 Lambda Layer，但函数二进制
-（lance/datafusion 依赖，strip 后仍 ~180 MiB）+ Layer 超出「函数 + Layer 解压合计 ≤ 250MB」
-硬限——生产 Lambda ZIP 路线因此走 **S3→/tmp 冷启动供给**（见 §21），不依赖容器镜像。Docker
-双运行时的动机不再是「模型超 Layer 限制」，而是：running the same image on **Fargate** gives
-an always-on service that loads the model once (no per-invoke cold start) and sidesteps Lambda's
-15-minute / 10 GB `/tmp` limits for the index builder.
+`sam/local.Dockerfile`（发布为 `ghcr.io/lychee-technology/ltsearch-local`，arm64）
+编译单一 `ltsearch` 二进制（`--features local`，AWS-free 依赖图由 CI feature-matrix
+强制）。`ENTRYPOINT /app/ltsearch`、无 CMD——同一镜像以子命令扮演
+`write` / `build` / `query` / `static-build` / `static-activate` 五个角色。
+`docker-compose.local.yml` 三服务共享命名卷 `/var/lib/ltsearch`：SQLite 控制面
+（durable events、build 队列、动态与静态 head 指针）+ 不可变索引制品；重启不丢
+状态。静态检索不 bake 进镜像，运行时经激活指针 `static/_head` →
+`static/releases/<id>/` 解析。
 
-## One image, two runtimes — via the Lambda Web Adapter
+## AWS: Lambda ZIP（provided.al2023 / arm64）
 
-Each component's binary becomes a plain **HTTP server** on `0.0.0.0:8080`
-(query → `POST /query` + `GET /health`; write → `POST /write`, `POST /delete`;
-index_builder → `POST /build` + health). The transport-agnostic cores already exist
-(`handle_search_request`, `handle_write_request`, `handle_build_request`), so this is a thin
-transport swap.
+三个函数 ZIP（`bootstrap` 置 zip 根，strip 强制）由 `template.yaml` 部署：
 
-The [**AWS Lambda Web Adapter**](https://github.com/awslabs/aws-lambda-web-adapter) is baked in as
-a Lambda extension:
+| Component | Trigger |
+| --- | --- |
+| query | HTTP API `POST /query` |
+| write | HTTP API `POST /write`、`POST /delete` |
+| index_builder | SQS EventSource（partial-batch failure + DLQ redrive） |
 
-```dockerfile
-COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:0.9.x /lambda-adapter /opt/extensions/lambda-adapter
-```
-
-* On **Lambda**, the extension boots the app and bridges API-Gateway / SQS events to
-  `http://localhost:8080`.
-* On **Fargate/ECS**, the extension file is inert; the container simply runs the HTTP server.
-
-Relevant env knobs: `AWS_LWA_PORT=8080`, `AWS_LWA_READINESS_CHECK_PATH=/health`, plus event
-pass-through config for the SQS-driven builder.
-
-## Image base and unification
-
-Move each runtime image from `public.ecr.aws/lambda/provided:al2023-arm64` to a plain
-`public.ecr.aws/amazonlinux/amazonlinux:2023` (arm64) base, reusing the existing multi-stage
-`sam/builder.Dockerfile` compile stage. The divergent top-level `Dockerfile` (x86,
-`CMD [bootstrap]`) is folded into this arm64 lineage as a single source of truth. Static
-retrieval bakes no index into the image; it is resolved at runtime through the activation
-pointer `static/_head` → `static/releases/<id>/` (see the static-activate flow).
-
-## Platform mapping (all three components)
-
-| Component | Fargate | Lambda |
-| --- | --- | --- |
-| query | ECS service (always-on, behind ALB) | Function behind API Gateway |
-| write | ECS service | Function behind API Gateway |
-| index_builder | ECS task (queue-driven) | Function with SQS EventSource |
+模型资产走 §21 的 S3→/tmp 冷启动供给，不进函数包。Release 自动化
+（`.github/workflows/release.yml`，tag `v*`）把 local 镜像 + 3 ZIP +
+`model-assets.zip` + SHA256SUMS + provenance 一次产出。
 
 ## Architecture portability caveat
 
 `ort` is built with `load-dynamic`, so the compiled binary + `libonnxruntime.so` are decoupled and
-portable **as long as the CPU architecture matches**. The pinned bundle is `linux-arm64`, so both
-Fargate and Lambda must run on **arm64 (Graviton)**. Targeting x86_64 Fargate would require an
-x86_64 `minimal-ort-builder` bundle and a matching `LTEMBED_BUNDLE_URL`.
+portable **as long as the CPU architecture matches**. The pinned bundle is `linux-arm64`, so Lambda
+functions must run on **arm64 (Graviton)** and the local image is arm64-only. Targeting x86_64
+would require an x86_64 `minimal-ort-builder` bundle and a matching `LTEMBED_BUNDLE_URL`.
