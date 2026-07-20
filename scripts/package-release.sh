@@ -18,6 +18,11 @@ set -euo pipefail
 readonly REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 readonly DIST_DIR="${LTSEARCH_DIST_DIR:-$REPO_ROOT/dist}"
 readonly RELEASE_DIR="$DIST_DIR/release"
+# 可复现性（#113 review P1）：所有归档 mtime 与 provenance built_at 统一取
+# SOURCE_DATE_EPOCH（默认 HEAD 提交时间）——同一 commit 重复组装，4 个 zip 与
+# provenance（本地无 workflow 字段时）字节级一致。export 使 package-lambda-zips.sh
+# 共享同一时钟。
+export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$REPO_ROOT" log -1 --format=%ct)}"
 
 mode="real"
 version=""
@@ -63,7 +68,19 @@ for fn in query_lambda write_lambda index_builder_lambda; do
 done
 # model-assets.zip 顶层含 model-assets/ 目录（解压后可整目录
 # `aws s3 cp --recursive model-assets s3://<bucket>/<ModelAssetPrefix>/`）。
-(cd "$DIST_DIR" && zip -q -r -X "$RELEASE_DIR/model-assets.zip" model-assets)
+# mtime 归一化到 SOURCE_DATE_EPOCH + TZ=UTC，见文件头可复现性说明。
+python3 - "$SOURCE_DATE_EPOCH" "$DIST_DIR/model-assets" <<'PY'
+import os
+import sys
+
+epoch = int(sys.argv[1])
+root = sys.argv[2]
+os.utime(root, (epoch, epoch))
+for dirpath, dirnames, filenames in os.walk(root):
+    for name in (*dirnames, *filenames):
+        os.utime(os.path.join(dirpath, name), (epoch, epoch))
+PY
+(cd "$DIST_DIR" && TZ=UTC zip -q -r -X "$RELEASE_DIR/model-assets.zip" model-assets)
 
 # bundle pin 的单一来源是 sam/builder.Dockerfile 的 ARG 默认值（与
 # package-model-assets.sh 同一提取模式），显式覆盖时以环境变量为准。
@@ -118,8 +135,9 @@ provenance = {
     "schema_version": 1,
     "tag": version,
     "git_sha": os.environ["LTSEARCH_RELEASE_GIT_SHA"],
-    "built_at": datetime.datetime.now(datetime.timezone.utc)
-    .replace(microsecond=0)
+    "built_at": datetime.datetime.fromtimestamp(
+        int(os.environ["SOURCE_DATE_EPOCH"]), datetime.timezone.utc
+    )
     .isoformat()
     .replace("+00:00", "Z"),
     "workflow": workflow,

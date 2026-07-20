@@ -1,12 +1,15 @@
-# 单镜像本地（AWS-free）端到端拓扑（#125）：同一个 ltsearch-local:dev 镜像跑
+# 单镜像本地（AWS-free）端到端拓扑（#125）：同一个镜像跑
 # write / build / query 三个角色（仅 command: 不同），共享一个命名卷承载 SQLite
 # 控制面（ltsearch.db：耐久事件 / 构建队列 / 活跃指针）与不可变制品
 # （lance/、index/、版本 manifest）。无 moto、无 aws-init、无任何 AWS 环境变量。
 # 重启语义：`down`（不带 -v）保留卷 → `up` 后 query 仍服务已建版本、builder 仍
 # 能从持久化队列继续消费（见 scripts/e2e/run-local-image-flow.sh）。
+# 镜像经 LTSEARCH_LOCAL_IMAGE 选择：默认 ltsearch-local:dev（本地构建 / CI）；
+# 消费 GHCR 发布镜像时设 LTSEARCH_LOCAL_IMAGE=ghcr.io/lychee-technology/ltsearch-local:<tag>
+# （#113，见 docs/deployment.md）。
 services:
   write:
-    image: ltsearch-local:dev
+    image: ${LTSEARCH_LOCAL_IMAGE:-ltsearch-local:dev}
     command: ["write"]
     environment: &localenv
       LTSEARCH_LOCAL_ROOT: /var/lib/ltsearch
@@ -27,7 +30,7 @@ services:
     networks: [ltsearch-local]
 
   build:
-    image: ltsearch-local:dev
+    image: ${LTSEARCH_LOCAL_IMAGE:-ltsearch-local:dev}
     command: ["build"]
     environment: *localenv
     volumes:
@@ -36,7 +39,7 @@ services:
     networks: [ltsearch-local]
 
   query:
-    image: ltsearch-local:dev
+    image: ${LTSEARCH_LOCAL_IMAGE:-ltsearch-local:dev}
     command: ["query"]
     environment: *localenv
     volumes:

@@ -103,6 +103,34 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("ghcr", release_assembly)
         self.assertNotIn("gh release", release_assembly)
 
+    def test_release_inputs_pinned_and_timestamps_normalized(self) -> None:
+        # 可复现性（#113 review P1）：base 镜像 digest pin + dnf releasever 锁，
+        # 归档 mtime/built_at 统一 SOURCE_DATE_EPOCH、TZ=UTC 打包。
+        for dockerfile in ("sam/builder.Dockerfile", "sam/local.Dockerfile"):
+            content = (REPO_ROOT / dockerfile).read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if line.startswith("FROM "):
+                    self.assertIn(
+                        "@sha256:", line, f"{dockerfile}: unpinned base image: {line}"
+                    )
+            self.assertIn("/etc/dnf/vars/releasever", content, dockerfile)
+
+        zips_script = (REPO_ROOT / "scripts" / "package-lambda-zips.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("SOURCE_DATE_EPOCH", zips_script)
+        self.assertIn("TZ=UTC zip", zips_script)
+
+        release_script = PACKAGE_RELEASE_PATH.read_text(encoding="utf-8")
+        self.assertIn("SOURCE_DATE_EPOCH", release_script)
+        self.assertIn("TZ=UTC zip", release_script)
+
+        # 本地 runbook 可直接跑发布镜像（#113 review P2）：Compose 镜像可注入。
+        compose = (REPO_ROOT / "docker-compose.local.yml").read_text(encoding="utf-8")
+        self.assertEqual(
+            compose.count("image: ${LTSEARCH_LOCAL_IMAGE:-ltsearch-local:dev}"), 3
+        )
+
     def test_retired_publishing_surfaces_are_gone(self) -> None:
         # 组件镜像发布与 image-based Lambda 的墓碑（#113 裁决 1/2 及派生删除）。
         retired = [

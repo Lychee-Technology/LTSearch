@@ -1,6 +1,11 @@
 # ort_bundle 下载/校验独立成 bundle stage（#111）：Layer 打包只 build 该 stage
 # （--target bundle），不触发 cargo 编译、不需要 LTEmbed 源 checkout。
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS bundle
+#
+# 可复现性（#113 review P1）：base 镜像按 digest pin（对应 AL2023 release
+# 2023.12.20260710），dnf 以 /etc/dnf/vars/releasever 锁定同一 release 快照
+# （AL2023 默认 releasever=latest 是可变仓库指针）。bump base 时两处一起更新。
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023@sha256:590b8c9fdab65c7f5b8a2392739104ed6bc5055433ba8ff2bf0d2fa500db2ea3 AS bundle
+RUN echo "2023.12.20260710" > /etc/dnf/vars/releasever
 ARG LTEMBED_MODE=stub
 # ort_bundle tarball for jina-embeddings-v5-text-nano-retrieval, with
 # model.ort, tokenizer.json, build-info.json, libonnxruntime.so (linux/arm64)
@@ -26,7 +31,8 @@ RUN mkdir -p /ltembed-assets && \
       test -f /ltembed-assets/libonnxruntime.so; \
     fi
 
-FROM public.ecr.aws/amazonlinux/amazonlinux:2023 AS builder
+FROM public.ecr.aws/amazonlinux/amazonlinux:2023@sha256:590b8c9fdab65c7f5b8a2392739104ed6bc5055433ba8ff2bf0d2fa500db2ea3 AS builder
+RUN echo "2023.12.20260710" > /etc/dnf/vars/releasever
 RUN dnf install -y --allowerasing gcc gcc-c++ make perl pkgconfig openssl-devel git tar gzip curl && dnf clean all
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.94.0
 ENV PATH="/root/.cargo/bin:${PATH}"

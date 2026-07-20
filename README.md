@@ -199,6 +199,10 @@ bash scripts/e2e/run-local-image-flow.sh   # write → build → query + restart
 docker compose -f docker-compose.local.yml down -v
 ```
 
+To run a published release image instead of a local build, set
+`LTSEARCH_LOCAL_IMAGE=ghcr.io/lychee-technology/ltsearch-local:<tag>` for the compose commands
+(see [`docs/deployment.md`](docs/deployment.md)).
+
 `docker-compose.local.yml` runs three services (`write`, `build`, `query`) from the same image, sharing the named volume `ltsearch-local-data` mounted at `/var/lib/ltsearch` (`LTSEARCH_LOCAL_ROOT`). The volume holds the SQLite control plane (`ltsearch.db`) plus immutable index artifacts; `docker compose down` without `-v` preserves all state across restarts. See [`docs/deployment.md`](docs/deployment.md) for the operator guide.
 
 ## Releases

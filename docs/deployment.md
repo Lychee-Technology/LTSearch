@@ -23,6 +23,15 @@
 下载后验证：`sha256sum -c SHA256SUMS`。发布前 `scripts/check-lambda-size-budget.sh`
 强制单函数解压 ≤250MB、bootstrap AArch64、资产 hash/预算复核。
 
+**可复现性边界**：构建输入全部钉死——base 镜像按 digest pin + dnf releasever 锁
+（`sam/builder.Dockerfile` / `sam/local.Dockerfile`）、Rust toolchain 1.94.0、
+`Cargo.lock` + vendored stub、LTEmbed rev 随 lockfile、ort bundle URL+sha256 pin；
+归档 mtime 与 provenance `built_at` 统一取 `SOURCE_DATE_EPOCH`（默认 HEAD 提交
+时间，TZ=UTC 打包）。同一 commit 重复运行 `package-release.sh`，4 个 zip 与本地
+provenance 字节级一致；CI 版 provenance 含 workflow run 字段（run 各异，属预期
+元数据）。OCI 镜像 rebuild 走同一 pinned 输入，但镜像层哈希含构建时间戳，digest
+不承诺逐字节复现——以 GHCR registry 的已发布 digest 为权威。
+
 **Tag 纪律**：CI 不在 tag 上运行——只对 main 上已绿的 commit 打 tag。CI 的
 `release-assembly` job 在每个 PR 上以 stub 模式校验同一条组装路径（不发布）。
 
@@ -33,9 +42,16 @@
 无 AWS SDK、无 Moto、无 Lambda 运行时（feature `local`，CI feature-matrix 强制）。
 
 ```bash
-docker compose -f docker-compose.local.yml up -d --wait
+# 消费发布镜像（推荐）：pull 后经 LTSEARCH_LOCAL_IMAGE 注入 Compose
+docker pull ghcr.io/lychee-technology/ltsearch-local:<tag>
+LTSEARCH_LOCAL_IMAGE=ghcr.io/lychee-technology/ltsearch-local:<tag> \
+  docker compose -f docker-compose.local.yml up -d --wait
 # write :19081 /write /delete，query :19080 /query（127.0.0.1 绑定）
 ```
+
+不设 `LTSEARCH_LOCAL_IMAGE` 时 Compose 用本地构建的 `ltsearch-local:dev`
+（`docker build --platform linux/arm64 -f sam/local.Dockerfile -t ltsearch-local:dev .`，
+开发/CI 路径）。注意 `down` 等后续 compose 命令需带同一环境变量。
 
 `docker-compose.local.yml` 拓扑：`write` / `build` / `query` 三服务共用同一镜像，
 共享命名卷 `ltsearch-local-data` 挂载在 `/var/lib/ltsearch`
