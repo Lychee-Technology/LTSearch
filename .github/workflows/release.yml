@@ -1,0 +1,57 @@
+name: Release
+
+# tag `v*` 触发的发布自动化（#113）：package-release.sh 组装全套产物（real 模式）
+# → 构建并推送恰一个 local OCI 镜像（ghcr.io/lychee-technology/ltsearch-local，
+# arm64-only）→ gh release create 挂 dist/release 全部资产。main push 只跑 CI；
+# tag 纪律：只 tag main 上已绿的 commit（见 docs/deployment.md）。
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - name: Stage LTEmbed checkout for real-mode build
+        # path patch 会绕过 Cargo.lock 的 rev 锁定，必须 checkout 与 lockfile 一致的
+        # rev（LTEmbed HEAD 已切换 llama.cpp 后端，与本仓库的 ONNX 集成不兼容）
+        run: |
+          LTEMBED_REV="$(grep -A2 'name = "ltembed"' Cargo.lock | sed -n 's/.*LTEmbed?branch=main#\([0-9a-f]*\)".*/\1/p')"
+          test -n "$LTEMBED_REV"
+          git clone https://github.com/Lychee-Technology/LTEmbed .sam-local-deps/LTEmbed
+          git -C .sam-local-deps/LTEmbed checkout "$LTEMBED_REV"
+      - name: Assemble release payload (real embeddings)
+        run: bash scripts/package-release.sh --mode real --version "$GITHUB_REF_NAME"
+      - name: Build unified local image (arm64)
+        run: |
+          docker build --platform linux/arm64 -f sam/local.Dockerfile \
+            -t "ghcr.io/lychee-technology/ltsearch-local:$GITHUB_REF_NAME" .
+          arch=$(docker inspect --format '{{.Architecture}}' "ghcr.io/lychee-technology/ltsearch-local:$GITHUB_REF_NAME")
+          [ "$arch" = arm64 ] || { echo "::error::image is $arch, expected arm64"; exit 1; }
+      - name: Login GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Push image (latest only for stable semver)
+        run: |
+          docker push "ghcr.io/lychee-technology/ltsearch-local:$GITHUB_REF_NAME"
+          if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            docker tag "ghcr.io/lychee-technology/ltsearch-local:$GITHUB_REF_NAME" ghcr.io/lychee-technology/ltsearch-local:latest
+            docker push ghcr.io/lychee-technology/ltsearch-local:latest
+          fi
+      - name: Create GitHub Release with assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/release/* \
+            --title "$GITHUB_REF_NAME" --generate-notes --verify-tag "${prerelease[@]}"
