@@ -27,6 +27,7 @@ jobs:
           cache: true
       - run: python3 -B tests/test_ci_workflow.py
       - run: python3 -B tests/test_readme_workflow.py
+      - run: python3 -B tests/test_release_workflow.py
       - run: bash scripts/verify-fast.sh
 
   feature-matrix:
@@ -107,6 +108,38 @@ jobs:
       - run: bash scripts/e2e/run-sam-ltembed-invoke-e2e.sh
       - if: always()
         run: docker compose -f docker-compose.moto.yml down -v
+
+  # release 组装校验（#113，AC-c）：stub 模式跑通 scripts/package-release.sh 全链路
+  # （lambda zips → model-assets → 尺寸闸门 → 收拢 + provenance + SHA256SUMS），
+  # 回验 checksums 与 provenance 结构。只组装、不发布：发布面（GHCR push、
+  # GitHub Release）仅存在于 tag 触发的 release.yml。
+  release-assembly:
+    needs: integration
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - run: python3 -B tests/test_release_workflow.py
+      - run: bash scripts/package-release.sh --mode stub --version v0.0.0-ci
+      - run: cd dist/release && sha256sum -c SHA256SUMS
+      - name: Assert provenance structure
+        run: |
+          python3 - <<'PY'
+          import json
+          p = json.load(open("dist/release/release-provenance.json"))
+          assert p["schema_version"] == 1 and p["ltembed_mode"] == "stub"
+          assert {a["name"] for a in p["artifacts"]} == {
+              "query_lambda.zip",
+              "write_lambda.zip",
+              "index_builder_lambda.zip",
+              "model-assets.zip",
+          }
+          assert p["ltembed_bundle"]["url"] and len(p["ltembed_bundle"]["sha256"]) == 64
+          assert p["workflow"] and p["workflow"]["run_id"]
+          PY
 
   local-image-e2e:
     needs: integration
