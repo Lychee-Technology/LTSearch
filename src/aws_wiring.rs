@@ -1,7 +1,7 @@
 //! index_builder 的 AWS 接线闭包：build（读全部 WAL 段 → embedding → 建索引）、
-//! publish（CAS 发布）、WAL 段列举、embedding 健康 probe。原先内联在
-//! index_builder_server bin 中，抽到 lib 供 server 与 lambda 两个 bin 复用
-//! （#109：SQS 事件触发的 builder lambda 复用 process_queue_message 全链路）。
+//! publish（CAS 发布）、WAL 段列举、embedding 健康 probe。原先内联在已退役的
+//! index_builder_server bin 中（#113 删除），抽到 lib 后由 index_builder_lambda
+//! 复用（#109：SQS 事件触发的 builder lambda 复用 process_queue_message 全链路）。
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

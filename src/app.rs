@@ -338,7 +338,7 @@ where
 }
 
 /// build 闭包：按序读取全部 `wal_keys`（SQLite WAL）→ 构建 embedding 引擎 →
-/// `LocalIndexBuilder`（spawn_blocking）。与 `index_builder_server.rs` 的 AWS 版
+/// `LocalIndexBuilder`（spawn_blocking）。与 `src/aws_wiring.rs` 的 AWS 版
 /// 同构，仅把 WAL 后端从 S3 换成 SQLite、制品根换成本地根。
 fn local_build_closure(config: LocalConfig, db: SqliteDb) -> crate::http::build::BuildFn {
     Arc::new(move |request: SnapshotBuildRequest| {

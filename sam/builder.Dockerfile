@@ -46,24 +46,13 @@ RUN --mount=type=cache,id=ltsearch-cargo-registry,target=/root/.cargo/registry \
       cargo build --release --no-default-features --features lambda \
           --bin write_lambda \
           --bin index_builder_lambda \
-          --bin query_lambda && \
-      cargo build --release --no-default-features --features aws \
-          --bin write_server \
-          --bin index_builder_server \
-          --bin query_server; \
+          --bin query_lambda; \
     else \
       cargo build --release --no-default-features --features lambda,ltembed \
           --bin write_lambda \
           --bin index_builder_lambda \
-          --bin query_lambda && \
-      cargo build --release --no-default-features --features aws,ltembed \
-          --bin write_server \
-          --bin index_builder_server \
-          --bin query_server; \
+          --bin query_lambda; \
     fi && \
     cp target/release/write_lambda /write_lambda && \
     cp target/release/index_builder_lambda /index_builder_lambda && \
-    cp target/release/query_lambda /query_lambda && \
-    cp target/release/query_server /query_server && \
-    cp target/release/write_server /write_server && \
-    cp target/release/index_builder_server /index_builder_server
+    cp target/release/query_lambda /query_lambda

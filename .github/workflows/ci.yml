@@ -68,25 +68,6 @@ jobs:
       - if: always()
         run: docker compose -f docker-compose.moto.yml down -v
 
-  sam-e2e:
-    needs: integration
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.x'
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: true
-      - run: python3 -B tests/test_sam_invoke_e2e.py
-      - run: python3 -m pip install --upgrade pip awscli aws-sam-cli
-      - run: docker compose -f docker-compose.moto.yml up -d
-      - run: bash scripts/e2e/run-sam-local-invoke-e2e.sh
-      - if: always()
-        run: docker compose -f docker-compose.moto.yml down -v
-
   sam-zip-e2e:
     needs: integration
     runs-on: ubuntu-24.04-arm
@@ -126,33 +107,6 @@ jobs:
       - run: bash scripts/e2e/run-sam-ltembed-invoke-e2e.sh
       - if: always()
         run: docker compose -f docker-compose.moto.yml down -v
-
-  http-e2e:
-    needs: integration
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.x'
-      - name: Build server images (stub embeddings)
-        run: |
-          docker build --platform linux/arm64 -f sam/builder.Dockerfile -t ltsearch-e2e-builder --build-arg LTEMBED_MODE=stub .
-          docker build --platform linux/arm64 -f sam/write_server.Dockerfile -t ltsearch-write-server:dev .
-          docker build --platform linux/arm64 -f sam/index_builder_server.Dockerfile -t ltsearch-index-builder-server:dev .
-          docker build --platform linux/arm64 -f sam/query_server.Dockerfile -t ltsearch-query-server:dev .
-          for img in ltsearch-write-server:dev ltsearch-index-builder-server:dev ltsearch-query-server:dev; do
-            arch=$(docker inspect --format '{{.Architecture}}' "$img")
-            [ "$arch" = arm64 ] || { echo "::error::$img is $arch, expected arm64"; exit 1; }
-          done
-      - name: Run HTTP flow
-        run: |
-          docker compose -f docker-compose.http.yml up -d --wait
-          bash scripts/e2e/run-http-server-flow.sh
-      - name: Teardown
-        if: always()
-        run: docker compose -f docker-compose.http.yml down -v
 
   local-image-e2e:
     needs: integration

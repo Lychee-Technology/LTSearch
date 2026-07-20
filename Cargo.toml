@@ -112,21 +112,6 @@ path = "src/bin/index_builder_lambda.rs"
 required-features = ["lambda"]
 
 [[bin]]
-name = "query_server"
-path = "src/bin/query_server.rs"
-required-features = ["aws"]
-
-[[bin]]
-name = "write_server"
-path = "src/bin/write_server.rs"
-required-features = ["aws"]
-
-[[bin]]
-name = "index_builder_server"
-path = "src/bin/index_builder_server.rs"
-required-features = ["aws"]
-
-[[bin]]
 name = "static_activate"
 path = "src/bin/static_activate.rs"
 required-features = ["aws"]
