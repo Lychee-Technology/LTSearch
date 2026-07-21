@@ -63,6 +63,25 @@ fn embedding_dim_from_env() -> Result<usize, String> {
     }
 }
 
+/// 后台 worker 开关：缺失/空白/无法识别 → 启用（保持既有自动构建行为），仅显式
+/// falsy（`0`/`false`/`no`/`off`，忽略大小写与首尾空白）关闭。禁用后 build 角色
+/// 仅服务显式 `POST /build`，避免 worker 与显式请求竞争发版。
+pub fn build_worker_enabled_from_env() -> bool {
+    parse_worker_enabled(
+        std::env::var("LTSEARCH_BUILD_WORKER_ENABLED")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn parse_worker_enabled(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
 /// publish 侧 CAS 冲突：并发别处推进了 head，本次分配的版本已过期，需重读 head
 /// 重试。build 错误与其它 publish 错误不重试。
 fn is_publish_cas_conflict(error: &BuildLambdaError) -> bool {
@@ -206,4 +225,33 @@ pub async fn run_sqs_worker_loop<S: PublishStorage>(
 ) {
     let source = crate::adapters::sqs_job_source::SqsBuildJobSource::new(sqs, queue_url);
     run_build_job_loop(source, state, storage, list_wal_keys).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_worker_enabled;
+
+    /// 默认启用语义：缺失、空白与无法识别的值都不得静默关闭自动构建；HTTP
+    /// `/build` 的服务与 worker 无关（router 测试本就在无 worker 下运行），开关
+    /// 只决定是否 spawn 后台循环。
+    #[test]
+    fn worker_enabled_defaults_to_true_for_missing_blank_or_unknown_values() {
+        assert!(parse_worker_enabled(None));
+        assert!(parse_worker_enabled(Some("")));
+        assert!(parse_worker_enabled(Some("   ")));
+        assert!(parse_worker_enabled(Some("1")));
+        assert!(parse_worker_enabled(Some("true")));
+        assert!(parse_worker_enabled(Some("yes")));
+        assert!(parse_worker_enabled(Some("garbage")));
+    }
+
+    #[test]
+    fn worker_disabled_only_by_explicit_falsy_values() {
+        assert!(!parse_worker_enabled(Some("0")));
+        assert!(!parse_worker_enabled(Some("false")));
+        assert!(!parse_worker_enabled(Some("FALSE")));
+        assert!(!parse_worker_enabled(Some("no")));
+        assert!(!parse_worker_enabled(Some("off")));
+        assert!(!parse_worker_enabled(Some(" Off ")));
+    }
 }

@@ -219,6 +219,8 @@ async fn ingest_appends_upsert_records_and_enqueues_batch_metadata() {
     assert_eq!(records[1].op, WalOperation::Upsert);
     assert_eq!(records[1].doc_id, "doc-2");
     assert_eq!(records[1].document, Some(second));
+    assert!(!response.wal_key.is_empty());
+    assert_eq!(response.wal_key, wal_key);
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].batch_id, response.batch_id);
     assert_eq!(queued[0].wal_key, wal_key);
@@ -258,6 +260,8 @@ async fn delete_appends_delete_records_and_enqueues_batch_metadata() {
     assert_eq!(records[1].doc_id, "doc-2");
     assert_eq!(records[1].document, None);
     assert_eq!(records[1].timestamp, 1_700_000_086_400);
+    assert!(!response.wal_key.is_empty());
+    assert_eq!(response.wal_key, wal_key);
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].batch_id, response.batch_id);
     assert_eq!(queued[0].wal_key, wal_key);

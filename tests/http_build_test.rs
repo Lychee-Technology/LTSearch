@@ -16,7 +16,7 @@ use tower::ServiceExt;
 use ltsearch::error::IndexError;
 use ltsearch::http::build::{build_router, BuildServerState};
 use ltsearch::indexing::{BuildIndexResult, PublishResult};
-use ltsearch::models::{IndexManifest, ShardManifest};
+use ltsearch::models::{Document, IndexManifest, ShardManifest};
 
 async fn body_json(response: axum::response::Response) -> serde_json::Value {
     let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -89,6 +89,63 @@ async fn build_returns_200_envelope_on_success() {
     assert_eq!(json["document_count"], 0);
 }
 
+// 1b) 显式重建发布：publish 报告新旧版本，document_count 来自 build 结果。
+// 覆盖 #140「响应报告激活版本、前一版本和文档数」的完整信封。
+#[tokio::test]
+async fn build_reports_previous_version_when_replacing() {
+    let state = BuildServerState {
+        build: Arc::new(|_request| {
+            async {
+                Ok(BuildIndexResult {
+                    manifest: sample_manifest(),
+                    documents: vec![
+                        Document {
+                            doc_id: "doc-1".into(),
+                            text: "hello".into(),
+                            embedding: None,
+                            metadata: Default::default(),
+                            timestamp: 1_700_000_000_000,
+                        },
+                        Document {
+                            doc_id: "doc-2".into(),
+                            text: "world".into(),
+                            embedding: None,
+                            metadata: Default::default(),
+                            timestamp: 1_700_000_000_001,
+                        },
+                    ],
+                })
+            }
+            .boxed()
+        }),
+        publish: Arc::new(|_manifest, _expected| {
+            async {
+                Ok(PublishResult {
+                    activated_version_id: 2,
+                    previous_version_id: Some(1),
+                })
+            }
+            .boxed()
+        }),
+        embedding_probe: Arc::new(|| Ok(3)),
+    };
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::post("/build")
+                .header("content-type", "application/json")
+                .body(Body::from(sample_build_body().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["activated_version_id"], 2);
+    assert_eq!(json["previous_version_id"], 1);
+    assert_eq!(json["document_count"], 2);
+}
+
 // 2) build 失败 → 500 且 publish 未被调用（AtomicBool）。
 #[tokio::test]
 async fn build_failure_returns_500_and_does_not_publish() {
@@ -132,6 +189,45 @@ async fn build_failure_returns_500_and_does_not_publish() {
         !publish_called.load(Ordering::SeqCst),
         "publish 不应在 build 失败时被调用"
     );
+}
+
+// 2b) WAL 段不存在/不可读：build 闭包报 IndexError::Operation（local 侧
+// SqliteWalStorage::read → local_build_closure 即产生此形态）→ 500 build_error
+// 信封。锁定 #140「不存在或不可读取的 WAL 返回既定 build_error 契约」；真实
+// SQLite 缺段的端到端覆盖属 epic #139 的黑盒 E2E（#141+）。
+#[tokio::test]
+async fn build_missing_wal_returns_build_error() {
+    let state = BuildServerState {
+        build: Arc::new(|_request| {
+            async {
+                Err(IndexError::Operation {
+                    message: "failed to read WAL records from wal/2026/03/19/batch-abc.jsonl: \
+                              ingest operation failed: failed to read WAL wal/2026/03/19/batch-abc.jsonl: segment not found"
+                        .into(),
+                })
+            }
+            .boxed()
+        }),
+        publish: Arc::new(|_manifest, _expected| {
+            async { unreachable!("publish should not run when WAL read fails") }.boxed()
+        }),
+        embedding_probe: Arc::new(|| Ok(3)),
+    };
+    let app = build_router(state);
+    let response = app
+        .oneshot(
+            Request::post("/build")
+                .header("content-type", "application/json")
+                .body(Body::from(sample_build_body().to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = body_json(response).await;
+    assert_eq!(json["error_type"], "build_error");
+    let message = json["message"].as_str().unwrap();
+    assert!(message.contains("segment not found"), "message: {message}");
 }
 
 // 3) 畸形 body → 400 validation_error 信封。

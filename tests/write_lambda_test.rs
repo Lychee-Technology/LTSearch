@@ -35,6 +35,7 @@ fn write_lambda_maps_successful_ingest_to_response_envelope() {
                 accepted_count: documents.len(),
                 wal_event_ids: vec!["evt-1".into()],
                 batch_id: "batch-abc".into(),
+                wal_key: "wal/2023/11/14/batch-abc.jsonl".into(),
             })
         },
         async |_doc_ids| unreachable!("ingest should not call delete handler"),
@@ -44,6 +45,7 @@ fn write_lambda_maps_successful_ingest_to_response_envelope() {
     let response = result.unwrap();
     assert_eq!(response.accepted_count, 1);
     assert_eq!(response.batch_id, "batch-abc");
+    assert_eq!(response.wal_key, "wal/2023/11/14/batch-abc.jsonl");
 }
 
 #[test]
@@ -55,6 +57,7 @@ fn write_lambda_maps_successful_delete_to_response_envelope() {
                 accepted_count: doc_ids.len(),
                 wal_event_ids: vec!["evt-1".into(), "evt-2".into()],
                 batch_id: "batch-def".into(),
+                wal_key: "wal/2023/11/14/batch-def.jsonl".into(),
             })
         },
         sample_delete_request(),
@@ -64,6 +67,7 @@ fn write_lambda_maps_successful_delete_to_response_envelope() {
     assert_eq!(response.accepted_count, 2);
     assert_eq!(response.batch_id, "batch-def");
     assert_eq!(response.wal_event_ids, vec!["evt-1", "evt-2"]);
+    assert_eq!(response.wal_key, "wal/2023/11/14/batch-def.jsonl");
 }
 
 #[test]

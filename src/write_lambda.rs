@@ -15,6 +15,7 @@ pub struct WriteResponse {
     pub accepted_count: usize,
     pub wal_event_ids: Vec<String>,
     pub batch_id: String,
+    pub wal_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +57,7 @@ where
                 accepted_count: response.accepted_count,
                 wal_event_ids: response.wal_event_ids,
                 batch_id: response.batch_id,
+                wal_key: response.wal_key,
             })
         }
         WriteRequest::Delete { doc_ids } => {
@@ -66,6 +68,7 @@ where
                 accepted_count: response.accepted_count,
                 wal_event_ids: response.wal_event_ids,
                 batch_id: response.batch_id,
+                wal_key: response.wal_key,
             })
         }
     }
