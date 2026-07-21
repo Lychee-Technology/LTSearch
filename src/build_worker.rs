@@ -76,7 +76,8 @@ pub fn build_worker_enabled_from_env() -> bool {
 
 fn parse_worker_enabled(raw: Option<&str>) -> bool {
     !matches!(
-        raw.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
         Some("0" | "false" | "no" | "off")
     )
 }

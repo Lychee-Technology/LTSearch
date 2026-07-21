@@ -34,9 +34,10 @@ services:
     command: ["build"]
     environment:
       <<: *localenv
-      # 默认启用后台队列 worker；设为 "false"/"0"/"no"/"off" 时仅服务显式
-      # POST /build，供黑盒 E2E 显式发布流程使用（#140）。
-      LTSEARCH_BUILD_WORKER_ENABLED: "true"
+      # 默认启用后台队列 worker；宿主机设 LTSEARCH_BUILD_WORKER_ENABLED=false
+      # （或 0/no/off）时仅服务显式 POST /build，供黑盒 E2E 显式发布流程使用
+      # （#140）。经 ${...:-true} 插值透传，不覆盖宿主机显式取值。
+      LTSEARCH_BUILD_WORKER_ENABLED: ${LTSEARCH_BUILD_WORKER_ENABLED:-true}
     volumes:
       - ltsearch-data:/var/lib/ltsearch
     healthcheck: *hc

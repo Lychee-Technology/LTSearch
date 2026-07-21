@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use futures::future::FutureExt;
+use futures::future::{BoxFuture, FutureExt};
 
 use crate::bootstrap::{
     build_embedding_generator_from_env, build_embedding_provider_from_env,
@@ -80,6 +80,32 @@ pub async fn run_write() -> Result<(), AppError> {
     Ok(())
 }
 
+/// build 角色的组装：真实 build/publish 闭包接成 HTTP state，`worker_enabled`
+/// 决定是否附带后台队列 worker future（调用方负责 `tokio::spawn`）。拆出独立
+/// 函数使集成测试能不 stub 地驱动 `/build` 全链路，并直接断言 worker 开关的
+/// 组装决策（`run_build` 传入 `build_worker_enabled_from_env()` 的解析结果）。
+pub fn local_build_role(
+    config: &LocalConfig,
+    db: SqliteDb,
+    worker_enabled: bool,
+) -> (BuildServerState, Option<BoxFuture<'static, ()>>) {
+    let state = BuildServerState {
+        build: local_build_closure(config.clone(), db.clone()),
+        publish: local_publish_closure(config.clone(), db.clone()),
+        embedding_probe: Arc::new(build_embedding_probe()),
+    };
+    let worker = worker_enabled.then(|| {
+        run_build_job_loop(
+            SqliteBuildJobSource::new(db.clone()),
+            state.clone(),
+            LocalPublishStorage::new(db.clone(), &config.root),
+            local_list_wal_keys(db),
+        )
+        .boxed()
+    });
+    (state, worker)
+}
+
 /// build 角色：`POST /build` / `GET /health`，并（默认）后台轮询 SQLite 构建队列
 /// （claim/lease/retry/dead-letter 语义在队列侧，worker 成功 ack、失败 nack）。
 /// `LTSEARCH_BUILD_WORKER_ENABLED` 显式 falsy 时不 spawn worker，HTTP 服务不受
@@ -88,29 +114,18 @@ pub async fn run_build() -> Result<(), AppError> {
     let config = LocalConfig::from_env()?;
     let db = open_local(&config)?;
 
-    let state = BuildServerState {
-        build: local_build_closure(config.clone(), db.clone()),
-        publish: local_publish_closure(config.clone(), db.clone()),
-        embedding_probe: Arc::new(build_embedding_probe()),
-    };
-
-    if build_worker_enabled_from_env() {
-        let publish_storage = LocalPublishStorage::new(db.clone(), &config.root);
-        let worker_state = state.clone();
-        eprintln!(
-            "ltsearch build: SQLite queue worker enabled on {:?}",
-            config.db_path()
-        );
-        tokio::spawn(run_build_job_loop(
-            SqliteBuildJobSource::new(db.clone()),
-            worker_state,
-            publish_storage,
-            local_list_wal_keys(db),
-        ));
-    } else {
-        eprintln!(
+    let (state, worker) = local_build_role(&config, db, build_worker_enabled_from_env());
+    match worker {
+        Some(worker) => {
+            eprintln!(
+                "ltsearch build: SQLite queue worker enabled on {:?}",
+                config.db_path()
+            );
+            tokio::spawn(worker);
+        }
+        None => eprintln!(
             "ltsearch build: SQLite queue worker disabled (LTSEARCH_BUILD_WORKER_ENABLED); serving explicit /build only"
-        );
+        ),
     }
 
     let port = port_from_env();
