@@ -158,6 +158,7 @@ where
                 .map(|record| record.event_id.clone())
                 .collect(),
             batch_id,
+            wal_key,
         })
     }
 
@@ -199,6 +200,7 @@ where
                 .map(|record| record.event_id.clone())
                 .collect(),
             batch_id,
+            wal_key,
         })
     }
 

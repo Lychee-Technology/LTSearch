@@ -32,6 +32,7 @@ fn stub_state(captured: Arc<Mutex<Vec<String>>>) -> WriteServerState {
                     accepted_count,
                     wal_event_ids: vec!["evt-1".into(), "evt-2".into()],
                     batch_id: "b-1".into(),
+                    wal_key: "wal/2026/07/20/b-1.jsonl".into(),
                 })
             }
             .boxed()
@@ -45,6 +46,7 @@ fn stub_state(captured: Arc<Mutex<Vec<String>>>) -> WriteServerState {
                     accepted_count,
                     wal_event_ids: vec![],
                     batch_id: "b-del".into(),
+                    wal_key: "wal/2026/07/20/b-del.jsonl".into(),
                 })
             }
             .boxed()
@@ -83,6 +85,9 @@ async fn write_ingest_returns_200_with_accepted_count() {
     let json = body_json(response).await;
     assert_eq!(json["accepted_count"], 2);
     assert_eq!(json["batch_id"], "b-1");
+    // 公开 wal_key：客户端可将其与 batch_id 直接交给 POST /build 显式发布
+    assert_eq!(json["wal_key"], "wal/2026/07/20/b-1.jsonl");
+    assert!(!json["wal_key"].as_str().unwrap().is_empty());
 }
 
 // 2) POST /write 畸形 body → 400 validation_error 信封
@@ -120,6 +125,8 @@ async fn delete_wraps_doc_ids_and_invokes_delete_handler() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert_eq!(json["accepted_count"], 2);
+    assert_eq!(json["wal_key"], "wal/2026/07/20/b-del.jsonl");
+    assert!(!json["wal_key"].as_str().unwrap().is_empty());
     assert_eq!(
         *captured.lock().unwrap(),
         vec!["a".to_string(), "b".to_string()]

@@ -56,6 +56,7 @@ pub struct IngestResponse {
     pub accepted_count: usize,
     pub wal_event_ids: Vec<String>,
     pub batch_id: String,
+    pub wal_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +64,7 @@ pub struct DeleteResponse {
     pub accepted_count: usize,
     pub wal_event_ids: Vec<String>,
     pub batch_id: String,
+    pub wal_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

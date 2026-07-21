@@ -20,7 +20,7 @@ use crate::bootstrap::{
     build_embedding_generator_from_env, build_embedding_provider_from_env,
     probe_build_embedding_from_env, LocalConfig,
 };
-use crate::build_worker::{run_build_job_loop, ListWalKeysFn};
+use crate::build_worker::{build_worker_enabled_from_env, run_build_job_loop, ListWalKeysFn};
 use crate::error::IndexError;
 use crate::http::build::{build_router, BuildServerState, SnapshotBuildRequest};
 use crate::http::query::{query_router, QueryServerState};
@@ -80,8 +80,10 @@ pub async fn run_write() -> Result<(), AppError> {
     Ok(())
 }
 
-/// build 角色：`POST /build` / `GET /health`，并后台轮询 SQLite 构建队列
+/// build 角色：`POST /build` / `GET /health`，并（默认）后台轮询 SQLite 构建队列
 /// （claim/lease/retry/dead-letter 语义在队列侧，worker 成功 ack、失败 nack）。
+/// `LTSEARCH_BUILD_WORKER_ENABLED` 显式 falsy 时不 spawn worker，HTTP 服务不受
+/// 影响，仅响应显式 `POST /build`（避免与后台 worker 竞争发版）。
 pub async fn run_build() -> Result<(), AppError> {
     let config = LocalConfig::from_env()?;
     let db = open_local(&config)?;
@@ -92,18 +94,24 @@ pub async fn run_build() -> Result<(), AppError> {
         embedding_probe: Arc::new(build_embedding_probe()),
     };
 
-    let publish_storage = LocalPublishStorage::new(db.clone(), &config.root);
-    let worker_state = state.clone();
-    eprintln!(
-        "ltsearch build: SQLite queue worker enabled on {:?}",
-        config.db_path()
-    );
-    tokio::spawn(run_build_job_loop(
-        SqliteBuildJobSource::new(db.clone()),
-        worker_state,
-        publish_storage,
-        local_list_wal_keys(db),
-    ));
+    if build_worker_enabled_from_env() {
+        let publish_storage = LocalPublishStorage::new(db.clone(), &config.root);
+        let worker_state = state.clone();
+        eprintln!(
+            "ltsearch build: SQLite queue worker enabled on {:?}",
+            config.db_path()
+        );
+        tokio::spawn(run_build_job_loop(
+            SqliteBuildJobSource::new(db.clone()),
+            worker_state,
+            publish_storage,
+            local_list_wal_keys(db),
+        ));
+    } else {
+        eprintln!(
+            "ltsearch build: SQLite queue worker disabled (LTSEARCH_BUILD_WORKER_ENABLED); serving explicit /build only"
+        );
+    }
 
     let port = port_from_env();
     eprintln!(

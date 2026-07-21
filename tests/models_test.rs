@@ -344,12 +344,14 @@ fn boundary_models_support_serde() {
         accepted_count: 2,
         wal_event_ids: vec!["wal-1".into(), "wal-2".into()],
         batch_id: "batch-1".into(),
+        wal_key: "wal/2023/11/14/batch-1.jsonl".into(),
     };
 
     let delete = DeleteResponse {
         accepted_count: 1,
         wal_event_ids: vec!["wal-3".into()],
         batch_id: "batch-2".into(),
+        wal_key: "wal/2023/11/14/batch-2.jsonl".into(),
     };
 
     let status_json = serde_json::to_value(status).unwrap();
@@ -360,6 +362,14 @@ fn boundary_models_support_serde() {
     assert_eq!(status_json["index_version"], json!(7));
     assert_eq!(ingest_json["accepted_count"], json!(2));
     assert_eq!(ingest_json["wal_event_ids"], json!(["wal-1", "wal-2"]));
+    assert_eq!(
+        ingest_json["wal_key"],
+        json!("wal/2023/11/14/batch-1.jsonl")
+    );
     assert_eq!(delete_json["accepted_count"], json!(1));
     assert_eq!(delete_json["batch_id"], json!("batch-2"));
+    assert_eq!(
+        delete_json["wal_key"],
+        json!("wal/2023/11/14/batch-2.jsonl")
+    );
 }
