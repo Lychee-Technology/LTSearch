@@ -14,6 +14,7 @@ BUILD_SCRIPT_PATH = REPO_ROOT / "scripts" / "e2e" / "build-local-ltembed-image.s
 QUERY_REAL_FIXTURE_PATH = (
     REPO_ROOT / "tests" / "fixtures" / "e2e" / "query_request_real.json"
 )
+RUNNER_PATH = REPO_ROOT / "scripts" / "e2e" / "run-local-real-flow.sh"
 
 
 class LocalHttpLibTest(unittest.TestCase):
@@ -132,6 +133,16 @@ class LocalLtembedComposeTest(unittest.TestCase):
             "LTSEARCH_BUILD_WORKER_ENABLED: ${LTSEARCH_BUILD_WORKER_ENABLED:-true}",
             text,
         )
+
+    def test_runner_uses_reusable_lib_with_teardown_trap(self) -> None:
+        self.assertTrue(RUNNER_PATH.exists(), f"missing: {RUNNER_PATH}")
+        text = RUNNER_PATH.read_text(encoding="utf-8")
+        self.assertIn("scripts/e2e/local_http_lib.sh", text)
+        self.assertIn("trap 'lhttp_finish $?' EXIT", text)
+        self.assertIn("lhttp_assert_health health-build", text)
+        self.assertIn("lhttp_assert_health health-query", text)
+        self.assertIn("lhttp_wait_index_version", text)
+        self.assertIn("query_request_real.json", text)
 
     def test_query_real_fixture_covers_all_docs(self) -> None:
         fixture = json.loads(QUERY_REAL_FIXTURE_PATH.read_text(encoding="utf-8"))

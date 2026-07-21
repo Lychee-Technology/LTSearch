@@ -50,6 +50,7 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("run: python3 -B tests/test_ci_workflow.py", fast)
         self.assertIn("run: python3 -B tests/test_readme_workflow.py", fast)
         self.assertIn("run: python3 -B tests/test_release_workflow.py", fast)
+        self.assertIn("run: python3 -B tests/test_local_ltembed_topology.py", fast)
         self.assertIn("run: bash scripts/verify-fast.sh", fast)
         self.assertNotIn("docker compose -f docker-compose.moto.yml up -d", fast)
 
