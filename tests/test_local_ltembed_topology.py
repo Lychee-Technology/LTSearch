@@ -124,6 +124,7 @@ class LocalLtembedComposeTest(unittest.TestCase):
         text = _compose_without_comments()
         self.assertEqual(text.count("ltsearch-data:/var/lib/ltsearch"), 3)
         self.assertIn("LTSEARCH_BUILD_EMBEDDING_PROVIDER: ltembed", text)
+        self.assertIn('LTSEARCH_BUILD_EMBEDDING_DIM: "512"', text)
         self.assertIn("LTSEARCH_QUERY_EMBEDDING_PROVIDER: ltembed", text)
         self.assertIn("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR: /opt/ltembed", text)
         self.assertIn("LTSEARCH_QUERY_LTEMBED_MODEL_PATH: /opt/ltembed/model.ort", text)

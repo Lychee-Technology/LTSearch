@@ -20,6 +20,8 @@ services:
     environment: &localenv
       LTSEARCH_LOCAL_ROOT: /var/lib/ltsearch
       LTSEARCH_BUILD_EMBEDDING_PROVIDER: ltembed
+      # 自动 worker 建版需要显式 dim（src/build_worker.rs）；jina v5 nano 为 512。
+      LTSEARCH_BUILD_EMBEDDING_DIM: "512"
       LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR: /opt/ltembed
       LTSEARCH_BUILD_LTEMBED_MODEL_PATH: /opt/ltembed/model.ort
       LTSEARCH_QUERY_EMBEDDING_PROVIDER: ltembed
