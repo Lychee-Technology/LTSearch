@@ -70,7 +70,7 @@ class LocalLtembedImageTest(unittest.TestCase):
     def test_build_script_injects_pin_from_builder_dockerfile(self) -> None:
         self.assertTrue(BUILD_SCRIPT_PATH.exists(), f"missing: {BUILD_SCRIPT_PATH}")
         text = BUILD_SCRIPT_PATH.read_text(encoding="utf-8")
-        self.assertIn("prepare_local_ltembed_checkout", text)
+        self.assertIn("prepare_locked_ltembed_checkout", text)
         self.assertIn(
             "sed -n 's/^ARG LTEMBED_BUNDLE_URL=//p'", text
         )

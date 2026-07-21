@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # 构建 real-LTEmbed 本地单镜像（#141）：
-#   1. 物化 LTEmbed 源 checkout 到 .sam-local-deps/LTEmbed（Cargo.lock rev）；
+#   1. 按 Cargo.lock 锁定 rev 物化 LTEmbed checkout 到 .sam-local-deps/LTEmbed
+#      （不取 sibling/nested 工作区 HEAD——可能已越过 lock）；
 #   2. 从 sam/builder.Dockerfile 提取 bundle pin（单一来源，与
 #      scripts/package-model-assets.sh 同一套提取方式）；
 #   3. docker build linux/arm64 出 ltsearch-local-ltembed:dev（可经
@@ -13,7 +14,7 @@ IMAGE_TAG="${LTSEARCH_LOCAL_LTEMBED_IMAGE:-ltsearch-local-ltembed:dev}"
 # shellcheck source=scripts/e2e/lib.sh
 source "$REPO_ROOT/scripts/e2e/lib.sh"
 
-prepare_local_ltembed_checkout "$REPO_ROOT"
+prepare_locked_ltembed_checkout "$REPO_ROOT"
 
 bundle_url="${LTEMBED_BUNDLE_URL:-$(sed -n 's/^ARG LTEMBED_BUNDLE_URL=//p' "$REPO_ROOT/sam/builder.Dockerfile")}"
 bundle_sha256="${LTEMBED_BUNDLE_SHA256:-$(sed -n 's/^ARG LTEMBED_BUNDLE_SHA256=//p' "$REPO_ROOT/sam/builder.Dockerfile")}"
