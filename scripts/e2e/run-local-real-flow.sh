@@ -67,4 +67,20 @@ assert "doc-rust-hybrid" in doc_ids, ("真实模型未命中相关文档", doc_i
 print("local real flow OK:", r["index_version"], r["dynamic_count"])
 PY
 
+# 语义 only 查询：与全部文档零词面重叠（guard test 锁定该性质）。embedding 失败
+# 时 query 会静默回退 tantivy keyword-only（src/query/router.rs），零重叠查询在
+# 回退路径必返回 0 条——dynamic_count>=1 即证明本次检索走了真实向量路径。
+echo "--- POST /query（零词面重叠语义查询，排除 keyword-only 回退假阳性）---" >&2
+lhttp_request query-semantic POST "$QUERY_BASE/query" "$FIXTURES/query_request_semantic.json" >/dev/null
+lhttp_assert_status 200 query-semantic
+python3 - "$LHTTP_RUN_DIR/query-semantic.response.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["dynamic_count"] >= 1, (
+    "零词面重叠查询无命中：真实 embedding 未生效（keyword-only 回退）", r)
+doc_ids = [c["doc_id"] for c in r["dynamic_chunks"]]
+assert "doc-vector-near" in doc_ids, doc_ids
+print("semantic-only query OK:", r["dynamic_count"])
+PY
+
 echo "--- real-LTEmbed 主链路通过 ---" >&2

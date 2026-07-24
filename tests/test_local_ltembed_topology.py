@@ -15,6 +15,10 @@ QUERY_REAL_FIXTURE_PATH = (
     REPO_ROOT / "tests" / "fixtures" / "e2e" / "query_request_real.json"
 )
 RUNNER_PATH = REPO_ROOT / "scripts" / "e2e" / "run-local-real-flow.sh"
+QUERY_SEMANTIC_FIXTURE_PATH = (
+    REPO_ROOT / "tests" / "fixtures" / "e2e" / "query_request_semantic.json"
+)
+WRITE_REQUEST_PATH = REPO_ROOT / "tests" / "fixtures" / "e2e" / "write_request.json"
 
 
 class LocalHttpLibTest(unittest.TestCase):
@@ -38,9 +42,17 @@ class LocalHttpLibTest(unittest.TestCase):
         ]:
             self.assertIn(function, text, f"http lib lost function: {function}")
 
-    def test_http_lib_teardown_is_unconditional(self) -> None:
+    def test_http_lib_teardown_is_unconditional_and_not_swallowed(self) -> None:
         text = HTTP_LIB_PATH.read_text(encoding="utf-8")
         self.assertIn("down -v --remove-orphans", text)
+        # teardown 失败必须传播（P1）：不允许回到 `lhttp_down || true` 的写法。
+        self.assertNotIn("lhttp_down || true", text)
+        self.assertIn('exit_code="$down_rc"', text)
+
+    def test_http_lib_polling_records_payloads(self) -> None:
+        # 版本轮询必须经 lhttp_request 落盘（P2），不得绕过载荷记录直连 curl。
+        text = HTTP_LIB_PATH.read_text(encoding="utf-8")
+        self.assertIn("lhttp_request poll-index-version", text)
 
 
 class LocalLtembedImageTest(unittest.TestCase):
@@ -147,12 +159,26 @@ class LocalLtembedComposeTest(unittest.TestCase):
 
     def test_query_real_fixture_covers_all_docs(self) -> None:
         fixture = json.loads(QUERY_REAL_FIXTURE_PATH.read_text(encoding="utf-8"))
-        write_request = json.loads(
-            (REPO_ROOT / "tests" / "fixtures" / "e2e" / "write_request.json").read_text(
-                encoding="utf-8"
-            )
-        )
+        write_request = json.loads(WRITE_REQUEST_PATH.read_text(encoding="utf-8"))
         # 真实模型语义排序有抖动：top_k 必须覆盖全部写入文档，断言只做成员检查。
+        self.assertGreaterEqual(fixture["top_k"], len(write_request["documents"]))
+
+    def test_semantic_fixture_has_zero_lexical_overlap(self) -> None:
+        # 该 fixture 是"真实 embedding 生效"的判别器：embedding 失败时 query 回退
+        # tantivy keyword-only（src/query/router.rs 的 search_keyword_only 分支），
+        # 查询与所有文档零词面重叠 ⇒ 回退路径必返回 0 条。此性质被破坏则 runner
+        # 的语义断言失去判别力。
+        fixture = json.loads(QUERY_SEMANTIC_FIXTURE_PATH.read_text(encoding="utf-8"))
+        write_request = json.loads(WRITE_REQUEST_PATH.read_text(encoding="utf-8"))
+        query_tokens = set(re.findall(r"[a-z0-9]+", fixture["query"].lower()))
+        self.assertTrue(query_tokens)
+        for document in write_request["documents"]:
+            doc_tokens = set(re.findall(r"[a-z0-9]+", document["text"].lower()))
+            overlap = query_tokens & doc_tokens
+            self.assertFalse(
+                overlap,
+                f"semantic fixture overlaps doc {document['doc_id']}: {sorted(overlap)}",
+            )
         self.assertGreaterEqual(fixture["top_k"], len(write_request["documents"]))
 
 

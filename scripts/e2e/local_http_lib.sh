@@ -99,19 +99,24 @@ lhttp_assert_health() {
 
 # 轮询 query /health 直到 index_version >= $2（默认上限 180s）。
 # $1=query base URL $2=目标版本 [$3=超时秒]。版本写入全局 LHTTP_VERSION。
+# 每轮经 lhttp_request 落盘（同名覆写），超时失败时 run dir 里保留最后一次
+# 轮询的请求/响应/状态码（AC-5 载荷记录覆盖轮询阶段）。
 lhttp_wait_index_version() {
   local base="$1" target="$2" timeout_s="${3:-180}"
   local waited=0
   LHTTP_VERSION=0
-  while [ "$waited" -lt "$timeout_s" ]; do
-    LHTTP_VERSION=$(curl -sf "$base/health" \
-      | python3 -c 'import json,sys;print(json.load(sys.stdin).get("index_version") or 0)' \
-      || echo 0)
+  while :; do
+    lhttp_request poll-index-version GET "$base/health" >/dev/null 2>&1 || true
+    if [ "${LHTTP_STATUS:-000}" = "200" ]; then
+      LHTTP_VERSION=$(python3 -c 'import json,sys;print(json.load(sys.stdin).get("index_version") or 0)' \
+        < "$LHTTP_RUN_DIR/poll-index-version.response.json" 2>/dev/null || echo 0)
+    fi
     [ "$LHTTP_VERSION" -ge "$target" ] && return 0
+    [ "$waited" -ge "$timeout_s" ] && break
     sleep 2
     waited=$((waited + 2))
   done
-  echo "index version never reached $target within ${timeout_s}s (last seen: $LHTTP_VERSION)" >&2
+  echo "index version never reached $target within ${timeout_s}s (last seen: $LHTTP_VERSION, last status: ${LHTTP_STATUS:-000})" >&2
   return 1
 }
 
@@ -142,13 +147,23 @@ lhttp_dump_diagnostics() {
 }
 
 # EXIT trap 入口：$1=脚本退出码。teardown 总是执行；失败保留诊断，成功清空资源。
+# teardown 本身失败不得被吞（AC"成功时清理全部测试资源"）：成功运行遇 down
+# 失败时转为失败退出并保留诊断，调用方/CI 能察觉资源泄漏。
 lhttp_finish() {
   local exit_code="$1"
   trap - EXIT
   if [ "$exit_code" -ne 0 ]; then
     lhttp_dump_diagnostics || true
   fi
-  lhttp_down || true
+  local down_rc=0
+  lhttp_down || down_rc=$?
+  if [ "$down_rc" -ne 0 ]; then
+    echo "teardown failed (rc=$down_rc): project $LHTTP_PROJECT may have leaked containers/volumes/networks" >&2
+    if [ "$exit_code" -eq 0 ]; then
+      lhttp_dump_diagnostics || true
+      exit_code="$down_rc"
+    fi
+  fi
   if [ "$exit_code" -eq 0 ]; then
     rm -rf "$LHTTP_RUN_DIR"
   else
