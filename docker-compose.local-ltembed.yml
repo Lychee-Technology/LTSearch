@@ -1,0 +1,72 @@
+# real-LTEmbed 单镜像本地拓扑（#141）：与 docker-compose.local.yml 同构的三角色
+# （write/build/query 共享一个卷上的 SQLite 控制面），但 embedding provider 为
+# 真实 ltembed（bundle 已烘焙在镜像 /opt/ltembed，见 sam/local-ltembed.Dockerfile），
+# 无 moto、无任何 AWS 环境变量。
+#
+# 隔离（供并发/可重复 E2E，区别于固定拓扑）：
+#   - 卷/网络不写 name:，由 compose project（runner 以 -p ltsearch-real-<run_id>
+#     注入）派生，跑完 `down -v` 即净；
+#   - host 端口写 "127.0.0.1::8080" 临时端口，实际端口经 `docker compose port`
+#     发现（scripts/e2e/local_http_lib.sh）；
+#   - build 也发布端口：#141 AC 要求经 HTTP 实测 build 角色的真实推理健康。
+#
+# healthcheck 即真实推理门：query/build 的 /health 内部跑 embedding_probe()
+# （真实 ONNX 推理），`up -d --wait` 变绿等价于模型可用；首次加载 ~118MB
+# model.ort 较慢，故 start_period/retries 比固定拓扑宽松。
+services:
+  write:
+    image: ${LTSEARCH_LOCAL_LTEMBED_IMAGE:-ltsearch-local-ltembed:dev}
+    command: ["write"]
+    environment: &localenv
+      LTSEARCH_LOCAL_ROOT: /var/lib/ltsearch
+      LTSEARCH_BUILD_EMBEDDING_PROVIDER: ltembed
+      # 自动 worker 建版需要显式 dim（src/build_worker.rs）；jina v5 nano 为 512。
+      LTSEARCH_BUILD_EMBEDDING_DIM: "512"
+      LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR: /opt/ltembed
+      LTSEARCH_BUILD_LTEMBED_MODEL_PATH: /opt/ltembed/model.ort
+      LTSEARCH_QUERY_EMBEDDING_PROVIDER: ltembed
+      LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR: /opt/ltembed
+      LTSEARCH_QUERY_LTEMBED_MODEL_PATH: /opt/ltembed/model.ort
+    volumes:
+      - ltsearch-data:/var/lib/ltsearch
+    ports:
+      - "127.0.0.1::8080"
+    healthcheck: &hc
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 36
+      start_period: 60s
+    networks: [ltsearch-real]
+
+  build:
+    image: ${LTSEARCH_LOCAL_LTEMBED_IMAGE:-ltsearch-local-ltembed:dev}
+    command: ["build"]
+    environment:
+      <<: *localenv
+      # 默认启用后台队列 worker（#140 语义不变）；显式流程测试可在宿主机设
+      # LTSEARCH_BUILD_WORKER_ENABLED=false 关闭，经 ${...:-true} 插值透传。
+      LTSEARCH_BUILD_WORKER_ENABLED: ${LTSEARCH_BUILD_WORKER_ENABLED:-true}
+    volumes:
+      - ltsearch-data:/var/lib/ltsearch
+    ports:
+      - "127.0.0.1::8080"
+    healthcheck: *hc
+    networks: [ltsearch-real]
+
+  query:
+    image: ${LTSEARCH_LOCAL_LTEMBED_IMAGE:-ltsearch-local-ltembed:dev}
+    command: ["query"]
+    environment: *localenv
+    volumes:
+      - ltsearch-data:/var/lib/ltsearch
+    ports:
+      - "127.0.0.1::8080"
+    healthcheck: *hc
+    networks: [ltsearch-real]
+
+volumes:
+  ltsearch-data:
+
+networks:
+  ltsearch-real:
