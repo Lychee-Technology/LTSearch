@@ -205,6 +205,22 @@ To run a published release image instead of a local build, set
 
 `docker-compose.local.yml` runs three services (`write`, `build`, `query`) from the same image, sharing the named volume `ltsearch-local-data` mounted at `/var/lib/ltsearch` (`LTSEARCH_LOCAL_ROOT`). The volume holds the SQLite control plane (`ltsearch.db`) plus immutable index artifacts; `docker compose down` without `-v` preserves all state across restarts. See [`docs/deployment.md`](docs/deployment.md) for the operator guide.
 
+### Real-LTEmbed Local Topology (E2E)
+
+A second, test-only topology runs the same three roles with the real LTEmbed model (#141). `sam/local-ltembed.Dockerfile` compiles `ltsearch` with `--features local,ltembed` and bakes the pinned, checksum-verified linux/arm64 ort bundle into the image at `/opt/ltembed` — no Moto, no AWS env vars, no Lambda/SAM. The bundle URL/SHA256 pin stays single-sourced in `sam/builder.Dockerfile` and is injected at build time.
+
+```bash
+# Build the real image (stages the pinned LTEmbed checkout, downloads the
+# ~120 MB ort bundle on first run, linux/arm64 only)
+bash scripts/e2e/build-local-ltembed-image.sh
+
+# Blackbox main chain: health → write → automatic build → query,
+# asserted only via /health, /write, /query HTTP responses
+bash scripts/e2e/run-local-real-flow.sh
+```
+
+Each run is fully isolated: a unique compose project (`ltsearch-real-<run_id>`), ephemeral loopback ports discovered via `docker compose port`, and project-scoped volume/network — concurrent runs do not collide. Query/build healthchecks execute a real embedding probe, so `up -d --wait` going healthy means real inference works (first model load is slow; the healthcheck allows for it). On success the runner removes all containers, volumes, and scratch files; on failure it tears the stack down but preserves service logs and recorded request/response payloads under `.e2e-tmp/ltsearch-real-<run_id>/`. This topology is not part of the PR gate; daily CI regression is tracked by #144.
+
 ## Releases
 
 Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`, which:

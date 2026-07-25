@@ -28,6 +28,7 @@ jobs:
       - run: python3 -B tests/test_ci_workflow.py
       - run: python3 -B tests/test_readme_workflow.py
       - run: python3 -B tests/test_release_workflow.py
+      - run: python3 -B tests/test_local_ltembed_topology.py
       - run: bash scripts/verify-fast.sh
 
   feature-matrix:

@@ -123,6 +123,57 @@ create_e2e_queue() {
   aws_e2e sqs create-queue --queue-name "$queue_name" --output text --query 'QueueUrl'
 }
 
+# 严格按 Cargo.lock 锁定 rev 物化 LTEmbed checkout（#141）。与下方
+# prepare_local_ltembed_checkout 的差异：不信任 sibling/nested 工作区检出——
+# 其 HEAD 可能已越过 lockfile（LTEmbed 上游已切 llama.cpp 后端，与本仓库
+# ONNX 集成不兼容，path patch 又会绕过 Cargo.lock 的 rev 锁定，见
+# release.yml 同款约束）。显式 LTSEARCH_LTEMBED_CHECKOUT 覆盖仍被尊重
+# （委托旧 helper，供联调未发布 LTEmbed 用）。幂等：marker 文件记录已物化
+# rev，匹配即跳过。无需 cargo/rust 工具链（干净 runner 直接走 GitHub 按
+# rev fetch），供 #144 CI 复用。
+prepare_locked_ltembed_checkout() {
+  local repo_root="$1"
+  local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+  local vendor_root="$repo_root/.sam-local-deps/LTEmbed"
+  local marker="$vendor_root/.ltsearch-locked-rev"
+
+  if [[ -n "${LTSEARCH_LTEMBED_CHECKOUT:-}" ]]; then
+    echo "LTSEARCH_LTEMBED_CHECKOUT set: staging explicit checkout (rev lock NOT enforced)" >&2
+    prepare_local_ltembed_checkout "$repo_root"
+    return
+  fi
+
+  local locked_rev
+  locked_rev="$(sed -n 's|.*git+https://github.com/Lychee-Technology/LTEmbed?[^#]*#\([0-9a-f]\{40\}\)".*|\1|p' "$repo_root/Cargo.lock" | head -n 1)"
+  if [[ -z "$locked_rev" ]]; then
+    echo "no locked LTEmbed rev found in Cargo.lock" >&2
+    return 1
+  fi
+
+  if [[ -f "$marker" && "$(cat "$marker")" == "$locked_rev" && -f "$vendor_root/Cargo.toml" ]]; then
+    return 0
+  fi
+
+  local git_db=""
+  if [[ -d "$cargo_home/git/db" ]]; then
+    git_db="$(find "$cargo_home/git/db" -maxdepth 1 -type d -name 'ltembed-*' 2>/dev/null | head -n 1)"
+  fi
+  rm -rf "$vendor_root"
+  mkdir -p "$(dirname "$vendor_root")"
+  if [[ -n "$git_db" ]] && git clone --quiet "$git_db" "$vendor_root" 2>/dev/null \
+      && git -C "$vendor_root" checkout --quiet "$locked_rev" 2>/dev/null; then
+    :
+  else
+    rm -rf "$vendor_root"
+    git init --quiet "$vendor_root"
+    git -C "$vendor_root" remote add origin https://github.com/Lychee-Technology/LTEmbed
+    git -C "$vendor_root" fetch --quiet --depth 1 origin "$locked_rev"
+    git -C "$vendor_root" checkout --quiet FETCH_HEAD
+  fi
+  rm -rf "$vendor_root/.git"
+  echo "$locked_rev" > "$marker"
+}
+
 prepare_local_ltembed_checkout() {
   local repo_root="$1"
   local configured_checkout="${LTSEARCH_LTEMBED_CHECKOUT:-}"

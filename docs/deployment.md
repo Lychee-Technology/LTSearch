@@ -69,6 +69,30 @@ LTSEARCH_LOCAL_IMAGE=ghcr.io/lychee-technology/ltsearch-local:<tag> \
 `LTSEARCH_{QUERY,BUILD}_LTEMBED_BUNDLE_DIR` / `..._LTEMBED_MODEL_PATH` 指向挂载
 路径；缺省 `fixed` provider 无模型依赖。
 
+### real-LTEmbed E2E 拓扑（测试专用，#141）
+
+`sam/local-ltembed.Dockerfile` + `docker-compose.local-ltembed.yml` 提供真实模型
+的黑盒 E2E 拓扑，**不是发布物**（发布镜像仍是 `sam/local.Dockerfile` 的 fixed
+拓扑）。与发布拓扑的差异：
+
+- 镜像以 `--features local,ltembed` 编译，并把锁定校验的 linux/arm64 ort bundle
+  烘焙进 `/opt/ltembed`（pin 单一来源在 `sam/builder.Dockerfile`，构建脚本提取
+  注入，不允许第二处硬编码）；
+- Compose 卷/网络不写死 name、host 端口为 loopback 临时端口，runner 以
+  `-p ltsearch-real-<run_id>` 注入独立 project——并发/重复运行互不冲突；
+- build 角色也发布端口：query/build 的 `/health` 内跑真实 embedding probe，
+  `up -d --wait` 变绿即真实推理可用。
+
+```bash
+bash scripts/e2e/build-local-ltembed-image.sh   # 物化 LTEmbed checkout + 注入 pin + arm64 构建
+bash scripts/e2e/run-local-real-flow.sh         # health → write → 自动 build → query（纯 HTTP 断言）
+```
+
+清理语义：无论成败 runner 都 `down -v --remove-orphans`；失败时先把
+`compose ps`、各服务日志与全部请求/响应载荷落盘
+`.e2e-tmp/ltsearch-real-<run_id>/` 并保留，成功时连该目录一并删除。公共接口在
+`scripts/e2e/local_http_lib.sh`（#142/#143 契约套件复用）。每日 CI 回归归 #144。
+
 ## 3. AWS 部署（Lambda ZIP + HTTP API + SQS）
 
 生产模板 `template.yaml`（`sam validate --lint` 于 CI 持续校验）：

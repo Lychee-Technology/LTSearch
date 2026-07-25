@@ -1,0 +1,6 @@
+{
+  "query": "finding conceptually close passages by neural representation",
+  "top_k": 6,
+  "filters": null,
+  "include_metadata": true
+}
