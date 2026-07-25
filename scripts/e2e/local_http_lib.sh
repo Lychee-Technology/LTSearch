@@ -21,10 +21,13 @@
 #   ...
 
 # 初始化本次运行：设置 LHTTP_COMPOSE_FILE / LHTTP_PROJECT / LHTTP_RUN_DIR。
-# $1=compose 文件绝对路径 $2=project 前缀
+# $1=compose 文件绝对路径 $2=project 前缀 [$3=overlay compose 文件绝对路径]
+# overlay（如 docker-compose.local-ltembed.degraded.yml）与 base 按 compose
+# 合并语义叠加，仅供改写 env 等局部差异，拓扑/隔离语义仍由 base 承担。
 lhttp_init() {
   LHTTP_COMPOSE_FILE="$1"
   local prefix="$2"
+  LHTTP_COMPOSE_OVERLAY="${3:-}"
   local run_id="${LTSEARCH_E2E_RUN_ID:-$(date +%s)-$$}"
   LHTTP_PROJECT="$prefix-$run_id"
   local repo_root
@@ -35,11 +38,23 @@ lhttp_init() {
 }
 
 lhttp_compose() {
-  docker compose -p "$LHTTP_PROJECT" -f "$LHTTP_COMPOSE_FILE" "$@"
+  if [ -n "${LHTTP_COMPOSE_OVERLAY:-}" ]; then
+    docker compose -p "$LHTTP_PROJECT" -f "$LHTTP_COMPOSE_FILE" \
+      -f "$LHTTP_COMPOSE_OVERLAY" "$@"
+  else
+    docker compose -p "$LHTTP_PROJECT" -f "$LHTTP_COMPOSE_FILE" "$@"
+  fi
 }
 
 lhttp_up() {
   lhttp_compose up -d --wait
+}
+
+# no-wait 启动：供刻意降级的拓扑使用——degraded overlay 下 query/build 的
+# healthcheck 注定 unhealthy，`up -d --wait` 必然失败，须以本函数启动后用
+# lhttp_wait_http_ready 等 HTTP 可达，再对 /health 断言具体状态码（含 503）。
+lhttp_up_nowait() {
+  lhttp_compose up -d
 }
 
 lhttp_down() {
@@ -47,9 +62,17 @@ lhttp_down() {
 }
 
 # 发现服务的临时 host 端口：$1=service [$2=容器端口，默认 8080]
+# 空结果即失败：容器未起（或 down/up 重建后未重新发现）时立刻报根因，
+# 不让空端口拼进 URL 变成难懂的 curl 错误。
 lhttp_port() {
   local service="$1" cport="${2:-8080}"
-  lhttp_compose port "$service" "$cport" | awk -F: 'NF { print $NF; exit }'
+  local port
+  port=$(lhttp_compose port "$service" "$cport" | awk -F: 'NF { print $NF; exit }')
+  if [ -z "$port" ]; then
+    echo "lhttp_port: no host port for service '$service' (container not up? ports change after every up/recreate and must be rediscovered)" >&2
+    return 1
+  fi
+  echo "$port"
 }
 
 # 发起 HTTP 请求并全量落盘请求/响应（AC-5 载荷记录）。
@@ -64,11 +87,16 @@ lhttp_request() {
     if [ -n "$body_file" ]; then cat "$body_file"; fi
   } > "$LHTTP_RUN_DIR/$name.request.txt"
   local curl_rc=0
+  # 单次请求必须有界（默认 600s 兜底，LHTTP_CURL_MAX_TIME 可按场景收紧）：
+  # 端口 accept 但服务不响应时无界 curl 会永久挂起，上层轮询的超时预算
+  # 永远轮不到检查，最终挂到外层 job timeout 而不是有序诊断/清理。
   if [ -n "$body_file" ]; then
-    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' -X "$method" \
+    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' \
+      --max-time "${LHTTP_CURL_MAX_TIME:-600}" -X "$method" \
       -H 'Content-Type: application/json' -d @"$body_file" "$url") || curl_rc=$?
   else
-    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' -X "$method" "$url") || curl_rc=$?
+    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' \
+      --max-time "${LHTTP_CURL_MAX_TIME:-600}" -X "$method" "$url") || curl_rc=$?
   fi
   if [ "$curl_rc" -ne 0 ]; then
     LHTTP_STATUS=000
@@ -89,12 +117,42 @@ lhttp_assert_status() {
   fi
 }
 
-# 断言角色健康：$1=记录名 $2=base URL。期望 200（query/build 的 /health 内含
-# 真实 embedding probe，200 即真实推理健康——#141 AC-4 的实测点）。
+# 断言角色健康：$1=记录名 $2=base URL [$3=期望 component]。期望 200（query/build
+# 的 /health 内含真实 embedding probe，200 即真实推理健康——#141 AC-4 的实测点）。
+# 三角色同镜像 + 临时端口，端口错配是最真实的翻车方式；传入期望 component
+#（ltsearch-write / ltsearch-index-builder / ltsearch-query）可一并锁定。
 lhttp_assert_health() {
-  local name="$1" base="$2"
+  local name="$1" base="$2" component="${3:-}"
   lhttp_request "$name" GET "$base/health" >/dev/null
   lhttp_assert_status 200 "$name"
+  if [ -n "$component" ]; then
+    python3 - "$LHTTP_RUN_DIR/$name.response.json" "$component" <<'PY'
+import json, sys
+body = json.load(open(sys.argv[1]))
+assert body.get("component") == sys.argv[2], (sys.argv[2], body)
+PY
+  fi
+}
+
+# 等待 URL 的 HTTP 层可达：$1=记录名 $2=URL [$3=超时秒，默认 60]。
+# 只等「任意非 000 状态」（TCP/HTTP 打通），不等特定状态码——供 no-wait 启动的
+# 降级拓扑用：可达后由调用方对 /health 断言 503/200，若降级没生效是快失败
+# 而不是把超时耗光。每轮经 lhttp_request 落盘（同名覆写），保留最后一次载荷。
+# 超时契约：单次请求经 LHTTP_CURL_MAX_TIME 收紧到 5s（LHTTP_READY_MAX_TIME
+# 可覆盖），总预算用 $SECONDS 墙钟核算——只 accept 不响应的对端也会在
+# timeout_s 内失败返回，而不是挂在第一次 curl 上。
+lhttp_wait_http_ready() {
+  local name="$1" url="$2" timeout_s="${3:-60}"
+  local start="$SECONDS"
+  while :; do
+    LHTTP_CURL_MAX_TIME="${LHTTP_READY_MAX_TIME:-5}" \
+      lhttp_request "$name" GET "$url" >/dev/null 2>&1 || true
+    [ "${LHTTP_STATUS:-000}" != "000" ] && return 0
+    [ $((SECONDS - start)) -ge "$timeout_s" ] && break
+    sleep 2
+  done
+  echo "$name: $url not HTTP-reachable within ${timeout_s}s" >&2
+  return 1
 }
 
 # 轮询 query /health 直到 index_version >= $2（默认上限 180s）。
