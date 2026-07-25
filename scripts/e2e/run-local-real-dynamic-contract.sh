@@ -15,6 +15,11 @@ set -euo pipefail
 #
 # 真实模型语义排序有抖动：只做集合/计数断言（top_k=6 的检索窗口 18 > 语料
 # 数，结果集恰等于存活全集），不断言名次/分数。
+# 本套件依赖自动 worker 发布版本:显式钉死为 true,防止宿主环境残留的
+# LTSEARCH_BUILD_WORKER_ENABLED=false 经 compose 插值透传后,Phase 2 写入
+# 成功却永远等不到版本发布(白等 180s 才失败)。
+export LTSEARCH_BUILD_WORKER_ENABLED=true
+
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 FIXTURES="$REPO_ROOT/tests/fixtures/e2e"
 CONTRACT="$FIXTURES/contract"
@@ -130,15 +135,20 @@ echo "--- 非法 build（JSON 形状错）→ 400 validation_error ---" >&2
 lhttp_expect_status bad-shape-build POST "$BUILD_BASE/build" 400 "$CONTRACT/build_invalid_shape.json"
 lhttp_assert_error_body bad-shape-build validation_error "failed to deserialize build request"
 
-echo "--- query 无 active index → 500 execution_error ---" >&2
+echo "--- 合法 query 无 active index → 500 execution_error ---" >&2
 lhttp_expect_status query-no-index POST "$QUERY_BASE/query" 500 "$FIXTURES/query_request_real.json"
 lhttp_assert_error_body query-no-index execution_error "bootstrap failed"
-# 时序陷阱锁定：字段级校验发生在 router.search 内、resolve_handler（需要
-# active index）之后——无 index 时非法 top_k 也是 500 execution_error 而非
-# 400。这是当前契约；若未来把校验前移到 handler 层，本断言就是强制更新
-# 契约的绊线（届时 Phase 3 的同请求 400 断言仍应保留）。
-lhttp_expect_status query-no-index-topk POST "$QUERY_BASE/query" 500 "$CONTRACT/query_top_k_zero.json"
-lhttp_assert_error_body query-no-index-topk execution_error
+
+echo "--- 非法 query 无 active index 也稳定 400（校验前置于 bootstrap，AC-1）---" >&2
+# execution_error 只覆盖「合法请求 + 无索引」；字段级校验在 handler 层前置,
+# 400 validation_error 不随索引状态漂移。Phase 3 会以同一 fixture 复测有
+# index 的一侧,两侧共同锁定该契约。
+lhttp_expect_status query-no-index-topk POST "$QUERY_BASE/query" 400 "$CONTRACT/query_top_k_zero.json"
+lhttp_assert_error_body query-no-index-topk validation_error "top_k must be between 1 and 100"
+lhttp_expect_status query-empty POST "$QUERY_BASE/query" 400 "$CONTRACT/query_empty.json"
+lhttp_assert_error_body query-empty validation_error "query is required"
+lhttp_expect_status query-too-long POST "$QUERY_BASE/query" 400 "$CONTRACT/query_too_long.json"
+lhttp_assert_error_body query-too-long validation_error "query must be between 1 and 1000"
 
 echo "=== Phase 2: 写 batch1 → 自动 worker 发布首个版本 ===" >&2
 lhttp_request write-batch1 POST "$WRITE_BASE/write" "$FIXTURES/write_request.json" >/dev/null
@@ -230,6 +240,10 @@ citation_docs = {
     if {"resource_id", "source_type", "source_ref"} <= set(d["metadata"])
 }
 assert citation_docs, "语料失去判别力：没有带 citation 三键的文档"
+# 先断言 citation 文档确实在响应里（top_k 全覆盖保证其必然出现）,否则
+# 实现丢掉整篇文档时下面的逐 chunk 检查会真空通过。
+returned = {c["doc_id"] for c in r["dynamic_chunks"]}
+assert citation_docs <= returned, (sorted(citation_docs), sorted(returned))
 for chunk in r["dynamic_chunks"]:
     assert chunk["metadata"] is None, chunk
     assert "corpus_type" not in chunk, chunk

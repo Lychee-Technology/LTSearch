@@ -151,14 +151,16 @@ lhttp_expect_status() {
 }
 
 # 断言上一次响应是扁平错误信封：$1=记录名 $2=期望 error_type [$3=message 子串]。
-# 键集必须恰为 {error_type, message}（锁信封形状）。404/405 的响应是 axum
-# 默认的空 body，不得走本函数——那两类只能用 lhttp_expect_status 断状态码。
+# 必要键 {error_type, message} 必须在顶层存在（扁平，无嵌套 error 对象）；
+# 只断必要键不锁全集,允许未来新增 request id 等向后兼容字段。404/405 的响应
+# 是 axum 默认的空 body，不得走本函数——那两类只能用 lhttp_expect_status
+# 断状态码。
 lhttp_assert_error_body() {
   local name="$1" expected_type="$2" msg_substring="${3:-}"
   python3 - "$LHTTP_RUN_DIR/$name.response.json" "$expected_type" "$msg_substring" <<'PY'
 import json, sys
 body = json.load(open(sys.argv[1]))
-assert set(body) == {"error_type", "message"}, body
+assert {"error_type", "message"} <= set(body), body
 assert body["error_type"] == sys.argv[2], body
 if sys.argv[3]:
     assert sys.argv[3] in body["message"], body

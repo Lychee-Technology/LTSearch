@@ -34,6 +34,15 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<ApiGatewayV2Respo
         Err(response) => return Ok(response),
     };
 
+    // 与本地 HTTP 入口（src/http/query.rs）保持同一契约：字段级校验前置于
+    // bootstrap，非法请求稳定 400 validation_error，不因索引状态退化成 500。
+    if let Err(error) = request.validate() {
+        return Ok(ApiGatewayV2Response::error(
+            "validation_error",
+            error.to_string(),
+        ));
+    }
+
     let service = QUERY_SERVICE.get_or_init(QueryService::new);
 
     if let Err(error) = service.sync_artifacts_if_configured().await {

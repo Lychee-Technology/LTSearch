@@ -72,9 +72,10 @@ class LocalHttpLibTest(unittest.TestCase):
         self.assertIn("down --remove-orphans", code)
 
     def test_error_body_assert_locks_flat_envelope(self) -> None:
-        # 错误信封契约：键集恰为 {error_type, message}（扁平，无嵌套 error）。
+        # 错误信封契约：必要键 {error_type, message} 必须在顶层存在（扁平，
+        # 无嵌套 error）；只断子集不锁全集,允许向后兼容的新增字段。
         text = HTTP_LIB_PATH.read_text(encoding="utf-8")
-        self.assertIn('set(body) == {"error_type", "message"}', text)
+        self.assertIn('{"error_type", "message"} <= set(body)', text)
 
     def test_http_lib_teardown_is_unconditional_and_not_swallowed(self) -> None:
         text = HTTP_LIB_PATH.read_text(encoding="utf-8")
@@ -357,18 +358,26 @@ class DynamicContractRunnerTest(unittest.TestCase):
             "write_delete_doc_tenant_b.json",
         ]:
             self.assertIn(fixture, text, f"runner lost fixture: {fixture}")
+        # 套件依赖自动 worker 发布版本：必须显式钉死,防止宿主残留的 false
+        # 经 compose 插值透传后 Phase 2 白等 180s。
+        self.assertIn("export LTSEARCH_BUILD_WORKER_ENABLED=true", text)
 
-    def test_field_validation_400_only_after_first_publish(self) -> None:
-        # 时序陷阱（当前契约）：query 字段级校验在 resolve_handler（需要
-        # active index）之后——发布前非法 top_k 是 500 execution_error，发布
-        # 后才是 400。runner 必须两侧都锁：500 断言在首个 wait 之前、400
-        # 断言在其之后。校验若前移到 handler 层，这两条守卫会一起报警。
+    def test_field_validation_400_holds_with_and_without_index(self) -> None:
+        # #142 AC-1：字段级校验前置于 bootstrap（src/http/query.rs），非法
+        # query 稳定 400 validation_error，不随索引状态漂移。runner 必须在
+        # 首个版本发布前（无 index）与发布后（有 index）各锁一侧。
         text = CONTRACT_RUNNER_PATH.read_text(encoding="utf-8")
         first_wait = text.index("lhttp_wait_index_version")
-        self.assertLess(text.index("query-no-index-topk"), first_wait)
+        no_index_assert = text.index(
+            "lhttp_assert_error_body query-no-index-topk validation_error"
+        )
+        self.assertLess(no_index_assert, first_wait)
         self.assertGreater(
             text.index("lhttp_expect_status topk-zero"), first_wait
         )
+        # query 字段自身的两条独立校验路径（空 / 超长）也必须有黑盒覆盖。
+        self.assertIn("query_empty.json", text)
+        self.assertIn("query_too_long.json", text)
 
     def test_snapshot_logs_before_restart(self) -> None:
         # down/up 重建会销毁旧容器日志：不先快照，Phase 6 失败时看不到
@@ -495,6 +504,22 @@ class ContractFixturesTest(unittest.TestCase):
         )
         self.assertEqual(zero["top_k"], 0)
         self.assertGreater(over["top_k"], 100)
+
+    def test_query_field_boundary_fixtures(self) -> None:
+        # SearchRequest::validate 对空 query 与超长 query 是两条独立路径
+        # （Required / LengthOutOfRange，上限 1000 字符），fixture 必须各踩一条。
+        empty = json.loads(
+            (CONTRACT_FIXTURES_DIR / "query_empty.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        too_long = json.loads(
+            (CONTRACT_FIXTURES_DIR / "query_too_long.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(empty["query"], "")
+        self.assertGreater(len(too_long["query"]), 1000)
 
     def test_full_coverage_queries_cover_corpus_and_batch2(self) -> None:
         # 存活集合断言依赖 top_k 全覆盖：检索窗口 3*top_k 必须≥语料总数
