@@ -116,6 +116,33 @@ async fn health_returns_503_when_head_read_fails_with_invalid_json() {
         .contains("failed to load active version"));
 }
 
+// 字段级校验前置于 bootstrap（#142 AC-1）：无 active index（QueryService 未
+// 配置任何本地根/头指针）时非法 top_k 也必须是 400 validation_error，而不是
+// 落进 resolve_handler 的 500 execution_error。
+#[tokio::test]
+async fn query_with_invalid_fields_returns_400_without_active_index() {
+    let app = query_router(state_with_probe(|| Ok(3)));
+    let response = app
+        .oneshot(
+            Request::post("/query")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"query":"rust","top_k":0,"filters":null,"include_metadata":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(response).await;
+    assert_eq!(json["error_type"], "validation_error");
+    let message = json["message"].as_str().unwrap();
+    assert!(
+        message.contains("top_k must be between 1 and 100"),
+        "message: {message}"
+    );
+}
+
 #[tokio::test]
 async fn query_with_malformed_body_returns_400_envelope() {
     let app = query_router(state_with_probe(|| Ok(3)));

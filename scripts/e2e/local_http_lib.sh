@@ -61,6 +61,24 @@ lhttp_down() {
   lhttp_compose down -v --remove-orphans
 }
 
+# 保留共享卷重启整个拓扑（重启持久性用例）：down 刻意不带 -v——卷就是被验证
+# 的持久层，清了卷"持久性"就成假绿。容器重建后三角色的临时 host 端口全部
+# 变化，调用方必须重新经 lhttp_port 发现端口再发请求。
+lhttp_restart() {
+  lhttp_compose down --remove-orphans
+  lhttp_up
+}
+
+# 主动快照当前容器日志：$1=标签。down/up 重建会销毁旧容器及其日志，重启类
+# 用例须在 lhttp_restart 前调用本函数，失败诊断才看得到重启前各阶段的日志。
+lhttp_snapshot_logs() {
+  local label="$1" service
+  for service in $(lhttp_compose config --services 2>/dev/null); do
+    lhttp_compose logs --no-color "$service" \
+      > "$LHTTP_RUN_DIR/$label-$service.log" 2>&1 || true
+  done
+}
+
 # 发现服务的临时 host 端口：$1=service [$2=容器端口，默认 8080]
 # 空结果即失败：容器未起（或 down/up 重建后未重新发现）时立刻报根因，
 # 不让空端口拼进 URL 变成难懂的 curl 错误。
@@ -90,13 +108,15 @@ lhttp_request() {
   # 单次请求必须有界（默认 600s 兜底，LHTTP_CURL_MAX_TIME 可按场景收紧）：
   # 端口 accept 但服务不响应时无界 curl 会永久挂起，上层轮询的超时预算
   # 永远轮不到检查，最终挂到外层 job timeout 而不是有序诊断/清理。
+  # -D 落盘响应头（诊断用，如 405 的 Allow）；契约断言仍只读状态码与 JSON body。
   if [ -n "$body_file" ]; then
-    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' \
-      --max-time "${LHTTP_CURL_MAX_TIME:-600}" -X "$method" \
+    LHTTP_STATUS=$(curl -s -o "$out" -D "$LHTTP_RUN_DIR/$name.headers.txt" \
+      -w '%{http_code}' --max-time "${LHTTP_CURL_MAX_TIME:-600}" -X "$method" \
       -H 'Content-Type: application/json' -d @"$body_file" "$url") || curl_rc=$?
   else
-    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' \
-      --max-time "${LHTTP_CURL_MAX_TIME:-600}" -X "$method" "$url") || curl_rc=$?
+    LHTTP_STATUS=$(curl -s -o "$out" -D "$LHTTP_RUN_DIR/$name.headers.txt" \
+      -w '%{http_code}' --max-time "${LHTTP_CURL_MAX_TIME:-600}" \
+      -X "$method" "$url") || curl_rc=$?
   fi
   if [ "$curl_rc" -ne 0 ]; then
     LHTTP_STATUS=000
@@ -115,6 +135,36 @@ lhttp_assert_status() {
     echo "$name: expected HTTP $expected, got $LHTTP_STATUS" >&2
     return 1
   fi
+}
+
+# 请求 + 状态码断言合体：$1=记录名 $2=METHOD $3=URL $4=期望码 [$5=请求体文件]。
+# 供大量 404/405/400 契约用例使用；期望非 2xx 时 curl 传输失败（000）也会被
+# 断言兜住而不是让 set -e 提前退出。
+lhttp_expect_status() {
+  local name="$1" method="$2" url="$3" expected="$4" body_file="${5:-}"
+  if [ -n "$body_file" ]; then
+    lhttp_request "$name" "$method" "$url" "$body_file" >/dev/null || true
+  else
+    lhttp_request "$name" "$method" "$url" >/dev/null || true
+  fi
+  lhttp_assert_status "$expected" "$name"
+}
+
+# 断言上一次响应是扁平错误信封：$1=记录名 $2=期望 error_type [$3=message 子串]。
+# 必要键 {error_type, message} 必须在顶层存在（扁平，无嵌套 error 对象）；
+# 只断必要键不锁全集,允许未来新增 request id 等向后兼容字段。404/405 的响应
+# 是 axum 默认的空 body，不得走本函数——那两类只能用 lhttp_expect_status
+# 断状态码。
+lhttp_assert_error_body() {
+  local name="$1" expected_type="$2" msg_substring="${3:-}"
+  python3 - "$LHTTP_RUN_DIR/$name.response.json" "$expected_type" "$msg_substring" <<'PY'
+import json, sys
+body = json.load(open(sys.argv[1]))
+assert {"error_type", "message"} <= set(body), body
+assert body["error_type"] == sys.argv[2], body
+if sys.argv[3]:
+    assert sys.argv[3] in body["message"], body
+PY
 }
 
 # 断言角色健康：$1=记录名 $2=base URL [$3=期望 component]。期望 200（query/build

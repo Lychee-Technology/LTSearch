@@ -40,6 +40,13 @@ async fn handle_query(State(state): State<QueryServerState>, body: axum::body::B
         }
     };
 
+    // 字段级校验前置于 bootstrap（#142 AC-1）：非法请求必须稳定 400
+    // validation_error，不因是否已有 active index 退化成 500。router.search
+    // 内的 validate 仍保留，守住不经 HTTP 入口的调用方。
+    if let Err(error) = request.validate() {
+        return error_response("validation_error", error.to_string());
+    }
+
     if let Err(error) = state.service.sync_artifacts_if_configured().await {
         return error_response(
             "execution_error",

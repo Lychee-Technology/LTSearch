@@ -1,0 +1,9 @@
+{
+  "operation": "ingest",
+  "documents": [
+    {
+      "doc_id": "doc-contract-missing",
+      "text": "document without metadata or timestamp"
+    }
+  ]
+}
