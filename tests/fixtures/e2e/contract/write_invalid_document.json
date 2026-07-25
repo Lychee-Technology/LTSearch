@@ -1,0 +1,11 @@
+{
+  "operation": "ingest",
+  "documents": [
+    {
+      "doc_id": "doc-contract-bad",
+      "text": "",
+      "metadata": {},
+      "timestamp": 1700000009000
+    }
+  ]
+}

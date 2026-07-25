@@ -1,0 +1,9 @@
+{
+  "query": "rust retrieval",
+  "top_k": 3,
+  "filters": {
+    "lang": "rust",
+    "tenant": "tenant-a"
+  },
+  "include_metadata": false
+}

@@ -1,0 +1,6 @@
+{
+  "query": "rust retrieval",
+  "top_k": 1,
+  "filters": null,
+  "include_metadata": true
+}

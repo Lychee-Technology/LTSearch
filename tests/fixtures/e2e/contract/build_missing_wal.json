@@ -1,0 +1,6 @@
+{
+  "batch_id": "contract-missing-batch",
+  "wal_key": "wal/9999/01/01/contract-missing.jsonl",
+  "version_id": 1,
+  "embedding_dim": 512
+}

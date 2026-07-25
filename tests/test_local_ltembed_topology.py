@@ -23,6 +23,13 @@ DEGRADED_OVERLAY_PATH = REPO_ROOT / "docker-compose.local-ltembed.degraded.yml"
 DEGRADED_RUNNER_PATH = (
     REPO_ROOT / "scripts" / "e2e" / "run-local-real-degraded-health.sh"
 )
+CONTRACT_RUNNER_PATH = (
+    REPO_ROOT / "scripts" / "e2e" / "run-local-real-dynamic-contract.sh"
+)
+CONTRACT_FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures" / "e2e" / "contract"
+WRITE_BATCH2_PATH = (
+    REPO_ROOT / "tests" / "fixtures" / "e2e" / "write_request_batch2.json"
+)
 
 
 class LocalHttpLibTest(unittest.TestCase):
@@ -41,12 +48,33 @@ class LocalHttpLibTest(unittest.TestCase):
             "lhttp_port()",
             "lhttp_request()",
             "lhttp_assert_status()",
+            "lhttp_expect_status()",
+            "lhttp_assert_error_body()",
             "lhttp_assert_health()",
             "lhttp_wait_index_version()",
+            "lhttp_restart()",
+            "lhttp_snapshot_logs()",
             "lhttp_dump_diagnostics()",
             "lhttp_finish()",
         ]:
             self.assertIn(function, text, f"http lib lost function: {function}")
+
+    def test_restart_preserves_volume(self) -> None:
+        # lhttp_restart 的 down 绝不能带 -v：卷是被重启用例验证的持久层，
+        # 清卷会把"重启持久性"变成假绿。整个 lib 只允许 lhttp_down 一处 down -v
+        # （按剔除注释后的代码行计数）。
+        code = "\n".join(
+            line
+            for line in HTTP_LIB_PATH.read_text(encoding="utf-8").splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertEqual(code.count("down -v"), 1)
+        self.assertIn("down --remove-orphans", code)
+
+    def test_error_body_assert_locks_flat_envelope(self) -> None:
+        # 错误信封契约：键集恰为 {error_type, message}（扁平，无嵌套 error）。
+        text = HTTP_LIB_PATH.read_text(encoding="utf-8")
+        self.assertIn('set(body) == {"error_type", "message"}', text)
 
     def test_http_lib_teardown_is_unconditional_and_not_swallowed(self) -> None:
         text = HTTP_LIB_PATH.read_text(encoding="utf-8")
@@ -309,6 +337,180 @@ class DegradedRunnerTest(unittest.TestCase):
             text.index("lhttp_wait_http_ready"),
             text.index("lhttp_assert_status 503"),
         )
+
+
+class DynamicContractRunnerTest(unittest.TestCase):
+    """#142: 动态契约 runner 的结构守卫——阶段时序与断言纪律。"""
+
+    def test_runner_uses_lib_with_teardown(self) -> None:
+        self.assertTrue(
+            CONTRACT_RUNNER_PATH.exists(), f"missing: {CONTRACT_RUNNER_PATH}"
+        )
+        text = CONTRACT_RUNNER_PATH.read_text(encoding="utf-8")
+        self.assertIn("scripts/e2e/local_http_lib.sh", text)
+        self.assertIn("trap 'lhttp_finish $?' EXIT", text)
+        for fixture in [
+            "write_request.json",
+            "write_request_batch2.json",
+            "query_request_real.json",
+            "delete_doc_python_noise.json",
+            "write_delete_doc_tenant_b.json",
+        ]:
+            self.assertIn(fixture, text, f"runner lost fixture: {fixture}")
+
+    def test_field_validation_400_only_after_first_publish(self) -> None:
+        # 时序陷阱（当前契约）：query 字段级校验在 resolve_handler（需要
+        # active index）之后——发布前非法 top_k 是 500 execution_error，发布
+        # 后才是 400。runner 必须两侧都锁：500 断言在首个 wait 之前、400
+        # 断言在其之后。校验若前移到 handler 层，这两条守卫会一起报警。
+        text = CONTRACT_RUNNER_PATH.read_text(encoding="utf-8")
+        first_wait = text.index("lhttp_wait_index_version")
+        self.assertLess(text.index("query-no-index-topk"), first_wait)
+        self.assertGreater(
+            text.index("lhttp_expect_status topk-zero"), first_wait
+        )
+
+    def test_snapshot_logs_before_restart(self) -> None:
+        # down/up 重建会销毁旧容器日志：不先快照，Phase 6 失败时看不到
+        # 前五阶段的 worker 日志。
+        text = CONTRACT_RUNNER_PATH.read_text(encoding="utf-8")
+        self.assertIn("lhttp_restart", text)
+        self.assertLess(
+            text.index("lhttp_snapshot_logs"), text.index("lhttp_restart")
+        )
+
+    def test_404_405_assert_status_only(self) -> None:
+        # axum 默认 404/405 是空 body：解析 JSON 的断言必然炸且报错误导。
+        text = CONTRACT_RUNNER_PATH.read_text(encoding="utf-8")
+        self.assertIn("lhttp_expect_status nf-", text)
+        self.assertIn("lhttp_expect_status mn-", text)
+        self.assertNotIn("lhttp_assert_error_body nf-", text)
+        self.assertNotIn("lhttp_assert_error_body mn-", text)
+
+
+class ContractFixturesTest(unittest.TestCase):
+    """#142: contract fixtures 的判别力守卫——与共享语料的耦合性质。"""
+
+    def _batch1_documents(self) -> list:
+        return json.loads(WRITE_REQUEST_PATH.read_text(encoding="utf-8"))[
+            "documents"
+        ]
+
+    def test_malformed_body_is_actually_malformed(self) -> None:
+        # 故意 .txt 后缀（防 JSON glob 校验工具误伤），且必须解析失败才算对。
+        path = CONTRACT_FIXTURES_DIR / "malformed_body.txt"
+        self.assertTrue(path.exists(), f"missing: {path}")
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(path.read_text(encoding="utf-8"))
+
+    def test_weights_extreme_differs_only_by_corpus_weights(self) -> None:
+        # no-op 判别器的前提：B 与 A 只差 corpus_weights，其余字段完全一致。
+        base = json.loads(QUERY_REAL_FIXTURE_PATH.read_text(encoding="utf-8"))
+        extreme = json.loads(
+            (CONTRACT_FIXTURES_DIR / "query_weights_extreme.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        weights = extreme.pop("corpus_weights")
+        self.assertEqual(base, extreme)
+        for value in weights.values():
+            self.assertGreaterEqual(value, 0.0)
+            self.assertLessEqual(value, 1.0)
+
+    def test_filter_and_fixture_discriminates_and_from_or(self) -> None:
+        documents = self._batch1_documents()
+        filters = json.loads(
+            (CONTRACT_FIXTURES_DIR / "query_filter_and.json").read_text(
+                encoding="utf-8"
+            )
+        )["filters"]
+        for key in filters:
+            self.assertTrue(
+                any(key in d["metadata"] for d in documents),
+                f"filter key {key} absent from corpus metadata",
+            )
+        hits = {
+            d["doc_id"]
+            for d in documents
+            if all(d["metadata"].get(k) == v for k, v in filters.items())
+        }
+        partial = {
+            d["doc_id"]
+            for d in documents
+            if any(d["metadata"].get(k) == v for k, v in filters.items())
+        } - hits
+        self.assertEqual(len(hits), 3, sorted(hits))
+        # 没有"只满足部分键"的文档时，AND 与 OR 语义不可区分。
+        self.assertTrue(partial, "filter fixture lost AND/OR discriminating power")
+
+    def test_delete_fixtures_target_distinct_batch1_docs(self) -> None:
+        documents = self._batch1_documents()
+        batch1_ids = {d["doc_id"] for d in documents}
+        citation_ids = {
+            d["doc_id"]
+            for d in documents
+            if {"resource_id", "source_type", "source_ref"} <= set(d["metadata"])
+        }
+        endpoint_ids = set(
+            json.loads(
+                (CONTRACT_FIXTURES_DIR / "delete_doc_python_noise.json").read_text(
+                    encoding="utf-8"
+                )
+            )["doc_ids"]
+        )
+        tagged = json.loads(
+            (CONTRACT_FIXTURES_DIR / "write_delete_doc_tenant_b.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(tagged["operation"], "delete")
+        tagged_ids = set(tagged["doc_ids"])
+        # 两条通道必须删不同文档，否则第二次删除的效果不可观测。
+        self.assertTrue(endpoint_ids and tagged_ids)
+        self.assertFalse(endpoint_ids & tagged_ids)
+        self.assertLessEqual(endpoint_ids | tagged_ids, batch1_ids)
+        # citation 文档不得被删：它是 include_metadata:false 契约的判别主体。
+        self.assertFalse((endpoint_ids | tagged_ids) & citation_ids)
+
+    def test_corpus_has_exactly_one_citation_document(self) -> None:
+        documents = self._batch1_documents()
+        citation_docs = [
+            d
+            for d in documents
+            if {"resource_id", "source_type", "source_ref"} <= set(d["metadata"])
+        ]
+        self.assertEqual(len(citation_docs), 1, citation_docs)
+        self.assertIn("title", citation_docs[0]["metadata"])
+
+    def test_top_k_boundary_fixtures(self) -> None:
+        zero = json.loads(
+            (CONTRACT_FIXTURES_DIR / "query_top_k_zero.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        over = json.loads(
+            (CONTRACT_FIXTURES_DIR / "query_top_k_over_max.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(zero["top_k"], 0)
+        self.assertGreater(over["top_k"], 100)
+
+    def test_full_coverage_queries_cover_corpus_and_batch2(self) -> None:
+        # 存活集合断言依赖 top_k 全覆盖：检索窗口 3*top_k 必须≥语料总数
+        # （batch1+batch2），否则截断会让"缺席"断言失去意义。
+        documents = self._batch1_documents()
+        batch2 = json.loads(WRITE_BATCH2_PATH.read_text(encoding="utf-8"))[
+            "documents"
+        ]
+        corpus_size = len(documents) + len(batch2)
+        for name in ["query_no_metadata.json", "query_weights_extreme.json"]:
+            fixture = json.loads(
+                (CONTRACT_FIXTURES_DIR / name).read_text(encoding="utf-8")
+            )
+            self.assertGreaterEqual(3 * fixture["top_k"], corpus_size, name)
+        real = json.loads(QUERY_REAL_FIXTURE_PATH.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(3 * real["top_k"], corpus_size)
 
 
 if __name__ == "__main__":

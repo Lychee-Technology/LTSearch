@@ -47,7 +47,11 @@
       "metadata": {
         "lang": "rust",
         "category": "filter",
-        "tenant": "tenant-a"
+        "tenant": "tenant-a",
+        "resource_id": "res-tenant-a-filter",
+        "source_type": "doc",
+        "source_ref": "fixtures/tenant-a-filter",
+        "title": "Tenant A Filter Doc"
       },
       "timestamp": 1700000000500
     },
