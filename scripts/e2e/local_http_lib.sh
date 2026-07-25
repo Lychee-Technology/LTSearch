@@ -87,11 +87,16 @@ lhttp_request() {
     if [ -n "$body_file" ]; then cat "$body_file"; fi
   } > "$LHTTP_RUN_DIR/$name.request.txt"
   local curl_rc=0
+  # 单次请求必须有界（默认 600s 兜底，LHTTP_CURL_MAX_TIME 可按场景收紧）：
+  # 端口 accept 但服务不响应时无界 curl 会永久挂起，上层轮询的超时预算
+  # 永远轮不到检查，最终挂到外层 job timeout 而不是有序诊断/清理。
   if [ -n "$body_file" ]; then
-    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' -X "$method" \
+    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' \
+      --max-time "${LHTTP_CURL_MAX_TIME:-600}" -X "$method" \
       -H 'Content-Type: application/json' -d @"$body_file" "$url") || curl_rc=$?
   else
-    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' -X "$method" "$url") || curl_rc=$?
+    LHTTP_STATUS=$(curl -s -o "$out" -w '%{http_code}' \
+      --max-time "${LHTTP_CURL_MAX_TIME:-600}" -X "$method" "$url") || curl_rc=$?
   fi
   if [ "$curl_rc" -ne 0 ]; then
     LHTTP_STATUS=000
@@ -133,15 +138,18 @@ PY
 # 只等「任意非 000 状态」（TCP/HTTP 打通），不等特定状态码——供 no-wait 启动的
 # 降级拓扑用：可达后由调用方对 /health 断言 503/200，若降级没生效是快失败
 # 而不是把超时耗光。每轮经 lhttp_request 落盘（同名覆写），保留最后一次载荷。
+# 超时契约：单次请求经 LHTTP_CURL_MAX_TIME 收紧到 5s（LHTTP_READY_MAX_TIME
+# 可覆盖），总预算用 $SECONDS 墙钟核算——只 accept 不响应的对端也会在
+# timeout_s 内失败返回，而不是挂在第一次 curl 上。
 lhttp_wait_http_ready() {
   local name="$1" url="$2" timeout_s="${3:-60}"
-  local waited=0
+  local start="$SECONDS"
   while :; do
-    lhttp_request "$name" GET "$url" >/dev/null 2>&1 || true
+    LHTTP_CURL_MAX_TIME="${LHTTP_READY_MAX_TIME:-5}" \
+      lhttp_request "$name" GET "$url" >/dev/null 2>&1 || true
     [ "${LHTTP_STATUS:-000}" != "000" ] && return 0
-    [ "$waited" -ge "$timeout_s" ] && break
+    [ $((SECONDS - start)) -ge "$timeout_s" ] && break
     sleep 2
-    waited=$((waited + 2))
   done
   echo "$name: $url not HTTP-reachable within ${timeout_s}s" >&2
   return 1

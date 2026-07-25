@@ -61,6 +61,55 @@ class LocalHttpLibTest(unittest.TestCase):
         self.assertIn("lhttp_request poll-index-version", text)
 
 
+class HttpLibReadyTimeoutBehaviorTest(unittest.TestCase):
+    """#142: lhttp_wait_http_ready 的超时契约必须对「挂死对端」成立。
+
+    源码字符串 guard 覆盖不了这个失败模式：端口 accept 但永不响应 HTTP 时，
+    无界 curl 会在第一次请求上永久阻塞，声明的 timeout_s 永远轮不到检查。
+    这里起一个只 bind+listen、不 accept 的本地 socket（内核 backlog 会完成
+    TCP 握手），真实调用 helper 验证它在预算内以非零退出。
+    """
+
+    def test_wait_http_ready_fails_within_budget_against_silent_peer(self) -> None:
+        import socket
+        import subprocess
+        import tempfile
+        import time
+
+        listener = socket.socket()
+        try:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            port = listener.getsockname()[1]
+            with tempfile.TemporaryDirectory() as run_dir:
+                script = (
+                    "set -euo pipefail\n"
+                    f'source "{HTTP_LIB_PATH}"\n'
+                    f'LHTTP_RUN_DIR="{run_dir}"\n'
+                    # 单次 2s、总预算 5s：挂死对端下必须在 ~5s+一次请求内返回。
+                    "LHTTP_READY_MAX_TIME=2 "
+                    f'lhttp_wait_http_ready ready-probe "http://127.0.0.1:{port}/health" 5\n'
+                )
+                start = time.monotonic()
+                proc = subprocess.run(
+                    ["bash", "-c", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                elapsed = time.monotonic() - start
+            self.assertNotEqual(
+                proc.returncode,
+                0,
+                f"helper must fail against a silent peer: {proc.stderr}",
+            )
+            self.assertIn("not HTTP-reachable", proc.stderr)
+            # 预算 5s + 最后一次请求(≤2s) + sleep 与进程开销的余量。
+            self.assertLess(elapsed, 30, "timeout budget was not honored")
+        finally:
+            listener.close()
+
+
 class LocalLtembedImageTest(unittest.TestCase):
     """#141: real 镜像构建约束——local,ltembed 特性、bundle 烘焙、pin 单一来源。"""
 
