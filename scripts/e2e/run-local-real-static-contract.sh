@@ -153,21 +153,12 @@ PY
     static-build --config "$STAGING/static-config-$suffix.json" --output "$STAGING/release-$suffix"
 
   echo "--- static-activate release-${suffix}（同卷 rename + SQLite CAS 指针）---" >&2
-  # 一次性容器与常驻 build worker 共享控制面，偶发 database is locked 时
-  # 重试至多 2 次；activate 是 CAS 语义，重复执行安全。
-  rc=1
-  for attempt in 1 2 3; do
-    if lhttp_compose run --rm -T --no-deps build \
-      static-activate --release "$STAGING/release-$suffix" --root /var/lib/ltsearch --expect-dim 512; then
-      rc=0
-      break
-    fi
-    rc=$?
-    echo "--- static-activate attempt $attempt failed (rc=$rc), retrying in 2s ---" >&2
-    sleep 2
-  done
-  if [ "$rc" -ne 0 ]; then
-    echo "static-activate failed after retries for release-$suffix" >&2
+  # 不做同路径重试：activate 的安装步骤会把 --release 目录 rename 进受管存储，
+  # 首次失败后原路径已不存在，重试注定失败（见 app.rs run_static_activate 注释）；
+  # 瞬时 SQLite 锁由 schema 层 busy_timeout 兜底。失败即硬停，保留诊断。
+  if ! lhttp_compose run --rm -T --no-deps build \
+    static-activate --release "$STAGING/release-$suffix" --root /var/lib/ltsearch --expect-dim 512; then
+    echo "static-activate failed for release-$suffix" >&2
     exit 1
   fi
 }
@@ -211,16 +202,19 @@ for chunk in r["static_chunks"]:
     assert chunk["chunk_source"] == "static", chunk
     assert chunk["source"] == "static", chunk
     assert chunk["corpus_type"] == corpus["corpus_type"], chunk
+    # 换代判据的基线：release A 必须服务 variant a 的文本（Phase 5 对照）。
+    assert chunk["text"] == doc["text"], (chunk, doc)
     citation = chunk["citation"]
     assert citation is not None, chunk
     for key in ("resource_id", "source_type", "source_ref", "title", "url"):
         assert citation[key] == doc[key], (chunk, doc)
     assert chunk["metadata"]["lang"] == doc["lang"], chunk
 
-# 真实向量判别器：三条不同文本的分数必然互不相等（0.1 常量向量则必并列），
-# 且列表按分数降序——这就是「fixture 用了真实 embedding」的黑盒证据。
+# 真实向量判别器：0.1 常量向量下三条分数必然并列，真实 embedding 至少产生
+# 两个不同分数即可判别；TurboQuant 是量化近似打分，不同向量可能合法撞值，
+# 不断言全体互异。列表仍须按分数降序。
 scores = [c["score"] for c in r["static_chunks"]]
-assert len(set(scores)) == len(scores), scores
+assert len(set(scores)) > 1, scores
 assert scores == sorted(scores, reverse=True), scores
 
 # 动静共存：动态组维持激活前基线，两组 doc_id 不相交、从不融合。
@@ -262,19 +256,19 @@ python3 - "$LHTTP_RUN_DIR/query-static-no-meta.response.json" "$LHTTP_RUN_DIR/qu
 import json, sys
 stripped = json.load(open(sys.argv[1]))
 with_meta = json.load(open(sys.argv[2]))
-# 投影不丢行：集合与带 metadata 的全量查询完全一致。
-assert {c["doc_id"] for c in stripped["static_chunks"]} == {
-    c["doc_id"] for c in with_meta["static_chunks"]
-}, (stripped, with_meta)
 assert stripped["static_release_id"] == with_meta["static_release_id"], stripped
+# 投影唯一允许的差异是 metadata 置 null：按 doc_id 对齐后逐 chunk 全字段
+# 相等（citation/corpus_type/text/score 等原样保留）。只断非空不足以证明
+# citation 契约未被投影破坏——错误的非空值也能通过。
+baseline = {c["doc_id"]: c for c in with_meta["static_chunks"]}
+assert {c["doc_id"] for c in stripped["static_chunks"]} == set(baseline), (
+    stripped,
+    with_meta,
+)
 for chunk in stripped["static_chunks"]:
     assert chunk["metadata"] is None, chunk
-    # citation/corpus_type 是一等出处字段，不属于自由 metadata，剥离后必须保留。
-    assert chunk["corpus_type"], chunk
-    citation = chunk["citation"]
-    assert citation is not None, chunk
-    for key in ("resource_id", "source_type", "source_ref", "title", "url"):
-        assert citation[key], chunk
+    expected = dict(baseline[chunk["doc_id"]], metadata=None)
+    assert chunk == expected, (chunk, expected)
 PY
 
 echo "--- lang:zh + include_metadata:false 组合：先过滤后剥离 ---" >&2
@@ -284,12 +278,16 @@ python3 - "$LHTTP_RUN_DIR/query-static-zh-no-meta.response.json" "$LHTTP_RUN_DIR
 import json, sys
 stripped = json.load(open(sys.argv[1]))
 with_meta = json.load(open(sys.argv[2]))
-assert {c["doc_id"] for c in stripped["static_chunks"]} == {
-    c["doc_id"] for c in with_meta["static_chunks"]
-}, (stripped, with_meta)
+# 与 no-meta 场景同一口径：先过滤后剥离，且剥离只动 metadata 一个字段。
+baseline = {c["doc_id"]: c for c in with_meta["static_chunks"]}
+assert {c["doc_id"] for c in stripped["static_chunks"]} == set(baseline), (
+    stripped,
+    with_meta,
+)
 for chunk in stripped["static_chunks"]:
     assert chunk["metadata"] is None, chunk
-    assert chunk["citation"] is not None, chunk
+    expected = dict(baseline[chunk["doc_id"]], metadata=None)
+    assert chunk == expected, (chunk, expected)
 assert stripped["dynamic_count"] == len(stripped["dynamic_chunks"]) == 0, stripped
 PY
 
@@ -346,6 +344,12 @@ assert {c["doc_id"] for c in r["static_chunks"]} == {
 }, r
 assert r["static_count"] == len(r["static_chunks"]), r
 assert {c["doc_id"] for c in r["dynamic_chunks"]} == dynamic_expected, r
+# 换代必须体现在语料内容上：仅报新 release id 而 query 仍服务 A 代
+# mmap 的失败模式在此被拦截。variant b 唯一可观察差异是 doc-gamma 文本。
+gamma = {d["doc_id"]: d for d in corpus["documents"]}["doc-gamma"]
+assert gamma["text_variant_b"] != gamma["text"], gamma
+(gamma_chunk,) = [c for c in r["static_chunks"] if c["doc_id"] == "doc-gamma"]
+assert gamma_chunk["text"] == gamma["text_variant_b"], (gamma_chunk, gamma)
 PY
 
 lhttp_request query-static-zh-b POST "$QUERY_BASE/query" "$STATIC_FIXTURES/query_static_zh.json" >/dev/null

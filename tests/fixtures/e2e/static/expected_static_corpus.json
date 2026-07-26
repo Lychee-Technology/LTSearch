@@ -3,6 +3,7 @@
   "documents": [
     {
       "doc_id": "doc-alpha",
+      "text": "alpha 中文法规正文，用于中文过滤断言",
       "resource_id": "res-alpha",
       "source_type": "statute",
       "source_ref": "ref-alpha",
@@ -12,6 +13,7 @@
     },
     {
       "doc_id": "doc-beta",
+      "text": "beta english statute body for citation coverage",
       "resource_id": "res-beta",
       "source_type": "statute",
       "source_ref": "ref-beta",
@@ -21,6 +23,8 @@
     },
     {
       "doc_id": "doc-gamma",
+      "text": "gamma english body for variant a",
+      "text_variant_b": "gamma english body revised for variant b",
       "resource_id": "res-gamma",
       "source_type": "statute",
       "source_ref": "ref-gamma",

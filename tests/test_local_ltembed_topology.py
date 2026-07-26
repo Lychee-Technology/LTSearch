@@ -675,6 +675,8 @@ class StaticContractRunnerTest(unittest.TestCase):
         self.assertLess(
             text.index("stage_release b b"), text.index("release_id != sys.argv[2]")
         )
+        # 换代不能只看 id 翻转：query 必须真正服务 B 代语料内容（gamma 文本）。
+        self.assertIn("text_variant_b", text)
 
     def test_runner_locks_grouping_and_projection_assertions(self) -> None:
         # 分组/投影契约的关键断言点必须在场：静态组字段、动静不融合、
@@ -755,10 +757,22 @@ class StaticContractFixturesTest(unittest.TestCase):
         source = FIXTURE_EXAMPLE_PATH.read_text(encoding="utf-8")
         self.assertEqual(corpus["corpus_type"], "legal")
         for doc in corpus["documents"]:
-            for key in ("doc_id", "resource_id", "source_ref", "title", "url", "lang"):
+            for key in (
+                "doc_id",
+                "text",
+                "resource_id",
+                "source_ref",
+                "title",
+                "url",
+                "lang",
+            ):
                 self.assertIn(
                     f'"{doc[key]}"', source, f"{doc['doc_id']}.{key} not in example"
                 )
+        # variant b 的换代判据：gamma 的 b 变体文本必须与生成器同步且异于 a。
+        (gamma,) = [d for d in corpus["documents"] if d["doc_id"] == "doc-gamma"]
+        self.assertIn(f'"{gamma["text_variant_b"]}"', source)
+        self.assertNotEqual(gamma["text_variant_b"], gamma["text"])
         # lang:zh 是唯一选择器：恰一条 zh 行，static_chunks[0] 断言才确定。
         langs = [d["lang"] for d in corpus["documents"]]
         self.assertEqual(langs.count("zh"), 1)
