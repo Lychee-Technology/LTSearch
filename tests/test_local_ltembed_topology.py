@@ -30,6 +30,13 @@ CONTRACT_FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures" / "e2e" / "contract"
 WRITE_BATCH2_PATH = (
     REPO_ROOT / "tests" / "fixtures" / "e2e" / "write_request_batch2.json"
 )
+STATIC_CONTRACT_RUNNER_PATH = (
+    REPO_ROOT / "scripts" / "e2e" / "run-local-real-static-contract.sh"
+)
+STATIC_FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures" / "e2e" / "static"
+EXPECTED_STATIC_CORPUS_PATH = STATIC_FIXTURES_DIR / "expected_static_corpus.json"
+FIXTURE_EXAMPLE_PATH = REPO_ROOT / "examples" / "emit_static_lance_fixture.rs"
+CARGO_TOML_PATH = REPO_ROOT / "Cargo.toml"
 
 
 class LocalHttpLibTest(unittest.TestCase):
@@ -192,6 +199,30 @@ class LocalLtembedImageTest(unittest.TestCase):
         releasever = re.search(r'echo "[0-9.]+" > /etc/dnf/vars/releasever', builder)
         assert releasever is not None
         self.assertIn(releasever.group(0), real)
+
+    def test_dockerfile_ships_fixture_emitter_example(self) -> None:
+        # #143: fixture 生成器必须随镜像分发（静态契约 runner 在容器内以真实
+        # bundle 产 Lance fixture）。--example 追加在 --bin ltsearch 之后，
+        # 且两条 cp 与 cargo build 同处一条 RUN——target 是 cache mount，
+        # 产物出了 RUN 就不在镜像层里。
+        text = DOCKERFILE_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "--features local,ltembed --bin ltsearch"
+            " --example emit_static_lance_fixture",
+            text,
+        )
+        build_run = text[text.index("--mount=type=cache") : text.index("\nFROM", text.index("--mount=type=cache"))]
+        self.assertIn("cp target/release/ltsearch /ltsearch", build_run)
+        self.assertIn(
+            "cp target/release/examples/emit_static_lance_fixture"
+            " /emit_static_lance_fixture",
+            build_run,
+        )
+        self.assertIn(
+            "COPY --from=builder /emit_static_lance_fixture"
+            " /app/emit_static_lance_fixture",
+            text,
+        )
 
 
 def _compose_without_comments(path: Path = COMPOSE_PATH) -> str:
@@ -536,6 +567,250 @@ class ContractFixturesTest(unittest.TestCase):
             self.assertGreaterEqual(3 * fixture["top_k"], corpus_size, name)
         real = json.loads(QUERY_REAL_FIXTURE_PATH.read_text(encoding="utf-8"))
         self.assertGreaterEqual(3 * real["top_k"], corpus_size)
+
+
+class StaticContractRunnerTest(unittest.TestCase):
+    """#143: 静态语料 HTTP 契约 runner 的结构守卫。"""
+
+    def _text(self) -> str:
+        self.assertTrue(
+            STATIC_CONTRACT_RUNNER_PATH.exists(),
+            f"missing: {STATIC_CONTRACT_RUNNER_PATH}",
+        )
+        return STATIC_CONTRACT_RUNNER_PATH.read_text(encoding="utf-8")
+
+    def test_runner_uses_lib_with_teardown_and_static_fixtures(self) -> None:
+        text = self._text()
+        self.assertIn("scripts/e2e/local_http_lib.sh", text)
+        self.assertIn("trap 'lhttp_finish $?' EXIT", text)
+        # 依赖自动 worker 发布动态版本：宿主残留 false 不得透传。
+        self.assertIn("export LTSEARCH_BUILD_WORKER_ENABLED=true", text)
+        for fixture in [
+            "write_request.json",
+            "query_request_real.json",
+            "query_weights_extreme.json",
+            "query_static_zh.json",
+            "query_static_no_metadata.json",
+            "query_static_zh_no_metadata.json",
+            "expected_static_corpus.json",
+        ]:
+            self.assertIn(fixture, text, f"runner lost fixture: {fixture}")
+
+    def test_runner_orders_prereq_generate_build_activate_query(self) -> None:
+        # 静态解析的先决条件是 active 动态索引：等版本必须先于 stage；
+        # stage 内部生成 → static-build → static-activate 的顺序不可倒置；
+        # 契约查询只在激活之后。
+        text = self._text()
+        self.assertLess(
+            text.index("lhttp_wait_index_version"),
+            text.index("stage_release() {"),
+        )
+        self.assertLess(
+            text.index("--entrypoint /app/emit_static_lance_fixture"),
+            text.index("static-build --config"),
+        )
+        self.assertLess(
+            text.index("static-build --config"),
+            text.index("static-activate --release"),
+        )
+        self.assertLess(
+            text.index("static-activate --release"),
+            text.index("query-static-a"),
+        )
+
+    def test_runner_generates_fixture_in_container_with_real_embedder(self) -> None:
+        text = self._text()
+        self.assertIn("--embedder ltembed", text)
+        self.assertIn("--entrypoint /app/emit_static_lance_fixture", text)
+        self.assertIn('--variant "$variant"', text)
+        self.assertIn("stage_release a a", text)
+        self.assertIn("stage_release b b", text)
+        # -T 关 TTY 是 stdout 捕获 table_version 的前提。
+        self.assertIn("run --rm -T --no-deps", text)
+        # fixture 必须产自镜像内的生成器，不得引用宿主构建产物。
+        self.assertNotIn("target/release/examples", text)
+        self.assertNotIn("target/debug/examples", text)
+
+    def test_runner_asserts_only_over_http(self) -> None:
+        # #143 AC-5 + 已定决策：行为断言只读 HTTP 响应。禁止读 manifest、
+        # 静态发布目录、控制面数据库或 head 指针文件。
+        text = self._text()
+        self.assertNotIn("release_manifest.json", text)
+        self.assertNotIn("static/releases", text)
+        self.assertNotIn("ltsearch.db", text)
+        self.assertNotIn("_head", text)
+        self.assertNotIn("cat /var/lib/ltsearch", text)
+
+    def test_release_is_staged_inside_shared_volume(self) -> None:
+        # static-activate 以同文件系统 rename 安装：dataset/release 必须落在
+        # 共享卷（容器本地层或 /tmp 会跨设备失败，且其余角色不可见）。
+        text = self._text()
+        self.assertIn("STAGING=/var/lib/ltsearch/staging", text)
+        self.assertIn('--output "$STAGING/release-', text)
+        self.assertIn("--root /var/lib/ltsearch", text)
+        self.assertIn("--expect-dim 512", text)
+        self.assertNotIn("--output /tmp", text)
+
+    def test_runner_detects_stale_image_missing_fixture_binary(self) -> None:
+        # 各 runner 的「镜像存在即跳过构建」检查发现不了 Dockerfile 演进；
+        # 本套件必须在起拓扑之前探测 fixture 生成器并自愈。
+        text = self._text()
+        self.assertIn("-f /app/emit_static_lance_fixture", text)
+        self.assertLess(
+            text.index("/app/emit_static_lance_fixture"),
+            text.index("lhttp_up"),
+        )
+
+    def test_runner_locks_pre_activation_control_and_release_flip(self) -> None:
+        # 激活前对照组（无 static_release_id 键、静态组为空）先于激活；
+        # variant b 在 a 之后，且翻转断言引用两个 release id 的不等比较。
+        text = self._text()
+        self.assertIn('"static_release_id" not in', text)
+        self.assertLess(
+            text.index("query-pre-static"), text.index("stage_release a a")
+        )
+        self.assertLess(
+            text.index("stage_release a a"), text.index("stage_release b b")
+        )
+        self.assertLess(
+            text.index("stage_release b b"), text.index("release_id != sys.argv[2]")
+        )
+
+    def test_runner_locks_grouping_and_projection_assertions(self) -> None:
+        # 分组/投影契约的关键断言点必须在场：静态组字段、动静不融合、
+        # include_metadata 剥离后 citation/corpus_type 保留、动态判别器。
+        text = self._text()
+        for token in [
+            '"static_count"',
+            '"static_chunks"',
+            '"dynamic_chunks"',
+            '"corpus_type"',
+            '"citation"',
+            '"chunk_source"',
+            '"static_release_id"',
+            'chunk["source"] == "hybrid"',
+            'chunk["metadata"] is None',
+            "isdisjoint",
+        ]:
+            self.assertIn(token, text, f"runner lost assertion token: {token}")
+
+
+class StaticFixtureEmitterTest(unittest.TestCase):
+    """#143: fixture 生成器的真实 embedding 模式与向后兼容守卫。"""
+
+    def _source(self) -> str:
+        self.assertTrue(
+            FIXTURE_EXAMPLE_PATH.exists(), f"missing: {FIXTURE_EXAMPLE_PATH}"
+        )
+        return FIXTURE_EXAMPLE_PATH.read_text(encoding="utf-8")
+
+    def test_example_supports_real_ltembed_embedder(self) -> None:
+        text = self._source()
+        self.assertIn("--embedder", text)
+        self.assertIn('feature = "ltembed"', text)
+        self.assertIn("ltembed_config_from_env", text)
+        # 与 build 角色同一套 bundle env：静态语料向量与 query 侧 profile 对齐。
+        self.assertIn("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR", text)
+        self.assertIn("LTSEARCH_BUILD_LTEMBED_MODEL_PATH", text)
+        self.assertIn("EmbeddingInputKind::Document", text)
+        # 写入 Lance 前就地断言维度，早于 static-build 的 dim 校验。
+        self.assertIn("dim as usize", text)
+
+    def test_example_keeps_fixed_default_and_local_only_build(self) -> None:
+        text = self._source()
+        # fixed 默认模式与 0.1 常量语义必须原样保留（原生 e2e 依赖确定性并列）。
+        self.assertIn('let mut embedder = "fixed".to_string();', text)
+        self.assertIn("0.1_f32", text)
+        # 未编译 ltembed 时给出明确报错（CI local-e2e 仍以 --features local 编译）。
+        self.assertIn(
+            "--embedder ltembed requires building with --features local,ltembed",
+            text,
+        )
+        cargo = CARGO_TOML_PATH.read_text(encoding="utf-8")
+        example_block = cargo[cargo.index("emit_static_lance_fixture") :]
+        self.assertIn('required-features = ["local"]', example_block)
+
+    def test_example_still_prints_single_table_version_line(self) -> None:
+        # 一次性容器经 stdout 捕获 table_version：stdout 必须只有一行版本号，
+        # 诊断输出一律走 stderr（eprintln! 含 println! 子串，用负向断言排除）。
+        text = self._source()
+        self.assertEqual(len(re.findall(r"(?<!e)println!", text)), 1)
+        self.assertIn('println!("{version}")', text)
+
+
+class StaticContractFixturesTest(unittest.TestCase):
+    """#143: 静态契约 fixtures 的判别力守卫（不是存在性检查）。"""
+
+    def _corpus(self) -> dict:
+        return json.loads(EXPECTED_STATIC_CORPUS_PATH.read_text(encoding="utf-8"))
+
+    def _static_query(self, name: str) -> dict:
+        return json.loads(
+            (STATIC_FIXTURES_DIR / name).read_text(encoding="utf-8")
+        )
+
+    def test_expected_static_corpus_matches_example_rows(self) -> None:
+        # 期望语料表与生成器源码同步：任何字面量漂移都会让 runner 断言失真。
+        corpus = self._corpus()
+        source = FIXTURE_EXAMPLE_PATH.read_text(encoding="utf-8")
+        self.assertEqual(corpus["corpus_type"], "legal")
+        for doc in corpus["documents"]:
+            for key in ("doc_id", "resource_id", "source_ref", "title", "url", "lang"):
+                self.assertIn(
+                    f'"{doc[key]}"', source, f"{doc['doc_id']}.{key} not in example"
+                )
+        # lang:zh 是唯一选择器：恰一条 zh 行，static_chunks[0] 断言才确定。
+        langs = [d["lang"] for d in corpus["documents"]]
+        self.assertEqual(langs.count("zh"), 1)
+        self.assertGreaterEqual(langs.count("en"), 1)
+
+    def test_zh_filter_isolates_static_from_dynamic_corpus(self) -> None:
+        # zh 查询下「动态组为空」的断言要有判别力，动态语料必须没有 zh 文档。
+        documents = json.loads(WRITE_REQUEST_PATH.read_text(encoding="utf-8"))[
+            "documents"
+        ]
+        for doc in documents:
+            self.assertNotEqual(doc["metadata"].get("lang"), "zh", doc["doc_id"])
+
+    def test_static_queries_cover_both_corpora(self) -> None:
+        # 全集断言依赖 top_k 全覆盖：3*top_k ≥ 静态语料 + 动态语料总数。
+        corpus_size = len(self._corpus()["documents"]) + len(
+            json.loads(WRITE_REQUEST_PATH.read_text(encoding="utf-8"))["documents"]
+        )
+        for name in [
+            "query_static_zh.json",
+            "query_static_no_metadata.json",
+            "query_static_zh_no_metadata.json",
+        ]:
+            fixture = self._static_query(name)
+            self.assertGreaterEqual(3 * fixture["top_k"], corpus_size, name)
+        real = json.loads(QUERY_REAL_FIXTURE_PATH.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(3 * real["top_k"], corpus_size)
+
+    def test_static_query_variants_differ_only_by_projection_or_filter(self) -> None:
+        # 组合契约（先过滤后剥离）的判别前提：各变体与基准 real 查询只差
+        # filters / include_metadata 一个维度。
+        base = json.loads(QUERY_REAL_FIXTURE_PATH.read_text(encoding="utf-8"))
+        zh = self._static_query("query_static_zh.json")
+        no_meta = self._static_query("query_static_no_metadata.json")
+        zh_no_meta = self._static_query("query_static_zh_no_metadata.json")
+
+        def stripped(fixture: dict, *keys: str) -> dict:
+            return {k: v for k, v in fixture.items() if k not in keys}
+
+        self.assertEqual(stripped(zh, "filters"), stripped(base, "filters"))
+        self.assertEqual(zh["filters"], {"lang": "zh"})
+        self.assertEqual(
+            stripped(no_meta, "include_metadata"),
+            stripped(base, "include_metadata"),
+        )
+        self.assertFalse(no_meta["include_metadata"])
+        self.assertEqual(
+            stripped(zh_no_meta, "filters", "include_metadata"),
+            stripped(base, "filters", "include_metadata"),
+        )
+        self.assertEqual(zh_no_meta["filters"], {"lang": "zh"})
+        self.assertFalse(zh_no_meta["include_metadata"])
 
 
 if __name__ == "__main__":

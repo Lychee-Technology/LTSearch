@@ -49,11 +49,14 @@ RUN printf '\n[patch."https://github.com/Lychee-Technology/LTEmbed"]\nltembed = 
 RUN --mount=type=cache,id=ltsearch-cargo-registry,target=/root/.cargo/registry \
     --mount=type=cache,id=ltsearch-cargo-git,target=/root/.cargo/git \
     --mount=type=cache,id=ltsearch-cargo-target,target=/src/target \
-    cargo build --release --no-default-features --features local,ltembed --bin ltsearch && \
-    cp target/release/ltsearch /ltsearch
+    cargo build --release --no-default-features --features local,ltembed --bin ltsearch --example emit_static_lance_fixture && \
+    cp target/release/ltsearch /ltsearch && \
+    cp target/release/examples/emit_static_lance_fixture /emit_static_lance_fixture
 
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023@sha256:590b8c9fdab65c7f5b8a2392739104ed6bc5055433ba8ff2bf0d2fa500db2ea3
 COPY --from=builder /ltsearch /app/ltsearch
+# #143: fixture 生成器随镜像分发，静态契约 runner 在容器内以真实 bundle 产 Lance fixture。
+COPY --from=builder /emit_static_lance_fixture /app/emit_static_lance_fixture
 COPY --from=bundle /ltembed-assets /opt/ltembed
 ENV LTSEARCH_HTTP_PORT=8080
 EXPOSE 8080

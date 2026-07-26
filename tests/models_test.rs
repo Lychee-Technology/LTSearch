@@ -97,6 +97,20 @@ fn search_models_round_trip_through_serde() {
     };
     assert!(result.validate().is_ok());
 
+    // #143 回归：静态 TurboQuant 的近似内积在真实向量下可为负，负分是合法
+    // 排序键，不得被响应校验拒绝；非有限值仍然拒绝。
+    let negative_score = SearchResult {
+        score: -0.25,
+        chunk_source: ChunkSource::Static,
+        ..result.clone()
+    };
+    assert!(negative_score.validate().is_ok());
+    let nan_score = SearchResult {
+        score: f32::NAN,
+        ..result.clone()
+    };
+    assert!(nan_score.validate().is_err());
+
     let response = SearchResponse {
         static_chunks: vec![result.clone()],
         static_count: 1,

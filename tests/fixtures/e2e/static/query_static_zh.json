@@ -1,0 +1,8 @@
+{
+  "query": "rust retrieval",
+  "top_k": 6,
+  "filters": {
+    "lang": "zh"
+  },
+  "include_metadata": true
+}

@@ -1,0 +1,32 @@
+{
+  "corpus_type": "legal",
+  "documents": [
+    {
+      "doc_id": "doc-alpha",
+      "resource_id": "res-alpha",
+      "source_type": "statute",
+      "source_ref": "ref-alpha",
+      "title": "Alpha 中文标题",
+      "url": "https://example.com/alpha",
+      "lang": "zh"
+    },
+    {
+      "doc_id": "doc-beta",
+      "resource_id": "res-beta",
+      "source_type": "statute",
+      "source_ref": "ref-beta",
+      "title": "Beta English Title",
+      "url": "https://example.com/beta",
+      "lang": "en"
+    },
+    {
+      "doc_id": "doc-gamma",
+      "resource_id": "res-gamma",
+      "source_type": "statute",
+      "source_ref": "ref-gamma",
+      "title": "Gamma English Title",
+      "url": "https://example.com/gamma",
+      "lang": "en"
+    }
+  ]
+}
