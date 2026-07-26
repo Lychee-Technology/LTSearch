@@ -171,7 +171,9 @@ impl SearchResult {
         if self.doc_id.is_empty() {
             return Err(ValidationError::Required { field: "doc_id" });
         }
-        if !self.score.is_finite() || self.score < 0.0 {
+        // score 是组内排序键：静态 TurboQuant 路径返回近似内积，真实向量下
+        // 负相似度是合法取值（#143）；只拒绝无法排序的非有限值。
+        if !self.score.is_finite() {
             return Err(ValidationError::InvalidValue { field: "score" });
         }
 

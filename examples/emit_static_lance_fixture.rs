@@ -10,14 +10,21 @@
 //! non-numeric `doc_id`s (`doc-alpha`, ...) so the flow can strongly assert
 //! `static_chunks[0].doc_id == "doc-alpha"`.
 //!
-//! Embeddings are all `0.1` so they rank identically against the query's fixed
-//! `0.1`-repeated embedding; the `lang` filter alone selects the top chunk.
+//! Embedding modes (`--embedder`, default `fixed`):
+//! - `fixed`: all-`0.1` vectors that rank identically against the query's fixed
+//!   `0.1`-repeated embedding; the `lang` filter alone selects the top chunk.
+//! - `ltembed` (#143, requires `--features local,ltembed`): real 512-dim
+//!   LTEmbed document embeddings produced by the same bundle the build role
+//!   uses (`LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR`/`LTSEARCH_BUILD_LTEMBED_MODEL_PATH`),
+//!   so static retrieval in the real local topology matches the query-side
+//!   embedding profile.
 //!
-//! CLI: `emit_static_lance_fixture <dataset_path> [--variant a|b]`. Variant `b`
-//! changes one English row's text so the derived `release_id` differs from
-//! variant `a` while the Chinese `doc-alpha` row (and thus the `lang:zh`
-//! assertions) stays identical. On success the created table version is printed
-//! as a single integer line on stdout for the driver to pin in the build config.
+//! CLI: `emit_static_lance_fixture <dataset_path> [--variant a|b] [--embedder fixed|ltembed]`.
+//! Variant `b` changes one English row's text so the derived `release_id`
+//! differs from variant `a` while the Chinese `doc-alpha` row (and thus the
+//! `lang:zh` assertions) stays identical. On success the created table version
+//! is printed as a single integer line on stdout for the driver to pin in the
+//! build config.
 
 use std::sync::Arc;
 
@@ -50,14 +57,25 @@ fn make_schema(dim: i32) -> Arc<ArrowSchema> {
     ]))
 }
 
-fn make_batch(schema: Arc<ArrowSchema>, dim: i32, rows: &[FixtureRow]) -> RecordBatch {
+fn make_batch(
+    schema: Arc<ArrowSchema>,
+    dim: i32,
+    rows: &[FixtureRow],
+    row_embeddings: &[Vec<f32>],
+) -> RecordBatch {
+    assert_eq!(
+        rows.len(),
+        row_embeddings.len(),
+        "one embedding per fixture row"
+    );
     let doc_ids = StringArray::from(rows.iter().map(|r| r.doc_id).collect::<Vec<_>>());
     let texts = StringArray::from(rows.iter().map(|r| r.text.as_str()).collect::<Vec<_>>());
     let metadata = StringArray::from(rows.iter().map(|r| r.metadata.as_str()).collect::<Vec<_>>());
     let timestamps = Int64Array::from(vec![0_i64; rows.len()]);
     let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        rows.iter()
-            .map(|_| Some((0..dim).map(|_| Some(0.1_f32)).collect::<Vec<_>>())),
+        row_embeddings
+            .iter()
+            .map(|vector| Some(vector.iter().map(|value| Some(*value)).collect::<Vec<_>>())),
         dim,
     );
 
@@ -74,9 +92,14 @@ fn make_batch(schema: Arc<ArrowSchema>, dim: i32, rows: &[FixtureRow]) -> Record
     .expect("record batch construction must succeed")
 }
 
-async fn create_documents_table(dataset_path: &str, dim: i32, rows: &[FixtureRow]) -> u64 {
+async fn create_documents_table(
+    dataset_path: &str,
+    dim: i32,
+    rows: &[FixtureRow],
+    row_embeddings: &[Vec<f32>],
+) -> u64 {
     let schema = make_schema(dim);
-    let batch = make_batch(schema.clone(), dim, rows);
+    let batch = make_batch(schema.clone(), dim, rows, row_embeddings);
     let batches: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(
         vec![Ok(batch)].into_iter(),
         schema,
@@ -161,10 +184,53 @@ fn rows_for_variant(variant: &str) -> Vec<FixtureRow> {
     ]
 }
 
+/// Constant `0.1` vectors: every row ranks identically against the fixed-provider
+/// query embedding, so the native e2e flow keeps its deterministic tie-break order.
+fn fixed_embeddings(dim: i32, rows: &[FixtureRow]) -> Vec<Vec<f32>> {
+    rows.iter().map(|_| vec![0.1_f32; dim as usize]).collect()
+}
+
+/// Real LTEmbed document embeddings (#143): same bundle env the build role uses,
+/// so static corpus vectors match the query-side embedding profile.
+#[cfg(feature = "ltembed")]
+fn ltembed_embeddings(dim: i32, rows: &[FixtureRow]) -> Vec<Vec<f32>> {
+    use ltembed::engine::EmbeddingInputKind;
+    use ltsearch::embedding::{
+        ltembed_config_from_env, EmbeddingGenerator, LTEmbedEmbeddingGenerator,
+    };
+
+    let config = ltembed_config_from_env(
+        "LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR",
+        "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
+    )
+    .expect("ltembed bundle env must be set for --embedder ltembed");
+    let generator = LTEmbedEmbeddingGenerator::from_config(&config, EmbeddingInputKind::Document)
+        .expect("LTEmbed engine must initialize from the pinned bundle");
+    rows.iter()
+        .map(|row| {
+            let vector = generator
+                .generate(&row.text)
+                .expect("LTEmbed document embedding must succeed");
+            assert_eq!(
+                vector.len(),
+                dim as usize,
+                "LTEmbed embedding dim must match fixture schema"
+            );
+            vector
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "ltembed"))]
+fn ltembed_embeddings(_dim: i32, _rows: &[FixtureRow]) -> Vec<Vec<f32>> {
+    panic!("--embedder ltembed requires building with --features local,ltembed");
+}
+
 #[tokio::main]
 async fn main() {
     let mut dataset_path: Option<String> = None;
     let mut variant = "a".to_string();
+    let mut embedder = "fixed".to_string();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -172,6 +238,12 @@ async fn main() {
                 variant = args
                     .next()
                     .expect("--variant requires a value (a|b)")
+                    .to_string();
+            }
+            "--embedder" => {
+                embedder = args
+                    .next()
+                    .expect("--embedder requires a value (fixed|ltembed)")
                     .to_string();
             }
             other if other.starts_with("--") => panic!("unknown argument: {other}"),
@@ -184,18 +256,24 @@ async fn main() {
         }
     }
 
-    let dataset_path =
-        dataset_path.expect("usage: emit_static_lance_fixture <dataset_path> [--variant a|b]");
+    let dataset_path = dataset_path.expect(
+        "usage: emit_static_lance_fixture <dataset_path> [--variant a|b] [--embedder fixed|ltembed]",
+    );
     assert!(
         variant == "a" || variant == "b",
         "--variant must be 'a' or 'b', got {variant}"
     );
 
     let rows = rows_for_variant(&variant);
-    let version = create_documents_table(&dataset_path, DIM, &rows).await;
+    let row_embeddings = match embedder.as_str() {
+        "fixed" => fixed_embeddings(DIM, &rows),
+        "ltembed" => ltembed_embeddings(DIM, &rows),
+        other => panic!("--embedder must be 'fixed' or 'ltembed', got {other}"),
+    };
+    let version = create_documents_table(&dataset_path, DIM, &rows, &row_embeddings).await;
 
     eprintln!(
-        "emitted {} documents (variant {variant}) into {dataset_path} at table version {version}",
+        "emitted {} documents (variant {variant}, embedder {embedder}) into {dataset_path} at table version {version}",
         rows.len()
     );
     // Sole stdout line: the pinned table version for the static-build config.

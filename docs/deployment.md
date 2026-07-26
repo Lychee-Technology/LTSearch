@@ -84,8 +84,11 @@ LTSEARCH_LOCAL_IMAGE=ghcr.io/lychee-technology/ltsearch-local:<tag> \
   `up -d --wait` 变绿即真实推理可用。
 
 ```bash
-bash scripts/e2e/build-local-ltembed-image.sh   # 物化 LTEmbed checkout + 注入 pin + arm64 构建
-bash scripts/e2e/run-local-real-flow.sh         # health → write → 自动 build → query（纯 HTTP 断言）
+bash scripts/e2e/build-local-ltembed-image.sh          # 物化 LTEmbed checkout + 注入 pin + arm64 构建
+bash scripts/e2e/run-local-real-flow.sh                # health → write → 自动 build → query（纯 HTTP 断言）
+bash scripts/e2e/run-local-real-degraded-health.sh     # #142：降级 bundle 的分角色健康契约（503/200）
+bash scripts/e2e/run-local-real-dynamic-contract.sh    # #142：动态索引六阶段 HTTP 契约（路由/校验/删除/重启持久性）
+bash scripts/e2e/run-local-real-static-contract.sh     # #143：静态语料检索契约（容器内真实向量 fixture + static-build/activate）
 ```
 
 清理语义：无论成败 runner 都 `down -v --remove-orphans`；失败时先把

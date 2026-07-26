@@ -217,6 +217,19 @@ bash scripts/e2e/build-local-ltembed-image.sh
 # Blackbox main chain: health → write → automatic build → query,
 # asserted only via /health, /write, /query HTTP responses
 bash scripts/e2e/run-local-real-flow.sh
+
+# Degraded-bundle health contract (#142): missing/broken bundle → query/build 503, write stays 200
+bash scripts/e2e/run-local-real-degraded-health.sh
+
+# Dynamic-index HTTP contract suite (#142): routing, validation, projection,
+# deletes, snapshots, restart persistence — six phases, HTTP-only assertions
+bash scripts/e2e/run-local-real-dynamic-contract.sh
+
+# Static-corpus retrieval contract (#143): generates a real-embedding Lance
+# fixture inside the container, runs static-build + static-activate on the
+# shared volume, then asserts static_chunks/citation/corpus_type grouping and
+# release flips via HTTP responses only
+bash scripts/e2e/run-local-real-static-contract.sh
 ```
 
 Each run is fully isolated: a unique compose project (`ltsearch-real-<run_id>`), ephemeral loopback ports discovered via `docker compose port`, and project-scoped volume/network — concurrent runs do not collide. Query/build healthchecks execute a real embedding probe, so `up -d --wait` going healthy means real inference works (first model load is slow; the healthcheck allows for it). On success the runner removes all containers, volumes, and scratch files; on failure it tears the stack down but preserves service logs and recorded request/response payloads under `.e2e-tmp/ltsearch-real-<run_id>/`. This topology is not part of the PR gate; daily CI regression is tracked by #144.
