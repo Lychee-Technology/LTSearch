@@ -1,0 +1,58 @@
+name: Local Real LTEmbed E2E
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# #144：real-LTEmbed local HTTP 黑盒套件的每日回归。重型（真实模型下载 +
+# arm64 镜像构建 + 四个 HTTP 契约 runner），不进 PR gate——ci.yml 的结构
+# 守卫禁止 schedule，所以独立成文件。结构由 tests/test_daily_e2e_workflow.py
+# 锁定（该守卫在 ci.yml fast job 中运行）。
+on:
+  schedule:
+    - cron: '30 18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: local-real-ltembed-e2e
+  cancel-in-progress: false
+
+jobs:
+  real-ltembed-e2e:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      # 镜像必须无条件从当前 checkout 构建：runner 的「tag 存在即跳过
+      # 构建」只服务本地迭代，CI 复用旧镜像会让验证与 HEAD 脱钩产生假绿。
+      # 构建脚本自带 arm64 架构断言与 bundle pin 校验。
+      - name: Build real image from checkout
+        run: bash scripts/e2e/build-local-ltembed-image.sh
+      - name: Main write→build→query flow
+        run: bash scripts/e2e/run-local-real-flow.sh
+      - name: Degraded bundle health contract
+        run: bash scripts/e2e/run-local-real-degraded-health.sh
+      - name: Dynamic index HTTP contract
+        run: bash scripts/e2e/run-local-real-dynamic-contract.sh
+      - name: Static corpus retrieval contract
+        run: bash scripts/e2e/run-local-real-static-contract.sh
+      # lhttp 失败路径把服务日志与 HTTP 请求/响应载荷保留在
+      # .e2e-tmp/<project>/ 下；成功路径会删掉 run 目录，故必须容忍空目录。
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-e2e-diagnostics-${{ github.run_id }}
+          path: .e2e-tmp/
+          if-no-files-found: ignore
+          retention-days: 14
+      # teardown 兜底：runner 自身经 lhttp_finish down -v，此处只兜「teardown
+      # 失败泄漏」的残留。四个 runner 的 compose project 前缀都是 ltsearch-real。
+      - name: Clean up leaked compose resources
+        if: always()
+        run: |
+          docker ps -aq --filter "name=ltsearch-real" | xargs -r docker rm -f
+          docker volume ls -q --filter "name=ltsearch-real" | xargs -r docker volume rm -f
+          docker network ls -q --filter "name=ltsearch-real" | xargs -r docker network rm || true
