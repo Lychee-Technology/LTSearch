@@ -94,7 +94,11 @@ bash scripts/e2e/run-local-real-static-contract.sh     # #143：静态语料检�
 清理语义：无论成败 runner 都 `down -v --remove-orphans`；失败时先把
 `compose ps`、各服务日志与全部请求/响应载荷落盘
 `.e2e-tmp/ltsearch-real-<run_id>/` 并保留，成功时连该目录一并删除。公共接口在
-`scripts/e2e/local_http_lib.sh`（#142/#143 契约套件复用）。每日 CI 回归归 #144。
+`scripts/e2e/local_http_lib.sh`（#142/#143 契约套件复用）。每日 CI 回归由独立
+workflow `.github/workflows/e2e-local-real.yml` 承担（schedule + 手动
+`workflow_dispatch`，Linux/arm64，从当前 checkout 无条件重建镜像并顺序跑全部
+四个 runner，runner 输出 tee 进 `.e2e-tmp/runner-logs/`；失败诊断——服务日志、
+HTTP 载荷与 runner 输出日志——上传为 artifact 保留 14 天）。
 
 ## 3. AWS 部署（Lambda ZIP + HTTP API + SQS）
 
