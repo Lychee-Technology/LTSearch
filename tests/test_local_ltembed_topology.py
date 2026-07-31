@@ -162,14 +162,19 @@ class HttpLibFinishExitCodeBehaviorTest(unittest.TestCase):
 
     def test_teardown_failure_propagates_as_script_exit_code(self) -> None:
         import subprocess
+        import tempfile
 
         for caller_opts in ("", "set -euo pipefail\n"):
-            with self.subTest(caller_opts=caller_opts or "(no errexit)"):
+            # run dir 由 Python 侧兜底删除：失败退出走「diagnostics preserved」
+            # 分支，脚本自身不会清理。
+            with self.subTest(
+                caller_opts=caller_opts or "(no errexit)"
+            ), tempfile.TemporaryDirectory() as run_dir:
                 script = (
                     caller_opts
                     + f'source "{HTTP_LIB_PATH}"\n'
                     + 'LHTTP_PROJECT="finish-exit-code-test"\n'
-                    + 'LHTTP_RUN_DIR="$(mktemp -d)"\n'
+                    + f'LHTTP_RUN_DIR="{run_dir}"\n'
                     + "lhttp_down() { return 7; }\n"
                     + "lhttp_dump_diagnostics() { :; }\n"
                     + "trap 'lhttp_finish $?' EXIT\n"
