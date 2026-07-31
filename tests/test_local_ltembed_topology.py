@@ -90,6 +90,9 @@ class LocalHttpLibTest(unittest.TestCase):
         # teardown 失败必须传播（P1）：不允许回到 `lhttp_down || true` 的写法。
         self.assertNotIn("lhttp_down || true", text)
         self.assertIn('exit_code="$down_rc"', text)
+        # #152：trap 内 return 不传播退出码，必须显式 exit。
+        self.assertIn('exit "$exit_code"', text)
+        self.assertNotIn('return "$exit_code"', text)
 
     def test_http_lib_polling_records_payloads(self) -> None:
         # 版本轮询必须经 lhttp_request 落盘（P2），不得绕过载荷记录直连 curl。
@@ -144,6 +147,51 @@ class HttpLibReadyTimeoutBehaviorTest(unittest.TestCase):
             self.assertLess(elapsed, 30, "timeout budget was not honored")
         finally:
             listener.close()
+
+
+class HttpLibFinishExitCodeBehaviorTest(unittest.TestCase):
+    """#152: lhttp_finish 必须把 teardown 失败传播为脚本非零退出码。
+
+    bash 语义下 EXIT trap 内的 `return` 不改变脚本最终退出码，只有显式
+    `exit N` 才会。现有 runner 因 `set -euo pipefail` 恰好被 errexit 兜底
+    （trap 末命令失败触发 errexit 退出），但库的退出码契约不得依赖调用方
+    的 shell 选项：无 errexit 的调用方会静默丢失传播。这里对两种调用方
+    形态真实运行「业务成功 + lhttp_down 失败」脚本，断言 teardown 的 rc
+    都成为整体退出码。
+    """
+
+    def test_teardown_failure_propagates_as_script_exit_code(self) -> None:
+        import subprocess
+        import tempfile
+
+        for caller_opts in ("", "set -euo pipefail\n"):
+            # run dir 由 Python 侧兜底删除：失败退出走「diagnostics preserved」
+            # 分支，脚本自身不会清理。
+            with self.subTest(
+                caller_opts=caller_opts or "(no errexit)"
+            ), tempfile.TemporaryDirectory() as run_dir:
+                script = (
+                    caller_opts
+                    + f'source "{HTTP_LIB_PATH}"\n'
+                    + 'LHTTP_PROJECT="finish-exit-code-test"\n'
+                    + f'LHTTP_RUN_DIR="{run_dir}"\n'
+                    + "lhttp_down() { return 7; }\n"
+                    + "lhttp_dump_diagnostics() { :; }\n"
+                    + "trap 'lhttp_finish $?' EXIT\n"
+                    + "exit 0\n"
+                )
+                proc = subprocess.run(
+                    ["bash", "-c", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertEqual(
+                    proc.returncode,
+                    7,
+                    "successful run with failing teardown must exit with the "
+                    f"teardown rc, got {proc.returncode}: {proc.stderr}",
+                )
 
 
 class LocalLtembedImageTest(unittest.TestCase):

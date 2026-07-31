@@ -277,5 +277,8 @@ lhttp_finish() {
   else
     echo "diagnostics preserved: $LHTTP_RUN_DIR" >&2
   fi
-  return "$exit_code"
+  # EXIT trap 内 return 不改变脚本退出码，必须显式 exit 才能把 teardown
+  # 失败传播出去（不得依赖调用方 errexit 兜底）。trap 已在函数开头解除，
+  # 无递归风险。
+  exit "$exit_code"
 }
