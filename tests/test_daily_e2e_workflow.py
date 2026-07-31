@@ -48,11 +48,24 @@ class DailyE2eWorkflowTest(unittest.TestCase):
         # 必须先于全部 runner 执行。
         self.assertIn("run: bash scripts/e2e/build-local-ltembed-image.sh", job)
 
+        # AC4：runner 自身的 stdout/stderr（叙述 + lhttp_dump_diagnostics 输出）
+        # 也是「测试运行日志」，必须 tee 进 .e2e-tmp/ 才能随 artifact 上传。
+        # tee 管道需要 pipefail 兜底，否则 runner 失败会被 tee 的 0 退出码
+        # 吞掉——`shell: bash` 注入 `-eo pipefail`，四个 runner 步骤都必须带。
+        self.assertIn("run: mkdir -p .e2e-tmp/runner-logs", job)
+        job_code = "\n".join(
+            line for line in job.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertEqual(job_code.count("shell: bash"), 4)
         runners = [
-            "run: bash scripts/e2e/run-local-real-flow.sh",
-            "run: bash scripts/e2e/run-local-real-degraded-health.sh",
-            "run: bash scripts/e2e/run-local-real-dynamic-contract.sh",
-            "run: bash scripts/e2e/run-local-real-static-contract.sh",
+            "run: bash scripts/e2e/run-local-real-flow.sh 2>&1"
+            " | tee .e2e-tmp/runner-logs/main-flow.log",
+            "run: bash scripts/e2e/run-local-real-degraded-health.sh 2>&1"
+            " | tee .e2e-tmp/runner-logs/degraded-health.log",
+            "run: bash scripts/e2e/run-local-real-dynamic-contract.sh 2>&1"
+            " | tee .e2e-tmp/runner-logs/dynamic-contract.log",
+            "run: bash scripts/e2e/run-local-real-static-contract.sh 2>&1"
+            " | tee .e2e-tmp/runner-logs/static-contract.log",
         ]
         positions = []
         for runner in runners:
@@ -94,6 +107,7 @@ class DailyE2eWorkflowTest(unittest.TestCase):
         self.assertIn("e2e-local-real.yml", readme)
         self.assertIn("gh workflow run e2e-local-real.yml", readme)
         self.assertIn("Linux/arm64", readme)
+        self.assertIn(".e2e-tmp/runner-logs/", readme)
 
         deployment = DEPLOYMENT_DOC_PATH.read_text(encoding="utf-8")
         self.assertNotIn("每日 CI 回归归 #144", deployment)

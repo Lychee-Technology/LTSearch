@@ -30,14 +30,23 @@ jobs:
       # 构建脚本自带 arm64 架构断言与 bundle pin 校验。
       - name: Build real image from checkout
         run: bash scripts/e2e/build-local-ltembed-image.sh
+      # runner 自身输出（叙述 + lhttp_dump_diagnostics）也是测试运行日志，
+      # tee 进 .e2e-tmp/ 随失败 artifact 上传。tee 管道靠 `shell: bash`
+      # 注入的 pipefail 保留 runner 退出码，否则失败会被 tee 吞成 0。
+      - name: Prepare runner log directory
+        run: mkdir -p .e2e-tmp/runner-logs
       - name: Main write→build→query flow
-        run: bash scripts/e2e/run-local-real-flow.sh
+        shell: bash
+        run: bash scripts/e2e/run-local-real-flow.sh 2>&1 | tee .e2e-tmp/runner-logs/main-flow.log
       - name: Degraded bundle health contract
-        run: bash scripts/e2e/run-local-real-degraded-health.sh
+        shell: bash
+        run: bash scripts/e2e/run-local-real-degraded-health.sh 2>&1 | tee .e2e-tmp/runner-logs/degraded-health.log
       - name: Dynamic index HTTP contract
-        run: bash scripts/e2e/run-local-real-dynamic-contract.sh
+        shell: bash
+        run: bash scripts/e2e/run-local-real-dynamic-contract.sh 2>&1 | tee .e2e-tmp/runner-logs/dynamic-contract.log
       - name: Static corpus retrieval contract
-        run: bash scripts/e2e/run-local-real-static-contract.sh
+        shell: bash
+        run: bash scripts/e2e/run-local-real-static-contract.sh 2>&1 | tee .e2e-tmp/runner-logs/static-contract.log
       # lhttp 失败路径把服务日志与 HTTP 请求/响应载荷保留在
       # .e2e-tmp/<project>/ 下；成功路径会删掉 run 目录，故必须容忍空目录。
       - name: Upload failure diagnostics
