@@ -6,6 +6,11 @@
 .sam-local-deps/
 target/
 .claude/
+docs/superpowers/
+docs/agents/
+.superpowers/
 
 # Lambda packaging artifacts
 dist/
+.pytest_cache/
+.ruff_cache/
