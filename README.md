@@ -14,7 +14,7 @@ Current follow-on work is tracked in `Sub-plan 4: Real Embeddings + Dev Workflow
 
 ## Prerequisites
 
-- **Rust** — automatically installed via `rust-toolchain.toml` (1.94.0)
+- **Rust** — automatically installed via `rust-toolchain.toml` (1.94.1)
 - **Docker** — required for Moto integration tests
 
 ## Quick Start

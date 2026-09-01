@@ -24,7 +24,7 @@
 强制单函数解压 ≤250MB、bootstrap AArch64、资产 hash/预算复核。
 
 **可复现性边界**：构建输入全部钉死——base 镜像按 digest pin + dnf releasever 锁
-（`sam/builder.Dockerfile` / `sam/local.Dockerfile`）、Rust toolchain 1.94.0、
+（`sam/builder.Dockerfile` / `sam/local.Dockerfile`）、Rust toolchain 1.94.1、
 `Cargo.lock` + vendored stub、LTEmbed rev 随 lockfile、ort bundle URL+sha256 pin；
 归档 mtime 与 provenance `built_at` 统一取 `SOURCE_DATE_EPOCH`（默认 HEAD 提交
 时间，TZ=UTC 打包）。同一 commit 重复运行 `package-release.sh`，4 个 zip 与本地

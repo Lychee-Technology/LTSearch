@@ -1488,7 +1488,7 @@ time only.)
 ### Development and Testing
 
 **Build Tools**:
-- Rust toolchain (1.94.0, per `rust-toolchain.toml`)
+- Rust toolchain (1.94.1, per `rust-toolchain.toml`)
 - Docker + BuildKit for the multi-stage image build (`sam/builder.Dockerfile`)
 - AWS SAM CLI for local end-to-end runs against Moto
 

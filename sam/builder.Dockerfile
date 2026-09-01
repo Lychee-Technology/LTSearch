@@ -34,7 +34,7 @@ RUN mkdir -p /ltembed-assets && \
 FROM public.ecr.aws/amazonlinux/amazonlinux:2023@sha256:590b8c9fdab65c7f5b8a2392739104ed6bc5055433ba8ff2bf0d2fa500db2ea3 AS builder
 RUN echo "2023.12.20260710" > /etc/dnf/vars/releasever
 RUN dnf install -y --allowerasing gcc gcc-c++ make perl pkgconfig openssl-devel git tar gzip curl && dnf clean all
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.94.0
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.94.1
 ENV PATH="/root/.cargo/bin:${PATH}"
 ARG LTEMBED_MODE=stub
 COPY --from=bundle /ltembed-assets /ltembed-assets

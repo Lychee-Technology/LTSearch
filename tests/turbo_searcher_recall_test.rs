@@ -10,7 +10,7 @@ use ltsearch::index::{
 use ltsearch::models::{IndexManifest, ShardManifest};
 use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
 use ltsearch::storage::{ActiveManifest, ManifestHead};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 fn stub_manifest() -> ActiveManifest {
@@ -195,9 +195,9 @@ fn synthetic_vector(rng: &mut ChaCha8Rng, topic: usize, doc_variant: Option<usiz
         };
 
         let noise = if doc_variant.is_some() {
-            rng.gen_range(-0.04..=0.04)
+            rng.random_range(-0.04..=0.04)
         } else {
-            rng.gen_range(-0.03..=0.03)
+            rng.random_range(-0.03..=0.03)
         };
 
         vector.push(base + noise + variant_bias(dim, variant));

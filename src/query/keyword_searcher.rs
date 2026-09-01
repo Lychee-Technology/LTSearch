@@ -138,7 +138,7 @@ where
 
         loop {
             let top_docs = searcher
-                .search(&query, &TopDocs::with_limit(limit))
+                .search(&query, &TopDocs::with_limit(limit).order_by_score())
                 .map_err(|source| SearchError::Execution {
                     message: format!("failed to execute Tantivy query: {source}"),
                 })?;
