@@ -1428,16 +1428,16 @@ Target latency budget (300ms SLA):
 ### Core Runtime Dependencies
 
 **Rust Crates** (actual, per `Cargo.toml`):
-- `tokio` (1.35): async runtime
+- `tokio` (1.53): async runtime
 - `aws-config`, `aws-sdk-s3`, `aws-sdk-sqs` (1.x): AWS clients
-- `lambda_runtime` (0.13): AWS Lambda runtime for Rust
+- `lambda_runtime` (1.3): AWS Lambda runtime for Rust
 - `serde` / `serde_json` (1.0): serialization
-- `rayon` (1.10): parallel static-index scan; `memmap2` (0.9): mmap of the TurboQuant index
+- `rayon` (1.11): parallel static-index scan; `memmap2` (0.9): mmap of the TurboQuant index
 
 **Search Libraries** (pinned):
-- `lancedb` (0.26.2) + `lance` (=2.0.0): vector search (dynamic corpus)
-- `tantivy` (=0.24.2): BM25 keyword search
-- `arrow-array` / `arrow-schema` (57.2): columnar decode
+- `lancedb` (0.37.1) + `lance` (=10.0.0): vector search (dynamic corpus)
+- `tantivy` (=0.26.1): BM25 keyword search
+- `arrow-array` / `arrow-schema` (58): columnar decode
 
 **Embedding Generation** (local, no external API):
 - `ltembed` (git dependency, `optional`, behind the `ltembed` feature): wraps the LTEmbed ONNX
