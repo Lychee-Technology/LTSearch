@@ -274,7 +274,7 @@ where
                     shard_dir.display()
                 ),
             })?;
-            // lancedb 0.31 requires `create_table` inputs to implement `Scannable`;
+            // lancedb requires `create_table` inputs to implement `Scannable`;
             // a bare `RecordBatchIterator` no longer qualifies, so box it as a
             // `RecordBatchReader` (which does) while preserving the explicit schema.
             let batches: Box<dyn RecordBatchReader + Send> = Box::new(RecordBatchIterator::new(

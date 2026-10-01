@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::fmt;
@@ -73,7 +73,7 @@ impl CentroidTable {
         let len = dim as usize * centroids_per_dim as usize;
         let mut values = Vec::with_capacity(len);
         for _ in 0..len {
-            values.push(rng.gen_range(-1.0f32..=1.0f32));
+            values.push(rng.random_range(-1.0f32..=1.0f32));
         }
 
         Self {
@@ -138,7 +138,7 @@ impl ProjectionMatrix {
         let len = output_dim as usize * input_dim as usize;
         let mut values = Vec::with_capacity(len);
         for _ in 0..len {
-            values.push(rng.gen_range(-1.0f32..=1.0f32));
+            values.push(rng.random_range(-1.0f32..=1.0f32));
         }
 
         Self {

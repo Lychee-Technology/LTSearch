@@ -82,7 +82,7 @@ fn write_index(root: &Path, relative_path: &str, documents: &[(&str, &str)]) {
         .searcher()
         .search(
             &tantivy::query::AllQuery,
-            &TopDocs::with_limit(documents.len().max(1)),
+            &TopDocs::with_limit(documents.len().max(1)).order_by_score(),
         )
         .unwrap();
 }
@@ -122,7 +122,7 @@ fn write_index_with_metadata(
         .searcher()
         .search(
             &tantivy::query::AllQuery,
-            &TopDocs::with_limit(documents.len().max(1)),
+            &TopDocs::with_limit(documents.len().max(1)).order_by_score(),
         )
         .unwrap();
 }

@@ -232,7 +232,9 @@ fn builder_outputs_tantivy_and_lance_artifacts_matching_document_contract() {
     let searcher = reader.searcher();
     let parser = QueryParser::for_index(&tantivy_index, vec![text]);
     let query = parser.parse_query("generated").unwrap();
-    let hits = searcher.search(&query, &TopDocs::with_limit(2)).unwrap();
+    let hits = searcher
+        .search(&query, &TopDocs::with_limit(2).order_by_score())
+        .unwrap();
     assert_eq!(hits.len(), 1);
     let retrieved: TantivyDocument = searcher.doc(hits[0].1).unwrap();
     let hit_doc_id = retrieved

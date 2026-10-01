@@ -13,7 +13,10 @@ on:
 jobs:
   fast:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    # 60 而非 30：Cargo.lock / toolchain 变更会让 rust-cache 完全失手（连 restore-key
+    # 前缀都不同），冷缓存下 verify-fast.sh 在 arm 跑者上超过 30 分钟（PR #156 实测
+    # build+test 27 分钟后 clippy 尚未开始即被杀）。热缓存约 19 分钟不受影响。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:

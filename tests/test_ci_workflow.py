@@ -38,7 +38,7 @@ class CiWorkflowTest(unittest.TestCase):
 
         fast = jobs["fast"]
         self.assertIn("runs-on: ubuntu-24.04-arm", fast)
-        self.assertIn("timeout-minutes: 30", fast)
+        self.assertIn("timeout-minutes: 60", fast)
         self.assertIn("uses: actions/checkout@v6", fast)
         self.assertIn(
             "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
