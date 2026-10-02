@@ -1,7 +1,7 @@
 use ltsearch::index::{
-    encode_vector, score_query_against_record, CentroidTable, EncodedTurboVector, ProjectionMatrix,
-    StaticChunk, StaticIndexBuildResult, StaticIndexBuilder, StaticSourceConfig, TurboBuildConfig,
-    TurboHeader,
+    encode_vector, CentroidTable, PreparedTurboQuery, ProjectionMatrix, StaticChunk,
+    StaticIndexBuildResult, StaticIndexBuilder, StaticSourceConfig, TurboBuildConfig,
+    TurboRecord512,
 };
 
 fn centroid_table(dim: u32, centroids_per_dim: u32, values: &[f32]) -> CentroidTable {
@@ -22,17 +22,6 @@ fn identity_projection(dim: usize) -> ProjectionMatrix {
         rows.push(row);
     }
     ProjectionMatrix::from_rows(rows)
-}
-
-fn record_bytes(header: &TurboHeader, idx: &[u8], qjl: &[u8], gamma: f32) -> Vec<u8> {
-    let mut record = vec![0u8; header.record_stride()];
-    let idx_offset = header.idx_offset();
-    record[idx_offset..idx_offset + idx.len()].copy_from_slice(idx);
-    let qjl_offset = header.qjl_offset();
-    record[qjl_offset..qjl_offset + qjl.len()].copy_from_slice(qjl);
-    let gamma_offset = header.gamma_offset();
-    record[gamma_offset..gamma_offset + 4].copy_from_slice(&gamma.to_le_bytes());
-    record
 }
 
 #[test]
@@ -116,37 +105,19 @@ fn phase_two_public_surface_compiles() {
     let projection = identity_projection(2);
     let encoded = encode_vector(&[0.2, -0.1], &centroids, &projection).unwrap();
 
-    let header = TurboHeader::new(2, 1);
-    let record = record_bytes(&header, &encoded.idx, &encoded.qjl, encoded.gamma);
-    let score = score_query_against_record(
-        &[0.2, -0.1],
-        &encoded,
-        &record,
-        &header,
-        &centroids,
-        &projection,
-    )
-    .unwrap();
+    assert!(encoded.gamma.is_finite());
+
+    let centroids = CentroidTable::generate(512, 4, 7);
+    let prepared =
+        PreparedTurboQuery::prepare(&[0.1; 512], &centroids, &identity_projection(512)).unwrap();
+    let record = TurboRecord512 {
+        doc_id: 1,
+        idx: [0; 128],
+        qjl: [0; 64],
+        gamma: encoded.gamma,
+        _reserved: [0; 4],
+    };
+    let score = prepared.score(&record);
 
     assert!(score.is_finite());
-}
-
-#[test]
-fn turbo_codec_requires_query_encoding_to_match_layout() {
-    let centroids = centroid_table(8, 4, &[0.0; 32]);
-    let projection = identity_projection(8);
-    let header = TurboHeader::new(8, 1);
-    let record = record_bytes(&header, &[0, 0], &[0], 0.0);
-
-    let error = score_query_against_record(
-        &[0.0; 8],
-        &EncodedTurboVector::default(),
-        &record,
-        &header,
-        &centroids,
-        &projection,
-    )
-    .unwrap_err();
-
-    assert!(error.to_string().contains("expected"));
 }

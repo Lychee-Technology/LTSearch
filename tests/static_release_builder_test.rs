@@ -92,6 +92,12 @@ fn release_builder_writes_v3_artifacts_loadable_by_mmap_index() {
     assert_eq!(index.version(), 3);
     assert_eq!(index.record_count(), 2);
 
+    // The searcher ranks on the record's doc_id without reading the meta file,
+    // so both must carry the same hashed id.
+    for i in 0..2 {
+        assert_eq!(index.record(i).doc_id(), index.meta(i).doc_id);
+    }
+
     // text / title / corpus_type match v2 semantics.
     assert_eq!(index.text(0), "第一条文本");
     assert_eq!(index.text(1), "第二条文本");

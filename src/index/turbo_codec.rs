@@ -1,7 +1,9 @@
-use super::{AssetError, CentroidTable, ProjectionMatrix, TurboHeader, TurboRecord512};
+use super::{AssetError, CentroidTable, ProjectionMatrix, TurboRecord512};
 
 const IDX_BITS_PER_DIM: usize = 2;
 const EXPECTED_CENTROIDS_PER_DIM: usize = 1 << IDX_BITS_PER_DIM;
+/// Dimension of the only typed record layout, [`TurboRecord512`].
+const RECORD_512_DIM: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EncodedTurboVector {
@@ -20,6 +22,93 @@ pub struct TurboScoreBreakdown {
 impl TurboScoreBreakdown {
     pub fn total(self) -> f32 {
         self.centroid_term + self.gamma_multiplier * self.qjl_term
+    }
+}
+
+/// A query prepared for scoring legacy [`TurboRecord512`] records.
+///
+/// Everything that depends only on the query (validation against the assets,
+/// the query × centroid products, and the projection `S·q`) is computed once
+/// in [`prepare`](Self::prepare), so [`score`](Self::score) is infallible and
+/// does no allocation, matvec, or dequantization per record. Scoring keeps the
+/// legacy formula `Σ_d q_d·c_d[idx_d] + γ·Σ_j sign_j·(S·q)_j` with the same
+/// multiplications and summation order as the per-record scorer it replaced,
+/// so scores are bit-identical to it.
+#[derive(Debug, Clone)]
+pub struct PreparedTurboQuery {
+    /// `centroid_lut[d][k] = q_d · c_d[k]`.
+    centroid_lut: [[f32; EXPECTED_CENTROIDS_PER_DIM]; RECORD_512_DIM],
+    /// `S·q`.
+    projected_query: [f32; RECORD_512_DIM],
+}
+
+impl PreparedTurboQuery {
+    pub fn prepare(
+        query: &[f32],
+        centroids: &CentroidTable,
+        projection: &ProjectionMatrix,
+    ) -> Result<Self, AssetError> {
+        if query.len() != RECORD_512_DIM {
+            return Err(AssetError::DimensionMismatch {
+                expected: RECORD_512_DIM,
+                actual: query.len(),
+            });
+        }
+        validate_codec_inputs(query.len(), centroids, projection)?;
+
+        let mut centroid_lut = [[0.0; EXPECTED_CENTROIDS_PER_DIM]; RECORD_512_DIM];
+        for (dim, products) in centroid_lut.iter_mut().enumerate() {
+            for (centroid_index, product) in products.iter_mut().enumerate() {
+                *product = query[dim] * centroid_value(centroids, dim, centroid_index);
+            }
+        }
+
+        let projected_query =
+            projection
+                .project_checked(query)?
+                .try_into()
+                .map_err(|projected: Vec<f32>| AssetError::DimensionMismatch {
+                    expected: RECORD_512_DIM,
+                    actual: projected.len(),
+                })?;
+
+        Ok(Self {
+            centroid_lut,
+            projected_query,
+        })
+    }
+
+    pub fn score(&self, record: &TurboRecord512) -> f32 {
+        self.score_breakdown(record).total()
+    }
+
+    pub fn score_breakdown(&self, record: &TurboRecord512) -> TurboScoreBreakdown {
+        let centroid_term = self
+            .centroid_lut
+            .iter()
+            .enumerate()
+            .map(|(dim, products)| products[read_idx(&record.idx, dim) as usize])
+            .sum::<f32>();
+
+        let qjl_term = self
+            .projected_query
+            .iter()
+            .enumerate()
+            .map(|(dim, value)| {
+                value
+                    * if read_sign_bit(&record.qjl, dim) {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+            })
+            .sum::<f32>();
+
+        TurboScoreBreakdown {
+            centroid_term,
+            qjl_term,
+            gamma_multiplier: record.gamma,
+        }
     }
 }
 
@@ -54,98 +143,6 @@ pub fn encode_vector(
     Ok(EncodedTurboVector { idx, qjl, gamma })
 }
 
-pub fn score_query_against_record(
-    query: &[f32],
-    encoded: &EncodedTurboVector,
-    record: &[u8],
-    header: &TurboHeader,
-    centroids: &CentroidTable,
-    projection: &ProjectionMatrix,
-) -> Result<f32, AssetError> {
-    if query.len() != header.dim() as usize {
-        return Err(AssetError::DimensionMismatch {
-            expected: header.dim() as usize,
-            actual: query.len(),
-        });
-    }
-
-    validate_codec_inputs(query.len(), centroids, projection)?;
-    validate_encoded_vector(encoded, query.len())?;
-
-    if record.len() < header.record_stride() {
-        return Err(AssetError::InvalidSize {
-            minimum: header.record_stride(),
-            actual: record.len(),
-        });
-    }
-
-    let idx = &record[header.idx_offset()..header.idx_offset() + header.idx_size()];
-    let qjl = &record[header.qjl_offset()..header.qjl_offset() + header.qjl_size()];
-    let gamma_start = header.gamma_offset();
-    let gamma = f32::from_le_bytes(record[gamma_start..gamma_start + 4].try_into().unwrap());
-
-    let centroid_score = (0..query.len())
-        .map(|dim| query[dim] * centroid_value(centroids, dim, read_idx(idx, dim) as usize))
-        .sum::<f32>();
-
-    let projected_query = projection.project_checked(query)?;
-    let qjl_score = projected_query
-        .iter()
-        .enumerate()
-        .map(|(dim, value)| value * if read_sign_bit(qjl, dim) { 1.0 } else { -1.0 })
-        .sum::<f32>();
-
-    Ok(centroid_score + gamma * qjl_score)
-}
-
-pub fn score_query_against_record_512(
-    query: &[f32],
-    encoded: &EncodedTurboVector,
-    record: &TurboRecord512,
-    centroids: &CentroidTable,
-    projection: &ProjectionMatrix,
-) -> Result<f32, AssetError> {
-    let breakdown =
-        score_query_against_record_512_breakdown(query, encoded, record, centroids, projection)?;
-
-    Ok(breakdown.total())
-}
-
-pub fn score_query_against_record_512_breakdown(
-    query: &[f32],
-    encoded: &EncodedTurboVector,
-    record: &TurboRecord512,
-    centroids: &CentroidTable,
-    projection: &ProjectionMatrix,
-) -> Result<TurboScoreBreakdown, AssetError> {
-    validate_codec_inputs(query.len(), centroids, projection)?;
-    validate_encoded_vector(encoded, query.len())?;
-
-    let centroid_score = (0..query.len())
-        .map(|dim| query[dim] * centroid_value(centroids, dim, read_idx(&record.idx, dim) as usize))
-        .sum::<f32>();
-
-    let projected_query = projection.project_checked(query)?;
-    let qjl_score = projected_query
-        .iter()
-        .enumerate()
-        .map(|(dim, value)| {
-            value
-                * if read_sign_bit(&record.qjl, dim) {
-                    1.0
-                } else {
-                    -1.0
-                }
-        })
-        .sum::<f32>();
-
-    Ok(TurboScoreBreakdown {
-        centroid_term: centroid_score,
-        qjl_term: qjl_score,
-        gamma_multiplier: record.gamma,
-    })
-}
-
 fn validate_codec_inputs(
     vector_dim: usize,
     centroids: &CentroidTable,
@@ -176,26 +173,6 @@ fn validate_codec_inputs(
         return Err(AssetError::DimensionMismatch {
             expected: vector_dim,
             actual: projection.output_dim() as usize,
-        });
-    }
-
-    Ok(())
-}
-
-fn validate_encoded_vector(encoded: &EncodedTurboVector, dim: usize) -> Result<(), AssetError> {
-    let expected_idx_len = idx_len(dim);
-    if encoded.idx.len() != expected_idx_len {
-        return Err(AssetError::InvalidLayout {
-            expected_values: expected_idx_len,
-            actual_values: encoded.idx.len(),
-        });
-    }
-
-    let expected_qjl_len = qjl_len(dim);
-    if encoded.qjl.len() != expected_qjl_len {
-        return Err(AssetError::InvalidLayout {
-            expected_values: expected_qjl_len,
-            actual_values: encoded.qjl.len(),
         });
     }
 

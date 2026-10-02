@@ -1,7 +1,5 @@
 use ltsearch::index::{
-    encode_vector, score_query_against_record, score_query_against_record_512,
-    score_query_against_record_512_breakdown, CentroidTable, ProjectionMatrix, TurboHeader,
-    TurboRecord512,
+    encode_vector, CentroidTable, PreparedTurboQuery, ProjectionMatrix, TurboRecord512,
 };
 
 fn centroid_table(dim: u32, centroids_per_dim: u32, values: &[f32]) -> CentroidTable {
@@ -22,17 +20,6 @@ fn identity_projection(dim: usize) -> ProjectionMatrix {
         rows.push(row);
     }
     ProjectionMatrix::from_rows(rows)
-}
-
-fn record_bytes(header: &TurboHeader, idx: &[u8], qjl: &[u8], gamma: f32) -> Vec<u8> {
-    let mut record = vec![0u8; header.record_stride()];
-    let idx_offset = header.idx_offset();
-    record[idx_offset..idx_offset + idx.len()].copy_from_slice(idx);
-    let qjl_offset = header.qjl_offset();
-    record[qjl_offset..qjl_offset + qjl.len()].copy_from_slice(qjl);
-    let gamma_offset = header.gamma_offset();
-    record[gamma_offset..gamma_offset + 4].copy_from_slice(&gamma.to_le_bytes());
-    record
 }
 
 #[test]
@@ -67,77 +54,6 @@ fn encode_vector_rejects_centroid_tables_that_do_not_fit_two_bit_layout() {
 }
 
 #[test]
-fn score_query_against_record_uses_centroid_dot_plus_gamma_weighted_sign_dot() {
-    let centroids = centroid_table(
-        4,
-        4,
-        &[
-            -1.0, 0.0, 1.0, 2.0, // dim 0
-            -2.0, -1.0, 0.0, 1.0, // dim 1
-            0.0, 1.0, 2.0, 3.0, // dim 2
-            -1.0, 0.0, 1.0, 3.0, // dim 3
-        ],
-    );
-    let projection = identity_projection(4);
-    let header = TurboHeader::new(4, 1);
-    let query = [2.0, -1.0, 0.5, 3.0];
-    let encoded_query = encode_vector(&query, &centroids, &projection).unwrap();
-    let record = record_bytes(&header, &[0x86], &[0x05], 0.547_722_6);
-
-    let score = score_query_against_record(
-        &query,
-        &encoded_query,
-        &record,
-        &header,
-        &centroids,
-        &projection,
-    )
-    .unwrap();
-
-    assert!((score - 6.273_861_4).abs() < 1e-6);
-}
-
-#[test]
-fn score_query_against_record_rejects_invalid_encoded_query_layout() {
-    let centroids = centroid_table(4, 4, &[0.0; 16]);
-    let projection = identity_projection(4);
-    let header = TurboHeader::new(4, 1);
-    let record = record_bytes(&header, &[0], &[0], 0.0);
-
-    let error = score_query_against_record(
-        &[0.0; 4],
-        &Default::default(),
-        &record,
-        &header,
-        &centroids,
-        &projection,
-    )
-    .unwrap_err();
-
-    assert!(error.to_string().contains("expected 1"));
-}
-
-#[test]
-fn score_query_against_record_rejects_truncated_record_layout() {
-    let centroids = centroid_table(4, 4, &[0.0; 16]);
-    let projection = identity_projection(4);
-    let header = TurboHeader::new(4, 1);
-    let encoded = encode_vector(&[0.0; 4], &centroids, &projection).unwrap();
-
-    let error = score_query_against_record(
-        &[0.0; 4],
-        &encoded,
-        &[0u8; 1],
-        &header,
-        &centroids,
-        &projection,
-    )
-    .unwrap_err();
-
-    assert!(error.to_string().contains("expected"));
-}
-
-#[test]
 fn encode_vector_rejects_non_square_projection_layout() {
     let centroids = centroid_table(4, 4, &[0.0; 16]);
     let projection = ProjectionMatrix::generate(4, 3, 7);
@@ -147,125 +63,113 @@ fn encode_vector_rejects_non_square_projection_layout() {
     assert!(error.to_string().contains("dimension mismatch"));
 }
 
-#[test]
-fn score_query_against_typed_record_512_uses_centroid_dot_plus_gamma_weighted_sign_dot() {
+/// The record carries the 4-d encoding from
+/// `encode_vector_packs_centroid_indexes_qjl_bits_and_gamma` (idx `[2, 1, 0, 2]`
+/// = 0x86, signs `[+, -, +, -]` = 0x05, gamma 0.547_722_6) in dims 0..4; the
+/// query is zero in the remaining 508 dims.
+fn known_answer_fixture() -> (Vec<f32>, CentroidTable, TurboRecord512) {
     let dim = 512;
-    let centroids = centroid_table(dim, 4, &vec![0.0; dim as usize * 4]);
-    let projection = identity_projection(dim as usize);
-    let query = vec![0.0; dim as usize];
-    let encoded_query = encode_vector(&query, &centroids, &projection).unwrap();
-
-    let record = TurboRecord512 {
-        doc_id: 1,
-        idx: [0; 128],
-        qjl: [0; 64],
-        gamma: 0.0,
-        _reserved: [0; 4],
-    };
-
-    let score =
-        score_query_against_record_512(&query, &encoded_query, &record, &centroids, &projection)
-            .unwrap();
-
-    assert!(score.is_finite());
-}
-
-#[test]
-fn typed_score_breakdown_separates_centroid_qjl_and_gamma_terms() {
-    let dim = 512;
-    let mut centroid_values = vec![0.0; dim as usize * 4];
+    let mut centroid_values = vec![0.0; dim * 4];
     centroid_values[0..16].copy_from_slice(&[
         0.0, 0.0, 1.0, 0.0, // dim 0
         0.0, -1.0, 0.0, 0.0, // dim 1
         0.0, 0.0, 0.0, 0.0, // dim 2
         0.0, 0.0, 1.0, 0.0, // dim 3
     ]);
-    let centroids = centroid_table(dim, 4, &centroid_values);
-    let projection = identity_projection(dim as usize);
-    let mut query = vec![0.0; dim as usize];
-    query[0] = 2.0;
-    query[1] = -1.0;
-    query[2] = 0.5;
-    query[3] = 3.0;
-    let encoded_query = encode_vector(&query, &centroids, &projection).unwrap();
+    let centroids = centroid_table(dim as u32, 4, &centroid_values);
+    let mut query = vec![0.0; dim];
+    query[..4].copy_from_slice(&[2.0, -1.0, 0.5, 3.0]);
 
-    let mut record = TurboRecord512 {
-        doc_id: 1,
-        idx: [0; 128],
-        qjl: [0; 64],
-        gamma: 0.547_722_6,
-        _reserved: [0; 4],
-    };
+    let mut record = zero_record();
+    record.gamma = 0.547_722_6;
     record.idx[0] = 0x86;
     record.qjl[0] = 0x05;
 
-    let breakdown = score_query_against_record_512_breakdown(
-        &query,
-        &encoded_query,
-        &record,
-        &centroids,
-        &projection,
-    )
-    .unwrap();
+    (query, centroids, record)
+}
+
+fn zero_record() -> TurboRecord512 {
+    TurboRecord512 {
+        doc_id: 1,
+        idx: [0; 128],
+        qjl: [0; 64],
+        gamma: 0.0,
+        _reserved: [0; 4],
+    }
+}
+
+#[test]
+fn prepared_query_scores_centroid_dot_plus_gamma_weighted_sign_dot() {
+    let (query, centroids, record) = known_answer_fixture();
+    let prepared =
+        PreparedTurboQuery::prepare(&query, &centroids, &identity_projection(512)).unwrap();
+
+    // 2·1 + (-1)·(-1) + 0.5·0 + 3·1 = 6, plus 0.547_722_6 · (2 + 1 + 0.5 - 3).
+    assert!((prepared.score(&record) - 6.273_861_4).abs() < 1e-6);
+}
+
+#[test]
+fn prepared_query_breakdown_separates_centroid_qjl_and_gamma_terms() {
+    let (query, centroids, record) = known_answer_fixture();
+    let prepared =
+        PreparedTurboQuery::prepare(&query, &centroids, &identity_projection(512)).unwrap();
+
+    let breakdown = prepared.score_breakdown(&record);
 
     assert!((breakdown.centroid_term - 6.0).abs() < 1e-6);
     assert!((breakdown.qjl_term - 0.5).abs() < 1e-6);
     assert!((breakdown.gamma_multiplier - 0.547_722_6).abs() < 1e-6);
-
-    let score =
-        score_query_against_record_512(&query, &encoded_query, &record, &centroids, &projection)
-            .unwrap();
-
-    assert!((score - breakdown.total()).abs() < 1e-6);
+    assert_eq!(
+        prepared.score(&record).to_bits(),
+        breakdown.total().to_bits()
+    );
 }
 
 #[test]
-fn typed_score_breakdown_rejects_invalid_encoded_query_layout() {
-    let dim = 512;
-    let centroids = centroid_table(dim, 4, &vec![0.0; dim as usize * 4]);
-    let projection = identity_projection(dim as usize);
-    let record = TurboRecord512 {
-        doc_id: 1,
-        idx: [0; 128],
-        qjl: [0; 64],
-        gamma: 0.0,
-        _reserved: [0; 4],
-    };
+fn prepared_query_scores_all_zero_record_as_finite() {
+    let centroids = centroid_table(512, 4, &[0.0; 512 * 4]);
+    let prepared =
+        PreparedTurboQuery::prepare(&[0.0; 512], &centroids, &identity_projection(512)).unwrap();
 
-    let error = score_query_against_record_512_breakdown(
-        &[0.0; 512],
-        &Default::default(),
-        &record,
-        &centroids,
-        &projection,
-    )
-    .unwrap_err();
-
-    assert!(error.to_string().contains("expected 128"));
+    assert!(prepared.score(&zero_record()).is_finite());
 }
 
 #[test]
-fn typed_score_breakdown_rejects_dimension_mismatch() {
-    let dim = 512;
-    let centroids = centroid_table(dim, 4, &vec![0.0; dim as usize * 4]);
-    let projection = identity_projection(dim as usize);
-    let encoded_query = encode_vector(&vec![0.0; dim as usize], &centroids, &projection).unwrap();
-    let record = TurboRecord512 {
-        doc_id: 1,
-        idx: [0; 128],
-        qjl: [0; 64],
-        gamma: 0.0,
-        _reserved: [0; 4],
-    };
+fn prepared_query_rejects_query_dimension_mismatch() {
+    let centroids = centroid_table(512, 4, &[0.0; 512 * 4]);
 
-    let error = score_query_against_record_512_breakdown(
-        &[0.0; 256],
-        &encoded_query,
-        &record,
-        &centroids,
-        &projection,
-    )
-    .unwrap_err();
+    let error = PreparedTurboQuery::prepare(&[0.0; 256], &centroids, &identity_projection(512))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("dimension mismatch"));
+}
+
+#[test]
+fn prepared_query_rejects_centroid_table_of_another_dimension() {
+    let centroids = centroid_table(256, 4, &[0.0; 256 * 4]);
+
+    let error = PreparedTurboQuery::prepare(&[0.0; 512], &centroids, &identity_projection(512))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("dimension mismatch"));
+}
+
+#[test]
+fn prepared_query_rejects_centroid_tables_that_do_not_fit_two_bit_layout() {
+    let centroids = centroid_table(512, 8, &[0.0; 512 * 8]);
+
+    let error = PreparedTurboQuery::prepare(&[0.0; 512], &centroids, &identity_projection(512))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("expected 4"));
+}
+
+#[test]
+fn prepared_query_rejects_non_square_projection_layout() {
+    let centroids = centroid_table(512, 4, &[0.0; 512 * 4]);
+    let projection = ProjectionMatrix::generate(512, 256, 7);
+
+    let error = PreparedTurboQuery::prepare(&[0.0; 512], &centroids, &projection).unwrap_err();
 
     assert!(error.to_string().contains("dimension mismatch"));
 }

@@ -141,11 +141,25 @@ fn write_benchmark_index(dir: &Path, docs: &[FixtureDoc<'_>]) {
     fs::write(dir.join("projection.bin"), projection.to_bytes()).unwrap();
 }
 
+const DOC_COUNTS: [usize; 2] = [2_000, 10_000];
+const WARMUP_QUERIES: usize = 3;
+// Odd, so p50 is a single measured sample rather than an interpolation.
+const MEASURED_QUERIES: usize = 25;
+const TOP_K: usize = 10;
+
+/// Run with `cargo test --release --test turbo_searcher_benchmark_test -- --ignored --nocapture`
+/// to measure the shipping profile; the dev profile is only useful as a smoke test.
 #[test]
 #[ignore = "benchmark-style smoke test"]
 fn turbo_searcher_benchmark_reports_typed_512d_search_latency() {
-    let dir = temp_dir("smoke");
-    let docs = (0..2_000)
+    for doc_count in DOC_COUNTS {
+        benchmark_search_latency(doc_count);
+    }
+}
+
+fn benchmark_search_latency(doc_count: usize) {
+    let dir = temp_dir(&format!("smoke-{doc_count}"));
+    let docs = (0..doc_count)
         .map(|doc_id| FixtureDoc {
             doc_id: (doc_id + 1) as u64,
             corpus_type: (doc_id % 3) as u8,
@@ -161,21 +175,36 @@ fn turbo_searcher_benchmark_reports_typed_512d_search_latency() {
         TurboRecordSlice::V2Dim512(records) => assert_eq!(records.len(), docs.len()),
     }
     let searcher = TurboQuantSearcher::new(index);
-    let query = padded_embedding(0);
-    let top_k = 10;
-    let start = Instant::now();
 
-    let results = searcher.search(&stub_manifest(), &query, top_k).unwrap();
-    let elapsed = start.elapsed();
+    let mut latencies_us = Vec::with_capacity(MEASURED_QUERIES);
+    for query_index in 0..WARMUP_QUERIES + MEASURED_QUERIES {
+        let query = padded_embedding(1_000 + query_index);
+        let start = Instant::now();
+        let results = searcher.search(&stub_manifest(), &query, TOP_K).unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(results.len(), TOP_K);
+        if query_index >= WARMUP_QUERIES {
+            latencies_us.push(elapsed.as_secs_f64() * 1_000_000.0);
+        }
+    }
+    latencies_us.sort_by(f64::total_cmp);
+
     println!(
-        "turbo_searcher benchmark dim={} docs={} top_k={} results={} elapsed_ms={:.3} elapsed_us={}",
-        DIM,
-        docs.len(),
-        top_k,
-        results.len(),
-        elapsed.as_secs_f64() * 1_000.0,
-        elapsed.as_micros()
+        "turbo_searcher benchmark dim={DIM} docs={doc_count} top_k={TOP_K} queries={MEASURED_QUERIES} \
+         rayon_threads={} debug_assertions={} p50_us={:.1} p95_us={:.1} min_us={:.1} max_us={:.1}",
+        rayon::current_num_threads(),
+        cfg!(debug_assertions),
+        nearest_rank(&latencies_us, 0.50),
+        nearest_rank(&latencies_us, 0.95),
+        latencies_us[0],
+        latencies_us[latencies_us.len() - 1],
     );
 
-    assert_eq!(results.len(), top_k);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Nearest-rank percentile over an ascending slice.
+fn nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
+    let rank = (percentile * sorted.len() as f64).ceil() as usize;
+    sorted[rank.clamp(1, sorted.len()) - 1]
 }

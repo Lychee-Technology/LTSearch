@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::error::SearchError;
-use crate::index::{encode_vector, score_query_against_record_512, MmapIndex, TurboRecordSlice};
+use crate::index::{MmapIndex, PreparedTurboQuery, TurboRecordSlice};
 use crate::models::{ChunkSource, Citation, CorpusType, SearchResult, SearchSource};
 use crate::storage::ActiveManifest;
 
@@ -41,47 +41,21 @@ impl StaticRetriever for TurboQuantSearcher {
         validate_embedding_dim(query_embedding, self.index.dim() as usize)?;
         validate_top_k(top_k)?;
 
-        let encoded_query = encode_vector(
+        let prepared_query = PreparedTurboQuery::prepare(
             query_embedding,
             self.index.centroids(),
             self.index.projection(),
         )
         .map_err(|source| SearchError::Execution {
-            message: format!("failed to encode turbo query embedding: {source}"),
+            message: format!("failed to prepare turbo query: {source}"),
         })?;
 
+        // Dispatch on the record layout once, outside the scan, so each
+        // layout's inner loop is monomorphic.
         let heap = match self.index.records() {
-            TurboRecordSlice::V2Dim512(records) => records
-                .par_iter()
-                .enumerate()
-                .try_fold(BinaryHeap::new, |mut heap, (record_index, record)| {
-                    let score = score_query_against_record_512(
-                        query_embedding,
-                        &encoded_query,
-                        record,
-                        self.index.centroids(),
-                        self.index.projection(),
-                    )
-                    .map_err(|source| SearchError::Execution {
-                        message: format!("failed to score turbo record {record_index}: {source}"),
-                    })?;
-
-                    let meta = self.index.meta(record_index as u64);
-                    let candidate = RankedResult {
-                        score,
-                        doc_id: meta.doc_id,
-                        record_index: record_index as u64,
-                    };
-
-                    push_bounded(&mut heap, candidate, top_k);
-                    Ok::<_, SearchError>(heap)
-                })
-                .try_reduce(BinaryHeap::new, |mut left, right| {
-                    for candidate in right.into_sorted_vec() {
-                        push_bounded(&mut left, candidate, top_k);
-                    }
-                    Ok::<_, SearchError>(left)
-                })?,
+            TurboRecordSlice::V2Dim512(records) => scan_top_k(records, top_k, |record| {
+                (record.doc_id, prepared_query.score(record))
+            }),
         };
 
         let mut ranked = heap.into_vec();
@@ -197,6 +171,41 @@ impl Ord for RankedResult {
     fn cmp(&self, other: &Self) -> Ordering {
         compare_ranked_results(self, other)
     }
+}
+
+/// Parallel bounded top-K over one record layout. `score_record` returns a
+/// record's `(doc_id, score)` and is infallible: everything that can fail was
+/// checked when the query was prepared, so the scan carries no per-record
+/// `Result`. The doc_id comes from the record itself, which every builder
+/// writes with the same hashed id as its meta entry, so the scan never touches
+/// the meta mmap.
+fn scan_top_k<R, F>(records: &[R], top_k: usize, score_record: F) -> BinaryHeap<RankedResult>
+where
+    R: Sync,
+    F: Fn(&R) -> (u64, f32) + Sync,
+{
+    records
+        .par_iter()
+        .enumerate()
+        .fold(
+            || BinaryHeap::with_capacity(top_k),
+            |mut heap, (record_index, record)| {
+                let (doc_id, score) = score_record(record);
+                let candidate = RankedResult {
+                    score,
+                    doc_id,
+                    record_index: record_index as u64,
+                };
+                push_bounded(&mut heap, candidate, top_k);
+                heap
+            },
+        )
+        .reduce(BinaryHeap::new, |mut left, right| {
+            for candidate in right.into_sorted_vec() {
+                push_bounded(&mut left, candidate, top_k);
+            }
+            left
+        })
 }
 
 fn push_bounded(heap: &mut BinaryHeap<RankedResult>, candidate: RankedResult, top_k: usize) {
