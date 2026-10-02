@@ -31,7 +31,4 @@ pub use static_release::{StaticReleaseBuilder, V3_RELEASE_OUTPUT_FILES};
 #[cfg(feature = "aws")]
 pub use static_source::load_static_chunks_from_s3;
 pub use static_source::{parse_static_source_lines, StaticSourceConfig, TurboBuildConfig};
-pub use turbo_codec::{
-    encode_vector, score_query_against_record, score_query_against_record_512,
-    score_query_against_record_512_breakdown, EncodedTurboVector, TurboScoreBreakdown,
-};
+pub use turbo_codec::{encode_vector, EncodedTurboVector, PreparedTurboQuery, TurboScoreBreakdown};
