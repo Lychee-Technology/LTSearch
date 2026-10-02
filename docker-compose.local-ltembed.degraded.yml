@@ -4,10 +4,10 @@
 #
 # 两个角色刻意走不同失败分支，一个 stack 同时覆盖「缺失」与「损坏」：
 #   - query：bundle 路径不存在 → LTSearch 存在性预检直接失败
-#     （src/embedding/ltembed.rs 的 bundle dir/model 预检）；
+#     （src/embedding/ltembed.rs 的 bundle dir 预检）；
 #   - build：目录存在（/app）但不是合法 bundle → 预检通过后 LTEmbed 的
-#     require_file(tokenizer.json) 确定失败，不进 ORT 解析。
-#     不要改用 MODEL_PATH 指向 ELF 之类的大文件——那是把不确定性交给 ORT。
+#     require_file(model.gguf) 确定失败，不进 llama.cpp 解析。
+#     不要改成指向含伪造 model.gguf 的目录——那是把不确定性交给 GGUF 解析器。
 #
 # 预期行为：query/build 的 /health 503（detail 带 bundle_dir=<路径> 前缀），
 # write 不在本文件出现、保持健康 200。因此 query/build 的容器 healthcheck
@@ -17,7 +17,6 @@ services:
   query:
     environment:
       LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR: /nonexistent
-      LTSEARCH_QUERY_LTEMBED_MODEL_PATH: /nonexistent/model.ort
 
   build:
     environment:

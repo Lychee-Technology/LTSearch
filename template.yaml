@@ -28,12 +28,14 @@ Parameters:
       仅 EmbeddingProvider=fixed 时使用的固定向量（冒烟用）；ltembed 下忽略。
   ModelAssetPrefix:
     Type: String
-    Default: ltembed/v1.0.9
+    Default: ltembed/gguf-v5-nano-q5km-ac5d898
     Description: >-
-      ArtifactBucket 内的 LTEmbed 模型资产前缀（manifest.json + model.ort 等，
-      由 scripts/package-model-assets.sh 产出并上传）。query/build 冷启动按
+      ArtifactBucket 内的 LTEmbed 模型资产前缀（manifest.json + GGUF bundle：
+      model.gguf / tokenizer.json / build-info.json，由
+      scripts/package-model-assets.sh 产出并上传）。query/build 冷启动按
       manifest 逐文件 sha256 校验下载到 /tmp/ltembed（#111）。与
-      sam/builder.Dockerfile 的 bundle pin 同步 bump。
+      sam/builder.Dockerfile 的 LTEMBED_GGUF_* / LTEMBED_TOKENIZER_* pin 同步
+      bump（前缀编码量化与 HF commit，避免新旧 bundle 混用同一前缀）。
 
 Globals:
   Function:
@@ -108,7 +110,6 @@ Resources:
           LTSEARCH_QUERY_LTEMBED_S3_BUCKET: !Ref ArtifactBucket
           LTSEARCH_QUERY_LTEMBED_S3_PREFIX: !Ref ModelAssetPrefix
           LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR: /tmp/ltembed
-          LTSEARCH_QUERY_LTEMBED_MODEL_PATH: /tmp/ltembed/model.ort
       Policies:
         - S3ReadPolicy:
             BucketName: !Ref ArtifactBucket
@@ -138,7 +139,6 @@ Resources:
           LTSEARCH_BUILD_LTEMBED_S3_BUCKET: !Ref ArtifactBucket
           LTSEARCH_BUILD_LTEMBED_S3_PREFIX: !Ref ModelAssetPrefix
           LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR: /tmp/ltembed
-          LTSEARCH_BUILD_LTEMBED_MODEL_PATH: /tmp/ltembed/model.ort
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref ArtifactBucket

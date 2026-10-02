@@ -37,6 +37,16 @@ STATIC_FIXTURES_DIR = REPO_ROOT / "tests" / "fixtures" / "e2e" / "static"
 EXPECTED_STATIC_CORPUS_PATH = STATIC_FIXTURES_DIR / "expected_static_corpus.json"
 FIXTURE_EXAMPLE_PATH = REPO_ROOT / "examples" / "emit_static_lance_fixture.rs"
 CARGO_TOML_PATH = REPO_ROOT / "Cargo.toml"
+PIN_HELPER_PATH = REPO_ROOT / "scripts" / "ltembed-pins.sh"
+# LTEmbed GGUF bundle + 静态 llama.cpp 的 pin（权威默认值只在 builder.Dockerfile）。
+PIN_NAMES = (
+    "LTEMBED_GGUF_URL",
+    "LTEMBED_GGUF_SHA256",
+    "LTEMBED_TOKENIZER_URL",
+    "LTEMBED_TOKENIZER_SHA256",
+    "STATIC_LLAMA_URL",
+    "STATIC_LLAMA_SHA256",
+)
 
 
 class LocalHttpLibTest(unittest.TestCase):
@@ -207,28 +217,55 @@ class LocalLtembedImageTest(unittest.TestCase):
         )
         self.assertIn("sha256sum -c", text)
         self.assertIn('ENTRYPOINT ["/app/ltsearch"]', text)
+        # GGUF bundle（LTEmbed#149）：model.gguf + tokenizer.json 逐文件校验，
+        # build-info.json 与 builder.Dockerfile 共用仓库内同一文件。
+        self.assertIn("/ltembed-assets/model.gguf", text)
+        self.assertIn("/ltembed-assets/tokenizer.json", text)
+        self.assertIn(
+            "COPY sam/ltembed-build-info.json /tmp/ltembed-build-info.json", text
+        )
+        self.assertNotIn("model.ort", text)
+        self.assertNotIn("libonnxruntime", text)
+        # llama.cpp 静态库经共享脚本取用校验，并经 STATIC_LLAMA_DIR 交给 LTEmbed build.rs。
+        self.assertIn("fetch-static-llama.sh /opt/static-llama", text)
+        self.assertIn("ENV STATIC_LLAMA_DIR=/opt/static-llama/extracted", text)
 
     def test_dockerfile_has_no_hardcoded_bundle_pin(self) -> None:
         # pin 权威只在 sam/builder.Dockerfile；本文件 ARG 必须留空，由构建脚本注入。
         text = DOCKERFILE_PATH.read_text(encoding="utf-8")
-        self.assertIn("ARG LTEMBED_BUNDLE_URL=\n", text)
-        self.assertIn("ARG LTEMBED_BUNDLE_SHA256=\n", text)
-        self.assertIsNone(
-            re.search(r"LTEMBED_BUNDLE_SHA256=[0-9a-f]{64}", text),
-            "bundle SHA256 must not be hardcoded outside sam/builder.Dockerfile",
-        )
+        for name in PIN_NAMES:
+            self.assertIn(f"ARG {name}=\n", text)
+            self.assertIsNone(
+                re.search(rf"{name}=\S", text),
+                f"{name} must not be hardcoded outside sam/builder.Dockerfile",
+            )
+
+    def test_builder_dockerfile_carries_every_pin(self) -> None:
+        # 单一来源：六个 pin 的权威默认值都在 builder.Dockerfile，SHA256 为 64 位 hex。
+        text = BUILDER_DOCKERFILE_PATH.read_text(encoding="utf-8")
+        for name in PIN_NAMES:
+            match = re.search(rf"^ARG {name}=(\S+)$", text, re.MULTILINE)
+            self.assertIsNotNone(match, f"builder.Dockerfile must pin {name}")
+            assert match is not None
+            if name.endswith("_SHA256"):
+                self.assertRegex(match.group(1), r"^[0-9a-f]{64}$")
+            else:
+                self.assertTrue(match.group(1).startswith("https://"))
 
     def test_build_script_injects_pin_from_builder_dockerfile(self) -> None:
         self.assertTrue(BUILD_SCRIPT_PATH.exists(), f"missing: {BUILD_SCRIPT_PATH}")
         text = BUILD_SCRIPT_PATH.read_text(encoding="utf-8")
         self.assertIn("prepare_locked_ltembed_checkout", text)
-        self.assertIn(
-            "sed -n 's/^ARG LTEMBED_BUNDLE_URL=//p'", text
-        )
-        self.assertIn(
-            "sed -n 's/^ARG LTEMBED_BUNDLE_SHA256=//p'", text
-        )
+        # 全部 pin 经 scripts/ltembed-pins.sh 从 builder.Dockerfile 提取并注入。
+        self.assertIn('source "$REPO_ROOT/scripts/ltembed-pins.sh"', text)
+        self.assertIn('ltembed_pin_build_args "${LTEMBED_PIN_NAMES[@]}"', text)
+        self.assertIn('"${LTEMBED_PIN_BUILD_ARGS[@]}"', text)
         self.assertIn("--platform linux/arm64", text)
+        pins = PIN_HELPER_PATH.read_text(encoding="utf-8")
+        self.assertIn("sam/builder.Dockerfile", pins)
+        self.assertIn('sed -n "s/^ARG ${name}=//p"', pins)
+        for name in PIN_NAMES:
+            self.assertIn(name, pins)
 
     def test_fixed_local_dockerfile_is_untouched(self) -> None:
         # AC-1 回归守卫：发布镜像仍是 fixed（stub patch + --features local）。
@@ -302,7 +339,9 @@ class LocalLtembedComposeTest(unittest.TestCase):
         self.assertIn('LTSEARCH_BUILD_EMBEDDING_DIM: "512"', text)
         self.assertIn("LTSEARCH_QUERY_EMBEDDING_PROVIDER: ltembed", text)
         self.assertIn("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR: /opt/ltembed", text)
-        self.assertIn("LTSEARCH_QUERY_LTEMBED_MODEL_PATH: /opt/ltembed/model.ort", text)
+        self.assertIn("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR: /opt/ltembed", text)
+        # GGUF 引擎只认 bundle 目录；ORT 时代的 MODEL_PATH 已移除。
+        self.assertNotIn("MODEL_PATH", text)
         for forbidden in ["moto", "AWS_", "_S3_"]:
             self.assertNotIn(forbidden, text, f"real 拓扑不得引用 {forbidden}")
         self.assertIn(
@@ -364,14 +403,10 @@ class DegradedOverlayTest(unittest.TestCase):
         text = _compose_without_comments(DEGRADED_OVERLAY_PATH)
         # query＝缺失分支：bundle 路径不存在，存在性预检直接失败。
         self.assertIn("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR: /nonexistent", text)
-        self.assertIn(
-            "LTSEARCH_QUERY_LTEMBED_MODEL_PATH: /nonexistent/model.ort", text
-        )
-        # build＝损坏分支：目录存在（/app）但缺 tokenizer.json 等 bundle 文件，
-        # 在 LTEmbed require_file 处确定失败。MODEL_PATH 不得覆盖——保持
-        # /opt/ltembed/model.ort 让存在性预检通过，才走到「存在但非法」分支。
+        # build＝损坏分支：目录存在（/app）通过存在性预检，但缺 model.gguf 等
+        # bundle 文件，在 LTEmbed require_file 处确定失败。
         self.assertIn("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR: /app", text)
-        self.assertNotIn("LTSEARCH_BUILD_LTEMBED_MODEL_PATH", text)
+        self.assertNotIn("MODEL_PATH", text)
 
 
 class DegradedRunnerTest(unittest.TestCase):
@@ -761,7 +796,7 @@ class StaticFixtureEmitterTest(unittest.TestCase):
         self.assertIn("ltembed_config_from_env", text)
         # 与 build 角色同一套 bundle env：静态语料向量与 query 侧 profile 对齐。
         self.assertIn("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR", text)
-        self.assertIn("LTSEARCH_BUILD_LTEMBED_MODEL_PATH", text)
+        self.assertNotIn("MODEL_PATH", text)
         self.assertIn("EmbeddingInputKind::Document", text)
         # 写入 Lance 前就地断言维度，早于 static-build 的 dim 校验。
         self.assertIn("dim as usize", text)

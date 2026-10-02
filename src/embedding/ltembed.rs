@@ -1,34 +1,33 @@
 use std::env;
 use std::fmt;
 
-use ltembed::engine::{EmbeddingInput, EmbeddingInputKind, OnnxEngine, OnnxEngineConfig};
+use ltembed::engine::{EmbeddingEngine, EmbeddingInput, EmbeddingInputKind, EngineConfig};
 use ltembed::error::LTEmbedError;
 
 use crate::embedding::{EmbeddingError, EmbeddingGenerator, EmbeddingProviderError};
 
-/// Filesystem locations of an LTEmbed ort bundle: `bundle_dir` holds
-/// `tokenizer.json` + `build-info.json` (and optionally `libonnxruntime.so`),
-/// while `model_path` points at the `model.ort` weights.
+/// Filesystem location of an LTEmbed GGUF bundle: `bundle_dir` holds
+/// `model.gguf` + `tokenizer.json` + `build-info.json`. llama.cpp is statically
+/// linked into the binary, so the bundle carries no runtime library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LTEmbedConfig {
     pub bundle_dir: String,
-    pub model_path: String,
 }
 
 pub trait LTEmbedEngine: Send + Sync {
     fn embed(&self, input: EmbeddingInput<'_>) -> Result<Vec<f32>, LTEmbedError>;
 }
 
-impl LTEmbedEngine for OnnxEngine {
+impl LTEmbedEngine for EmbeddingEngine {
     fn embed(&self, input: EmbeddingInput<'_>) -> Result<Vec<f32>, LTEmbedError> {
-        OnnxEngine::embed(self, input)
+        EmbeddingEngine::embed(self, input)
     }
 }
 
 /// Prefixing (`Query: ` / `Document: `), pooling, and Matryoshka truncation
 /// are owned by the LTEmbed engine; this generator only tags each text with
 /// the input kind of its side (build = Document, query = Query).
-pub struct LTEmbedEmbeddingGenerator<E = OnnxEngine> {
+pub struct LTEmbedEmbeddingGenerator<E = EmbeddingEngine> {
     engine: E,
     input_kind: EmbeddingInputKind,
 }
@@ -45,62 +44,49 @@ where
     }
 }
 
-impl LTEmbedEmbeddingGenerator<OnnxEngine> {
+impl LTEmbedEmbeddingGenerator<EmbeddingEngine> {
     pub fn from_config(
         config: &LTEmbedConfig,
         input_kind: EmbeddingInputKind,
     ) -> Result<Self, EmbeddingError> {
-        // 预检文件系统路径：Lambda ZIP 部署下资产由 S3→/tmp 冷启动供给
+        // 预检 bundle 目录：Lambda ZIP 部署下资产由 S3→/tmp 冷启动供给
         // （src/embedding/model_assets.rs），镜像/挂载部署则预置在容器内。
-        // 路径缺失把供给这层原因直接说出来，而不是让 ORT 的 "file not found"
-        // 留给运维猜。
-        for (label, path) in [
-            ("bundle dir", config.bundle_dir.as_str()),
-            ("model", config.model_path.as_str()),
-        ] {
-            if !std::path::Path::new(path).exists() {
-                return Err(EmbeddingError::Generation {
-                    message: format!(
-                        "LTEmbed {label} not found at '{path}' — model assets not provisioned \
-                         (ZIP deployments download them from S3 at cold start: check \
-                         LTSEARCH_*_LTEMBED_S3_BUCKET/_S3_PREFIX and startup logs; \
-                         image/mount deployments must pre-place the bundle)"
-                    ),
-                });
-            }
+        // 目录缺失把供给这层原因直接说出来；目录存在但缺文件（model.gguf /
+        // tokenizer.json / build-info.json）交给 LTEmbed 的 require_file，
+        // 它返回带完整路径的 MissingFile。
+        let bundle_dir = config.bundle_dir.as_str();
+        if !std::path::Path::new(bundle_dir).exists() {
+            return Err(EmbeddingError::Generation {
+                message: format!(
+                    "LTEmbed bundle dir not found at '{bundle_dir}' — model assets not provisioned \
+                     (ZIP deployments download them from S3 at cold start: check \
+                     LTSEARCH_*_LTEMBED_S3_BUCKET/_S3_PREFIX and startup logs; \
+                     image/mount deployments must pre-place the bundle)"
+                ),
+            });
         }
-        let engine = OnnxEngine::from_bundle_dir(
-            &config.bundle_dir,
-            &config.model_path,
-            OnnxEngineConfig::default(),
-        )
-        .map_err(|error| EmbeddingError::Generation {
-            message: format!(
-                "LTEmbed bootstrap failed for bundle_dir '{}': {error} — \
-                 verify the model assets match linux/arm64 and are not corrupt",
-                config.bundle_dir
-            ),
-        })?;
+        // EngineConfig::default() = 512 维 Matryoshka 截断 + L2 归一化；
+        // from_gguf_bundle_dir 用单个 llama.cpp 线程（与此前 ORT intra_threads=1 一致）。
+        let engine = EmbeddingEngine::from_gguf_bundle_dir(bundle_dir, EngineConfig::default())
+            .map_err(|error| EmbeddingError::Generation {
+                message: format!(
+                    "LTEmbed bootstrap failed for bundle_dir '{}': {error} — \
+                 verify it is a GGUF bundle (model.gguf + tokenizer.json + build-info.json) \
+                 and is not corrupt",
+                    config.bundle_dir
+                ),
+            })?;
 
         Ok(Self { engine, input_kind })
     }
 }
 
-pub fn ltembed_config_from_env(
-    bundle_var: &str,
-    model_var: &str,
-) -> Result<LTEmbedConfig, EmbeddingProviderError> {
+pub fn ltembed_config_from_env(bundle_var: &str) -> Result<LTEmbedConfig, EmbeddingProviderError> {
     let bundle_dir = env::var(bundle_var).map_err(|_| EmbeddingProviderError::Config {
         message: format!("missing {bundle_var}"),
     })?;
-    let model_path = env::var(model_var).map_err(|_| EmbeddingProviderError::Config {
-        message: format!("missing {model_var}"),
-    })?;
 
-    Ok(LTEmbedConfig {
-        bundle_dir,
-        model_path,
-    })
+    Ok(LTEmbedConfig { bundle_dir })
 }
 
 impl<E> LTEmbedEmbeddingGenerator<E>
@@ -137,7 +123,6 @@ mod tests {
     fn from_config_reports_unprovisioned_assets() {
         let config = LTEmbedConfig {
             bundle_dir: "/tmp/ltembed-nonexistent-test".to_string(),
-            model_path: "/tmp/ltembed-nonexistent-test/model.ort".to_string(),
         };
         let Err(error) = LTEmbedEmbeddingGenerator::from_config(&config, EmbeddingInputKind::Query)
         else {

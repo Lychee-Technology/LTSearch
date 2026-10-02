@@ -16,16 +16,16 @@
 | --- | --- |
 | `ghcr.io/lychee-technology/ltsearch-local:<tag>` | 恰一个 local OCI 镜像（arm64；`latest` 仅稳定语义版本），`sam/local.Dockerfile` 原样构建 |
 | `query_lambda.zip` / `write_lambda.zip` / `index_builder_lambda.zip` | GitHub Release 资产；`bootstrap` 置 zip 根，real 模式编译 + strip（`scripts/package-lambda-zips.sh`） |
-| `model-assets.zip` | GitHub Release 资产；解压得 `model-assets/`（`manifest.json` + model.ort 等，`scripts/package-model-assets.sh` 产出） |
+| `model-assets.zip` | GitHub Release 资产；解压得 `model-assets/`（`manifest.json` + GGUF bundle：`model.gguf` / `tokenizer.json` / `build-info.json`，`scripts/package-model-assets.sh` 产出） |
 | `SHA256SUMS` | `sha256sum -c` 兼容，覆盖 4 个 zip + provenance |
-| `release-provenance.json` | schema_version=1：tag、git sha、workflow run、LTEmbed bundle pin（URL+sha256）、镜像 ref、逐产物 sha256/bytes |
+| `release-provenance.json` | schema_version=2：tag、git sha、workflow run、LTEmbed GGUF bundle pin（`ltembed_bundle.{model,tokenizer}` 各自 URL+sha256）、static llama.cpp pin（`static_llama`，real 模式；stub 为 null）、镜像 ref、逐产物 sha256/bytes。v1（ORT 时代）的 `ltembed_bundle` 为扁平 `{url, sha256}`、无 `static_llama` |
 
 下载后验证：`sha256sum -c SHA256SUMS`。发布前 `scripts/check-lambda-size-budget.sh`
 强制单函数解压 ≤250MB、bootstrap AArch64、资产 hash/预算复核。
 
 **可复现性边界**：构建输入全部钉死——base 镜像按 digest pin + dnf releasever 锁
 （`sam/builder.Dockerfile` / `sam/local.Dockerfile`）、Rust toolchain 1.94.1、
-`Cargo.lock` + vendored stub、LTEmbed rev 随 lockfile、ort bundle URL+sha256 pin；
+`Cargo.lock` + vendored stub、LTEmbed rev 随 lockfile（`Cargo.toml` 以 `rev` 钉住）、GGUF 资产与 static llama.cpp 的 URL+sha256 pin；
 归档 mtime 与 provenance `built_at` 统一取 `SOURCE_DATE_EPOCH`（默认 HEAD 提交
 时间，TZ=UTC 打包）。同一 commit 重复运行 `package-release.sh`，4 个 zip 与本地
 provenance 字节级一致；CI 版 provenance 含 workflow run 字段（run 各异，属预期
@@ -65,9 +65,9 @@ LTSEARCH_LOCAL_IMAGE=ghcr.io/lychee-technology/ltsearch-local:<tag> \
 链路与已激活版本原样恢复（`scripts/e2e/run-local-image-flow.sh` 持续断言）；
 `down -v` 等于清空实例。备份 = 备份该卷。
 
-镜像不内置 embedding 模型：`ltembed` 模式把 LTEmbed bundle 挂载进容器并以
-`LTSEARCH_{QUERY,BUILD}_LTEMBED_BUNDLE_DIR` / `..._LTEMBED_MODEL_PATH` 指向挂载
-路径；缺省 `fixed` provider 无模型依赖。
+镜像不内置 embedding 模型：`ltembed` 模式把 LTEmbed GGUF bundle 挂载进容器并以
+`LTSEARCH_{QUERY,BUILD}_LTEMBED_BUNDLE_DIR` 指向挂载目录（含 `model.gguf` +
+`tokenizer.json` + `build-info.json`；ORT 时代的 `..._LTEMBED_MODEL_PATH` 已移除）；缺省 `fixed` provider 无模型依赖。
 
 ### real-LTEmbed E2E 拓扑（测试专用，#141）
 
@@ -75,9 +75,10 @@ LTSEARCH_LOCAL_IMAGE=ghcr.io/lychee-technology/ltsearch-local:<tag> \
 的黑盒 E2E 拓扑，**不是发布物**（发布镜像仍是 `sam/local.Dockerfile` 的 fixed
 拓扑）。与发布拓扑的差异：
 
-- 镜像以 `--features local,ltembed` 编译，并把锁定校验的 linux/arm64 ort bundle
-  烘焙进 `/opt/ltembed`（pin 单一来源在 `sam/builder.Dockerfile`，构建脚本提取
-  注入，不允许第二处硬编码）；
+- 镜像以 `--features local,ltembed` 编译（静态链接校验过的 linux/arm64 预编译
+  llama.cpp），并把锁定校验的 GGUF bundle 烘焙进 `/opt/ltembed`（GGUF 资产与
+  static llama 的 pin 单一来源都在 `sam/builder.Dockerfile`，构建脚本经
+  `scripts/ltembed-pins.sh` 提取注入，不允许第二处硬编码）；
 - Compose 卷/网络不写死 name、host 端口为 loopback 临时端口，runner 以
   `-p ltsearch-real-<run_id>` 注入独立 project——并发/重复运行互不冲突；
 - build 角色也发布端口：query/build 的 `/health` 内跑真实 embedding probe，
@@ -138,16 +139,18 @@ sam deploy --template-file template.yaml --stack-name ltsearch \
 strip 后 180.5 MiB）已逼近 Lambda 250MB 单包硬限，「函数 + Layer 合计 ≤250MB」
 装不下两者，故 ZIP 路径采用 S3→/tmp 供给。query/build 以
 `LTSEARCH_{QUERY,BUILD}_LTEMBED_S3_BUCKET/_S3_PREFIX` 定位资产（模板默认指向
-`ArtifactBucket`/`ModelAssetPrefix`，默认 `ltembed/v1.0.9`，与
-`sam/builder.Dockerfile` 的 bundle pin 同步 bump），冷启动按 `manifest.json`
+`ArtifactBucket`/`ModelAssetPrefix`，默认 `ltembed/gguf-v5-nano-q5km-ac5d898`，与
+`sam/builder.Dockerfile` 的 GGUF pin 同步 bump；从 ORT 时代升级时须把新
+`model-assets/` 上传到新前缀，不与旧 `ltembed/v1.0.9` 资产混放），冷启动按 `manifest.json`
 逐文件下载 + sha256 校验到 `/tmp/ltembed`（`/tmp` 不占 250MB 预算，默认 512MB
 ephemeral 足够；manifest 最后落盘作完整性标记，warm 容器免重复下载）。
 **write 函数零模型 env、零下载代码，可独立部署。** 资产未就位时 query/build 启动
 报错直接指出 `model assets not provisioned` 与 S3 配置排查点。
 
-`libonnxruntime.so` 从 bundle 目录解析（`ort` 走 load-dynamic），二进制与 `.so`
-仅在同 CPU 架构内可移植——pinned bundle 为 arm64，函数必须跑 **arm64
-(Graviton)**；x86_64 需要 x86_64 bundle 与匹配的 `LTEMBED_BUNDLE_URL`。
+llama.cpp 静态链接进二进制（预编译 static-llama release 为 `aarch64-graviton2`），
+资产本身与架构无关；但 `ltembed` 二进制只能在 linux/arm64 链接，函数必须跑
+**arm64 (Graviton)**；x86_64 需要 x86_64 static-llama release 与匹配的
+`STATIC_LLAMA_URL`/`STATIC_LLAMA_SHA256`。
 
 ### 运行时环境变量
 

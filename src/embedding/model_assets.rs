@@ -1,6 +1,6 @@
 //! S3→/tmp 冷启动模型资产供给（#111）。
 //!
-//! Lambda ZIP 部署不携带模型：`scripts/package-model-assets.sh` 把 pinned ort
+//! Lambda ZIP 部署不携带模型：`scripts/package-model-assets.sh` 把 pinned GGUF
 //! bundle 平铺上传到 S3 前缀（含 `manifest.json`，逐文件 sha256/bytes），两个
 //! lambda bin 在启动期调用 [`provision_from_env`] 下载校验到
 //! `LTSEARCH_{SIDE}_LTEMBED_BUNDLE_DIR`（生产为 `/tmp/ltembed`）。S3 client 由
@@ -123,7 +123,7 @@ impl AssetFetcher for S3Fetcher<'_> {
         Ok(data.into_bytes().to_vec())
     }
 
-    /// 大文件（model.ort ~118MB）流式落盘：边读边写边哈希，不整块驻留内存。
+    /// 大文件（model.gguf ~169MB）流式落盘：边读边写边哈希，不整块驻留内存。
     async fn fetch_to_file(&self, name: &str, dest: &Path) -> Result<(u64, String), String> {
         use std::io::Write;
 
@@ -303,9 +303,12 @@ mod tests {
     #[test]
     fn source_from_env_trims_prefix_slashes() {
         env::set_var("LTSEARCH_MA_FULL_LTEMBED_S3_BUCKET", "bucket");
-        env::set_var("LTSEARCH_MA_FULL_LTEMBED_S3_PREFIX", "/ltembed/v1.0.9/");
+        env::set_var(
+            "LTSEARCH_MA_FULL_LTEMBED_S3_PREFIX",
+            "/ltembed/gguf-v5-nano-q5km-ac5d898/",
+        );
         let source = model_asset_source_from_env("MA_FULL").unwrap().unwrap();
-        assert_eq!(source.prefix, "ltembed/v1.0.9");
+        assert_eq!(source.prefix, "ltembed/gguf-v5-nano-q5km-ac5d898");
     }
 
     #[test]
@@ -321,16 +324,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         assert!(!assets_ready(dir.path()));
 
-        fs::write(dir.path().join("model.ort"), b"weights").unwrap();
+        fs::write(dir.path().join("model.gguf"), b"weights").unwrap();
         fs::write(
             dir.path().join(MANIFEST_FILE),
-            r#"{"files":[{"name":"model.ort","bytes":7,"sha256":"unused-for-warm-check"}]}"#,
+            r#"{"files":[{"name":"model.gguf","bytes":7,"sha256":"unused-for-warm-check"}]}"#,
         )
         .unwrap();
         assert!(assets_ready(dir.path()));
 
         // 尺寸不符（截断/损坏）必须判定未就绪。
-        fs::write(dir.path().join("model.ort"), b"tr").unwrap();
+        fs::write(dir.path().join("model.gguf"), b"tr").unwrap();
         assert!(!assets_ready(dir.path()));
     }
 
@@ -404,7 +407,7 @@ mod tests {
         model: &'static [u8],
         tokenizer: &'static [u8],
     ) -> Vec<(&'static str, &'static [u8])> {
-        vec![("model.ort", model), ("tokenizer.json", tokenizer)]
+        vec![("model.gguf", model), ("tokenizer.json", tokenizer)]
     }
 
     #[tokio::test]
@@ -422,7 +425,7 @@ mod tests {
             .expect("provision");
         assert!(assets_ready(dir.path()));
         assert_eq!(
-            fs::read(dir.path().join("model.ort")).unwrap(),
+            fs::read(dir.path().join("model.gguf")).unwrap(),
             b"weights-v1"
         );
     }
@@ -443,13 +446,13 @@ mod tests {
         provision_with(&fetcher_v1, bundle_dir).await.expect("v1");
         assert!(assets_ready(dir.path()));
 
-        // 强制 refresh：删掉首个文件（model.ort），让尺寸快查 miss。
-        fs::remove_file(dir.path().join("model.ort")).unwrap();
+        // 强制 refresh：删掉首个文件（model.gguf），让尺寸快查 miss。
+        fs::remove_file(dir.path().join("model.gguf")).unwrap();
         assert!(!assets_ready(dir.path()));
 
         // 第二轮：v2 内容不同但**逐文件尺寸与 v1 相同**；重下完第 1 个文件
-        // （model.ort→v2）后失败。若旧 manifest 不先作废，此时目录内
-        // model.ort（v2）与 tokenizer.json（v1）的尺寸恰好全部匹配旧 manifest，
+        // （model.gguf→v2）后失败。若旧 manifest 不先作废，此时目录内
+        // model.gguf（v2）与 tokenizer.json（v1）的尺寸恰好全部匹配旧 manifest，
         // 尺寸快查会把混合 bundle 误判为就绪——本用例在旧实现下必然失败。
         let v2 = fake_bundle(b"weights-v2", b"tok-v2");
         let mut fetcher_v2_fail = FakeFetcher::new(&v2, Some(1));
@@ -475,7 +478,7 @@ mod tests {
             .expect("retry");
         assert!(assets_ready(dir.path()));
         assert_eq!(
-            fs::read(dir.path().join("model.ort")).unwrap(),
+            fs::read(dir.path().join("model.gguf")).unwrap(),
             b"weights-v2"
         );
         assert_eq!(

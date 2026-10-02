@@ -24,9 +24,10 @@ jobs:
       - uses: actions/checkout@v6
       - name: Stage LTEmbed checkout for real-mode build
         # path patch 会绕过 Cargo.lock 的 rev 锁定，必须 checkout 与 lockfile 一致的
-        # rev（LTEmbed HEAD 已切换 llama.cpp 后端，与本仓库的 ONNX 集成不兼容）
+        # rev（Cargo.toml 以 `rev =` 钉住，lockfile 源形如 LTEmbed?rev=<sha>#<sha>；
+        # 上游 API 会有不兼容变更，如 LTEmbed#149 ONNX→llama.cpp）
         run: |
-          LTEMBED_REV="$(grep -A2 'name = "ltembed"' Cargo.lock | sed -n 's/.*LTEmbed?branch=main#\([0-9a-f]*\)".*/\1/p')"
+          LTEMBED_REV="$(grep -A2 'name = "ltembed"' Cargo.lock | sed -n 's/.*LTEmbed?rev=[0-9a-f]*#\([0-9a-f]\{40\}\)".*/\1/p')"
           test -n "$LTEMBED_REV"
           git clone https://github.com/Lychee-Technology/LTEmbed .sam-local-deps/LTEmbed
           git -C .sam-local-deps/LTEmbed checkout "$LTEMBED_REV"

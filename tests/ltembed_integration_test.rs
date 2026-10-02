@@ -51,18 +51,17 @@ fn temp_fixture_dir(test_name: &str) -> PathBuf {
 fn maybe_ltembed_bundle_dir() -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .map(|ancestor| ancestor.join("LTEmbed/ort_bundle"))
+        .map(|ancestor| ancestor.join("LTEmbed/gguf_bundle"))
         .find(|candidate| {
             candidate.join("build-info.json").exists()
                 && candidate.join("tokenizer.json").exists()
-                && candidate.join("model.ort").exists()
+                && candidate.join("model.gguf").exists()
         })
 }
 
 fn ltembed_config(bundle_dir: &Path) -> LTEmbedConfig {
     LTEmbedConfig {
         bundle_dir: bundle_dir.display().to_string(),
-        model_path: bundle_dir.join("model.ort").display().to_string(),
     }
 }
 
@@ -92,7 +91,7 @@ fn upsert_record(
 #[test]
 fn ltembed_end_to_end_build_and_hybrid_query_flow() {
     let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
-        eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
+        eprintln!("Skipping: LTEmbed gguf_bundle not found in sibling checkout");
         return;
     };
 

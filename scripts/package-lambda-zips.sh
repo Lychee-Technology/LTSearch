@@ -9,16 +9,24 @@ readonly DIST_DIR="${LTSEARCH_DIST_DIR:-$REPO_ROOT/dist}"
 readonly BUILDER_IMAGE="${LTSEARCH_BUILDER_IMAGE:-ltsearch-lambda-zip-builder}"
 # stub = features lambda（fixed embedding；e2e/CI 用，配 --env-vars 覆盖回 fixed）；
 # real = features lambda,ltembed（生产档，模型资产由 S3→/tmp 冷启动供给，#111；
-# 需 .sam-local-deps/LTEmbed vendored checkout）。
+# 需 .sam-local-deps/LTEmbed vendored checkout；静态 llama.cpp 由 builder.Dockerfile
+# 按 pin 自行取用校验）。
 readonly LTEMBED_MODE="${LTSEARCH_LTEMBED_MODE:-stub}"
 # 可复现性（#113 review P1）：zip 会把文件 mtime 写进条目头，docker cp 出来的
 # mtime 是构建时刻——归一化到 SOURCE_DATE_EPOCH（默认 HEAD 提交时间）并以
 # TZ=UTC 打包（zip 存 DOS 本地时间），同一 commit 的产物字节稳定。
 readonly SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$REPO_ROOT" log -1 --format=%ct)}"
 
+# pin 透传与 package-model-assets.sh / package-release.sh 同源（scripts/ltembed-pins.sh），
+# 环境变量显式覆盖时 ZIP 与 provenance 记录保持一致。
+# shellcheck source=scripts/ltembed-pins.sh
+source "$REPO_ROOT/scripts/ltembed-pins.sh"
+ltembed_pin_build_args "${LTEMBED_PIN_NAMES[@]}"
+
 DOCKER_BUILDKIT=1 docker build \
   --platform linux/arm64 \
   --build-arg LTEMBED_MODE="$LTEMBED_MODE" \
+  "${LTEMBED_PIN_BUILD_ARGS[@]}" \
   --tag "$BUILDER_IMAGE" \
   --file "$REPO_ROOT/sam/builder.Dockerfile" \
   "$REPO_ROOT"

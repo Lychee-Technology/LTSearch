@@ -275,7 +275,7 @@ fn bootstrap_query_embedding_handler(
 
 /// 按 provider 构建 embedding 引擎，并返回其维度不匹配诊断所用的 env 名与
 /// 字段描述。查询 bootstrap 与健康探针共用此段：provider=fixed 读固定向量，
-/// provider=ltembed 由 ONNX bundle 构建引擎。错误以 `String` 冒泡，由各调用点
+/// provider=ltembed 由 GGUF bundle 构建引擎。错误以 `String` 冒泡，由各调用点
 /// 决定包装成 `QueryLambdaError`（bootstrap）还是原样返回（health probe）。
 #[allow(clippy::type_complexity)]
 fn build_query_embedding_generator(
@@ -292,11 +292,8 @@ fn build_query_embedding_generator(
         )),
         #[cfg(feature = "ltembed")]
         EmbeddingProvider::LTEmbed => {
-            let config = ltembed_config_from_env(
-                "LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR",
-                "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
-            )
-            .map_err(|error| error.to_string())?;
+            let config = ltembed_config_from_env("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR")
+                .map_err(|error| error.to_string())?;
             Ok((
                 // Query side embeds user queries — the engine prepends the
                 // model's query prefix itself.

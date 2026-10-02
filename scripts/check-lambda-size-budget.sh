@@ -5,8 +5,9 @@
 #    强制），>200MB 打 warning；bootstrap 必须为 AArch64 ELF（e_machine == 0xB7，
 #    不依赖宿主机 file 命令）。
 # 2) dist/model-assets/ 存在时：manifest.json 逐文件 sha256/bytes 复核、
-#    libonnxruntime.so AArch64 断言、资产合计 ≤ 350MiB（/tmp 512MB 默认
-#    ephemeral 的文档化预算，需给查询 artifacts 留余量）。
+#    model.gguf GGUF magic 断言（llama.cpp 静态链接进二进制，资产不再含原生库）、
+#    资产合计 ≤ 350MiB（/tmp 512MB 默认 ephemeral 的文档化预算，需给查询
+#    artifacts 留余量）。
 # 用法：check-lambda-size-budget.sh [dist_dir]（默认 <repo>/dist）。
 set -euo pipefail
 
@@ -74,6 +75,11 @@ assets_dir = dist / "model-assets"
 manifest_path = assets_dir / "manifest.json"
 if manifest_path.exists():
     manifest = json.loads(manifest_path.read_text())
+    # LTEmbed GGUF bundle 契约（from_gguf_bundle_dir 逐一 require_file）。
+    listed = {entry["name"] for entry in manifest["files"]}
+    for required in ("model.gguf", "tokenizer.json", "build-info.json"):
+        if required not in listed:
+            failures.append(f"manifest.json does not list required bundle file {required}")
     total = 0
     for entry in manifest["files"]:
         path = assets_dir / entry["name"]
@@ -86,15 +92,15 @@ if manifest_path.exists():
             failures.append(f"model asset {entry['name']}: {len(data)} bytes, manifest says {entry['bytes']}")
         if hashlib.sha256(data).hexdigest() != entry["sha256"]:
             failures.append(f"model asset {entry['name']}: sha256 mismatch vs manifest")
-        if entry["name"] == "libonnxruntime.so":
-            assert_aarch64(data[:20], "model-assets/libonnxruntime.so")
+        if entry["name"] == "model.gguf" and data[:4] != b"GGUF":
+            failures.append("model asset model.gguf: missing GGUF magic header")
     print(f"{'model-assets (unzipped)':<30}{'-':>14}{mib(total):>14}{mib(ASSET_TMP_BUDGET - total):>14}")
     if total > ASSET_TMP_BUDGET:
         failures.append(
             f"model assets total {total} bytes exceeds the documented /tmp budget ({ASSET_TMP_BUDGET})"
         )
 else:
-    print("model-assets not staged; skipping asset hash/arch checks", file=sys.stderr)
+    print("model-assets not staged; skipping asset hash/format checks", file=sys.stderr)
 
 if failures:
     for failure in failures:
