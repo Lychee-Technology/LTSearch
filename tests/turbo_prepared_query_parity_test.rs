@@ -12,16 +12,13 @@ use std::sync::Arc;
 
 use ltsearch::index::{
     encode_vector, CentroidTable, MetaRecord, MmapIndex, PreparedTurboQuery, ProjectionMatrix,
-    TurboHeader, TurboRecord512, META_RECORD_SIZE,
+    TurboHeader, TurboQuantConfig, TurboRecord512, META_RECORD_SIZE,
 };
 use ltsearch::models::{IndexManifest, ShardManifest};
 use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
 use ltsearch::storage::{ActiveManifest, ManifestHead};
 
 const DIM: usize = 512;
-// Seeds of the legacy production assets (crate-private in `static_builder.rs`).
-const LEGACY_CENTROIDS_SEED: u64 = 7;
-const LEGACY_PROJECTION_SEED: u64 = 11;
 const ENCODED_RECORD_COUNT: usize = 1_024;
 const RAW_RECORD_COUNT: usize = 1_024;
 const QUERY_COUNT: usize = 16;
@@ -178,10 +175,12 @@ fn ranked_ids(ranked: &[(u64, f32)]) -> Vec<u64> {
     ranked.iter().map(|(doc_id, _)| *doc_id).collect()
 }
 
+/// The assets the static builders generate for the legacy codec.
 fn legacy_assets() -> (CentroidTable, ProjectionMatrix) {
+    let legacy = TurboQuantConfig::legacy_v1();
     (
-        CentroidTable::generate(DIM as u32, 4, LEGACY_CENTROIDS_SEED),
-        ProjectionMatrix::generate(DIM as u32, DIM as u32, LEGACY_PROJECTION_SEED),
+        CentroidTable::generate(legacy.dim, legacy.centroids_per_dim(), legacy.mse_seed),
+        ProjectionMatrix::generate(legacy.dim, legacy.qjl_dim, legacy.qjl_seed),
     )
 }
 

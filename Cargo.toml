@@ -59,6 +59,9 @@ lance = { workspace = true }
 lance-datafusion = { workspace = true }
 lancedb = { workspace = true }
 lambda_runtime = { version = "1.3", optional = true }
+# 纯 Rust 的 log/sincos：高斯采样器（#161）的输出在 x86_64 与 aarch64 上逐位一致，
+# 不随平台 C libm 变化（src/index/gaussian.rs）。
+libm = "0.2"
 # LTEmbed 以 rev 显式钉住（#158），免疫 `cargo update` 静默漂移。0390d9c 起后端为
 # llama.cpp/GGUF（LTEmbed#149）：`ltembed` feature 只能在 aarch64-linux 上编译，且
 # build.rs 要求 STATIC_LLAMA_DIR 指向已校验的 static-llama-cpp release（pin 见

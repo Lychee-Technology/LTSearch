@@ -1,4 +1,6 @@
 pub mod assets;
+pub mod codec_config;
+pub mod gaussian;
 pub mod header;
 pub mod lance_source;
 pub mod meta;
@@ -12,6 +14,8 @@ pub mod static_source;
 pub mod turbo_codec;
 
 pub use assets::{AssetError, CentroidTable, ProjectionMatrix};
+pub use codec_config::{NormPolicy, TurboCodecId, TurboQuantConfig, TurboQuantConfigError};
+pub use gaussian::{fill_standard_normal, StandardNormalStream, GAUSSIAN_GENERATOR_VERSION};
 pub use header::{
     KnownRecordLayout, TurboHeader, TurboHeaderError, TURBO_MAGIC, TURBO_VERSION_V2,
     TURBO_VERSION_V3,

@@ -7,9 +7,10 @@
 //! rand_chacha 0.3.1) produced `centroids.bin` sha256 `a8c2e500…8d63` and
 //! `projection.bin` sha256 `5bac235d…cb16`: the ChaCha8 stream is unchanged,
 //! but rand 0.9 changed how `random_range(-1.0..=1.0)` maps it to f32
-//! (rand#1289), moving most values by a few ULPs. Releases built before #156
-//! still load and score with their own stored assets, but rebuilding the same
-//! input now yields different assets and a different release ID.
+//! (rand#1289), moving about 81% of the values by up to 2.4e-7. Releases built
+//! before #156 still load and score with their own stored assets, but
+//! rebuilding the same input now yields different assets and a different
+//! release ID.
 //!
 //! A failure here means v2/v3 artifacts and release IDs built from the same
 //! input changed again. Do not update a digest without deciding that this is
