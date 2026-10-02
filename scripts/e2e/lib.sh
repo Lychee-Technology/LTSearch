@@ -124,9 +124,9 @@ create_e2e_queue() {
 }
 
 # 严格按 Cargo.lock 锁定 rev 物化 LTEmbed checkout（#141）。与下方
-# prepare_local_ltembed_checkout 的差异：不信任 sibling/nested 工作区检出——
-# 其 HEAD 可能已越过 lockfile（LTEmbed 上游已切 llama.cpp 后端，与本仓库
-# ONNX 集成不兼容，path patch 又会绕过 Cargo.lock 的 rev 锁定，见
+# prepare_local_ltembed_checkout 的差异：不信任 sibling/nested 工作区或 cargo
+# 缓存里的任意检出——其 HEAD 可能偏离 lockfile（上游 API 会有不兼容变更，如
+# LTEmbed#149 ONNX→llama.cpp；path patch 又会绕过 Cargo.lock 的 rev 锁定，见
 # release.yml 同款约束）。显式 LTSEARCH_LTEMBED_CHECKOUT 覆盖仍被尊重
 # （委托旧 helper，供联调未发布 LTEmbed 用）。幂等：marker 文件记录已物化
 # rev，匹配即跳过。无需 cargo/rust 工具链（干净 runner 直接走 GitHub 按

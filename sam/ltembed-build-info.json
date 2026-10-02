@@ -1,0 +1,14 @@
+{
+  "target_id": "jinaai/jina-embeddings-v5-text-nano-retrieval",
+  "model_metadata": {
+    "model_format": "gguf",
+    "quant": "Q5_K_M",
+    "pooling": "last_token",
+    "input_kind": "retrieval",
+    "query_prefix": "Query: ",
+    "document_prefix": "Document: ",
+    "raw_embedding_dimension": 768,
+    "output_embedding_dimension": 768,
+    "max_length": 8192
+  }
+}

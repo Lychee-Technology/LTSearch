@@ -42,7 +42,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
         # LTEmbed 锁定 rev 暂存（与 Cargo.lock 一致，沿袭原 publish-images.yml）。
         self.assertIn("Cargo.lock", content)
-        self.assertIn("LTEmbed?branch=main#", content)
+        self.assertIn("LTEmbed?rev=", content)
+        self.assertNotIn("branch=main", content)
         self.assertIn(".sam-local-deps/LTEmbed", content)
 
         # 发布产物统一由 package-release.sh 组装（real 模式）。

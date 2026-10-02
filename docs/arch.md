@@ -12,7 +12,7 @@ This document describes the architecture of a **hybrid search system** built usi
 * **TurboQuant** — a custom zero-copy mmap index for the **static** authoritative corpus (see `docs/TurboQuant.md`)
 * **LanceDB** — vector search for the **dynamic** user corpus
 * **Tantivy** — BM25 keyword search
-* **jina-embeddings-v5-text-nano-retrieval** — a local ONNX embedding model (512-dim), provisioned S3→/tmp at cold start (§21)
+* **jina-embeddings-v5-text-nano-retrieval** — a local GGUF embedding model run by llama.cpp (512-dim), provisioned S3→/tmp at cold start (§21)
 
 The system is designed for **RAG retrieval and document search workloads** with moderate traffic and burst elasticity.
 
@@ -592,46 +592,50 @@ The system supports two embedding providers, selected per deployment via environ
 | Provider | Env value | Description |
 | -------- | --------- | ----------- |
 | Fixed | `fixed` | Deterministic stub vector; all documents and queries share the same vector. Used in CI and unit tests. |
-| LTEmbed | `ltembed` | Real model inference: `jinaai/jina-embeddings-v5-text-nano-retrieval`, **512-dim** (768-dim raw, Matryoshka-truncated and L2-re-normalized to 512 by the LTEmbed ONNX engine; last-token pooling; `Query: ` / `Document: ` prefixes applied by the engine per input kind — build side embeds Documents, query side embeds Queries). |
+| LTEmbed | `ltembed` | Real model inference: `jinaai/jina-embeddings-v5-text-nano-retrieval`, **512-dim** (768-dim raw, Matryoshka-truncated and L2-re-normalized to 512 by the LTEmbed llama.cpp/GGUF engine; last-token pooling; `Query: ` / `Document: ` prefixes applied by the engine per input kind — build side embeds Documents, query side embeds Queries). |
 
 The provider is configured independently for the build pipeline (`LTSEARCH_BUILD_EMBEDDING_PROVIDER`) and the query path (`LTSEARCH_QUERY_EMBEDDING_PROVIDER`). Both must use the same provider and dimension for a given index version. The static TurboQuant path is pinned to 512-dim (`TurboRecord512`), matching the LTEmbed output.
 
-LTEmbed configuration per side is two env vars: `LTSEARCH_{BUILD,QUERY}_LTEMBED_BUNDLE_DIR` (directory holding `tokenizer.json` + `build-info.json`, and optionally `libonnxruntime.so`) and `LTSEARCH_{BUILD,QUERY}_LTEMBED_MODEL_PATH` (the `model.ort` weights). Pooling, prefixes, and output dimension are owned by the engine and its bundle metadata — there are no pooling/prefix env vars.
+LTEmbed configuration per side is one env var: `LTSEARCH_{BUILD,QUERY}_LTEMBED_BUNDLE_DIR`, the GGUF bundle directory holding `model.gguf` + `tokenizer.json` + `build-info.json` (`EmbeddingEngine::from_gguf_bundle_dir`). The ORT-era `..._LTEMBED_MODEL_PATH` was removed with the LTEmbed#149 migration. Pooling, prefixes, and output dimension are owned by the engine and its bundle metadata — there are no pooling/prefix env vars. The engine serializes inference through a single llama context (internal mutex), so concurrent embed calls in one process queue rather than run in parallel.
 
 ---
 
 ## **LTEmbed Asset Delivery**
 
-模型资产来自一个 **ort bundle** — a public `minimal-ort-builder` release asset (q4f16 `model.ort` for jina-embeddings-v5-text-nano-retrieval with a matching minimal-build `libonnxruntime.so`)。`sam/builder.Dockerfile` 的独立 `bundle` stage pins the exact bundle version via `LTEMBED_BUNDLE_URL` + `LTEMBED_BUNDLE_SHA256` build args (default: `minimal-ort-builder` v1.0.9, sha256 校验强制)；bumping the model is a two-line change to those defaults.
+模型资产是一个 **GGUF bundle**（LTEmbed#149 起后端为 llama.cpp）：`model.gguf`（jina-embeddings-v5-text-nano-retrieval 的上游推荐 Q5_K_M 量化，~161 MiB）+ `tokenizer.json`，均取自 HuggingFace 按 commit 固定的 resolve URL；`build-info.json` 取自仓库内 `sam/ltembed-build-info.json`（`model_format=gguf`、`pooling=last_token`、`input_kind=retrieval`，与 LTEmbed `release-bundles.yml` 同构）。`sam/builder.Dockerfile` 的独立 `bundle` stage 以 `LTEMBED_GGUF_URL`/`LTEMBED_GGUF_SHA256` + `LTEMBED_TOKENIZER_URL`/`LTEMBED_TOKENIZER_SHA256` 四个 build arg 钉住并逐文件 sha256 校验；这些 ARG 默认值是 pin 的单一来源（脚本经 `scripts/ltembed-pins.sh` 读取，同名环境变量非空时覆盖）。bump 模型时 URL 与 SHA256 成对更新，换量化还要同步 build-info 的 `quant`。
 
-ZIP 部署路径（#109/#111，生产默认）经 **S3→/tmp 冷启动供给**交付：`scripts/package-model-assets.sh` 只构建 `bundle` stage，产出平铺的 `dist/model-assets/` + `manifest.json`（bundle URL/sha256、逐文件 sha256/bytes、arch），部署前上传到 ArtifactBucket 的 `ModelAssetPrefix` 前缀；query/build 的 lambda bin 启动期（`src/embedding/model_assets.rs`）按 manifest 逐文件下载 + sha256 校验到 **`/tmp/ltembed`**，manifest 最后落盘作完整性标记（warm 容器复用 `/tmp` 免重复下载）；write 零模型依赖。为什么不是 Lambda Layer：#111 实测资产解压 ~139 MiB 本身装得进 Layer，但函数二进制（lance/datafusion 依赖）real 模式解压 235.7 MiB（strip 后 180.5 MiB），「函数 + Layer 解压合计 ≤ 250MB」硬限下两者放不下——本节早先「too large for Lambda Layers」的归因经实测更正为函数体积问题。strip 已强制纳入 `scripts/package-lambda-zips.sh`；`scripts/check-lambda-size-budget.sh` 在 CI（`sam-ltembed-e2e` job）持续断言单函数 250MB 预算、AArch64 ELF 架构与资产 hash。
+llama.cpp 不随资产交付，而是**静态链接**进二进制：LTEmbed 的 `build.rs` 强制要求 `STATIC_LLAMA_DIR` 指向预编译的 static-llama-cpp-rs-builder release（Graviton2 调优，artifact contract v2，与 LTEmbed 自身 CI 钉同一 release）。`scripts/fetch-static-llama.sh` 按 `ARG STATIC_LLAMA_URL`/`STATIC_LLAMA_SHA256` 下载、校验 tarball sha256 + release 自带 SHA256SUMS + contract 版本，builder stage 在 `COPY . .` 之前取用。LTEmbed 依赖在 `Cargo.toml` 以 `rev` 钉住（不跟随 `main`）。
 
-Build flow:
+ZIP 部署路径（#109/#111，生产默认）经 **S3→/tmp 冷启动供给**交付：`scripts/package-model-assets.sh` 只构建 `bundle` stage，产出平铺的 `dist/model-assets/` + `manifest.json`（`bundle_format=gguf`、逐源 URL/sha256 的 `sources`、逐文件 sha256/bytes 的 `files`；运行时只读 `files`），部署前上传到 ArtifactBucket 的 `ModelAssetPrefix` 前缀；query/build 的 lambda bin 启动期（`src/embedding/model_assets.rs`）按 manifest 逐文件下载 + sha256 校验到 **`/tmp/ltembed`**，manifest 最后落盘作完整性标记（warm 容器复用 `/tmp` 免重复下载）；write 零模型依赖。为什么不是 Lambda Layer：#111 实测（ORT 时代）资产解压 ~139 MiB 本身装得进 Layer，但函数二进制（lance/datafusion 依赖）real 模式解压 235.7 MiB（strip 后 180.5 MiB），「函数 + Layer 解压合计 ≤ 250MB」硬限下两者放不下——本节早先「too large for Lambda Layers」的归因经实测更正为函数体积问题。strip 已强制纳入 `scripts/package-lambda-zips.sh`；`scripts/check-lambda-size-budget.sh` 在 CI（`sam-ltembed-e2e` job）持续断言单函数 250MB 预算、AArch64 ELF 架构、manifest 三件套齐全、`model.gguf` 的 GGUF magic 与资产 hash。GGUF 资产（~178 MiB）落 `/tmp/ltembed`，仍在 Lambda 默认 512 MB ephemeral storage 内。
+
+Build flow (`LTEMBED_PIN_BUILD_ARGS` from `ltembed_pin_build_args` in `scripts/ltembed-pins.sh`):
 
 ```
 docker build --platform linux/arm64 \
              --build-arg LTEMBED_MODE=real \
-             --build-arg LTEMBED_BUNDLE_URL=<ort-bundle tarball> \
+             "${LTEMBED_PIN_BUILD_ARGS[@]}" \
              sam/builder.Dockerfile
-  → downloads and unpacks the bundle into /ltembed-assets/
-  → compiles Rust binaries with --features ltembed
-    (against the LTEmbed checkout staged at .sam-local-deps/LTEmbed)
+  → bundle stage: downloads + sha256-verifies model.gguf / tokenizer.json,
+    adds build-info.json, into /ltembed-assets/
+  → builder stage: fetch-static-llama.sh → /opt/static-llama (verified)
+  → compiles Rust binaries with --features ltembed, STATIC_LLAMA_DIR set
+    (against the LTEmbed checkout staged at .sam-local-deps/LTEmbed,
+    materialized at the Cargo.lock rev)
 ```
 
 ZIP + S3→/tmp 是唯一的 AWS 资产谱系（image-based Lambda 已于 #113 移除）；
 release 自动化把同一份 `dist/model-assets/` 打成 `model-assets.zip` 随 GitHub
 Release 交付（`scripts/package-release.sh`），运维解压后整目录上传 S3。
 
-The default `LTEMBED_MODE=stub` skips the download and satisfies the ltembed git dependency with the vendored stub crate; binaries are built without the `ltembed` feature and use the `fixed` provider. This is the CI default. `LTEMBED_MODE=real` downloads the pinned default `LTEMBED_BUNDLE_URL` (overridable to bump the model version) and fails the build loudly only if that URL is explicitly emptied or unreachable.
+The default `LTEMBED_MODE=stub` skips the download and satisfies the ltembed git dependency with the vendored stub crate; binaries are built without the `ltembed` feature and use the `fixed` provider. This is the CI default. `LTEMBED_MODE=real` downloads the pinned GGUF assets and static llama.cpp (each overridable via its build arg to test a bump) and fails the build loudly if any pin is explicitly emptied, unreachable, or fails its sha256 check.
 
 Bundle files (Lambda ZIP lineage, S3→/tmp, #111):
 
 | File | Runtime path |
 | ---- | ------------ |
-| `model.ort` | `/tmp/ltembed/model.ort` |
+| `model.gguf` | `/tmp/ltembed/model.gguf` |
 | `tokenizer.json` | `/tmp/ltembed/tokenizer.json` |
 | `build-info.json` | `/tmp/ltembed/build-info.json` |
-| `libonnxruntime.so` | `/tmp/ltembed/libonnxruntime.so`（引擎自动解析；`ort` 以 `load-dynamic` 构建） |
 | `manifest.json` | `/tmp/ltembed/manifest.json`（完整性标记，最后落盘） |
 
 ---
@@ -690,7 +694,9 @@ container; in the local single image, once per long-lived service process.
 
 ## Architecture portability caveat
 
-`ort` is built with `load-dynamic`, so the compiled binary + `libonnxruntime.so` are decoupled and
-portable **as long as the CPU architecture matches**. The pinned bundle is `linux-arm64`, so Lambda
-functions must run on **arm64 (Graviton)** and the local image is arm64-only. Targeting x86_64
-would require an x86_64 `minimal-ort-builder` bundle and a matching `LTEMBED_BUNDLE_URL`.
+The GGUF bundle itself is architecture-neutral, but llama.cpp is statically linked from a prebuilt
+`aarch64-graviton2` static-llama release, so a `ltembed`-enabled binary only links on
+**linux/arm64**: Lambda functions must run on **arm64 (Graviton)** and the local real-LTEmbed image
+is arm64-only. (`cargo check`/`clippy` with the `ltembed` feature still work on x86_64, since
+`build.rs` only emits link directives.) Targeting x86_64 would require an x86_64 static-llama
+release and a matching `STATIC_LLAMA_URL`/`STATIC_LLAMA_SHA256`.

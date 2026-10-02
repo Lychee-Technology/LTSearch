@@ -52,4 +52,10 @@ cargo fmt --check
 # --all-features never compiles the #[cfg(not(feature="aws"))] branches, so lint
 # each profile explicitly to cover both the local-only and AWS/lambda code paths.
 cargo clippy --no-default-features --features local --all-targets -- -D warnings
+# The real ltembed build.rs (llama.cpp backend, LTEmbed#149) requires STATIC_LLAMA_DIR even
+# for check/clippy; fetch the pinned, checksum-verified static llama.cpp unless provided.
+if [[ -z "${STATIC_LLAMA_DIR:-}" ]]; then
+  STATIC_LLAMA_DIR="$("$(dirname "$0")/fetch-static-llama.sh")"
+fi
+export STATIC_LLAMA_DIR
 cargo clippy --no-default-features --features aws,lambda,ltembed --all-targets -- -D warnings

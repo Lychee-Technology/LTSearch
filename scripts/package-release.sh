@@ -82,17 +82,27 @@ for dirpath, dirnames, filenames in os.walk(root):
 PY
 (cd "$DIST_DIR" && TZ=UTC zip -q -r -X "$RELEASE_DIR/model-assets.zip" model-assets)
 
-# bundle pin 的单一来源是 sam/builder.Dockerfile 的 ARG 默认值（与
-# package-model-assets.sh 同一提取模式），显式覆盖时以环境变量为准。
-bundle_url="${LTEMBED_BUNDLE_URL:-$(sed -n 's/^ARG LTEMBED_BUNDLE_URL=//p' "$REPO_ROOT/sam/builder.Dockerfile")}"
-bundle_sha256="${LTEMBED_BUNDLE_SHA256:-$(sed -n 's/^ARG LTEMBED_BUNDLE_SHA256=//p' "$REPO_ROOT/sam/builder.Dockerfile")}"
+# pin 的单一来源是 sam/builder.Dockerfile 的 ARG 默认值（scripts/ltembed-pins.sh，
+# 与 package-model-assets.sh 同源），显式覆盖时以环境变量为准。
+# shellcheck source=scripts/ltembed-pins.sh
+source "$REPO_ROOT/scripts/ltembed-pins.sh"
+gguf_url="$(ltembed_pin LTEMBED_GGUF_URL)"
+gguf_sha256="$(ltembed_pin LTEMBED_GGUF_SHA256)"
+tokenizer_url="$(ltembed_pin LTEMBED_TOKENIZER_URL)"
+tokenizer_sha256="$(ltembed_pin LTEMBED_TOKENIZER_SHA256)"
+static_llama_url="$(ltembed_pin STATIC_LLAMA_URL)"
+static_llama_sha256="$(ltembed_pin STATIC_LLAMA_SHA256)"
 git_sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 
 LTSEARCH_RELEASE_VERSION="$version" \
   LTSEARCH_RELEASE_GIT_SHA="$git_sha" \
   LTSEARCH_RELEASE_MODE="$mode" \
-  LTSEARCH_RELEASE_BUNDLE_URL="$bundle_url" \
-  LTSEARCH_RELEASE_BUNDLE_SHA256="$bundle_sha256" \
+  LTSEARCH_RELEASE_GGUF_URL="$gguf_url" \
+  LTSEARCH_RELEASE_GGUF_SHA256="$gguf_sha256" \
+  LTSEARCH_RELEASE_TOKENIZER_URL="$tokenizer_url" \
+  LTSEARCH_RELEASE_TOKENIZER_SHA256="$tokenizer_sha256" \
+  LTSEARCH_RELEASE_STATIC_LLAMA_URL="$static_llama_url" \
+  LTSEARCH_RELEASE_STATIC_LLAMA_SHA256="$static_llama_sha256" \
   python3 - "$RELEASE_DIR" <<'PY'
 import datetime
 import hashlib
@@ -142,10 +152,27 @@ provenance = {
     .replace("+00:00", "Z"),
     "workflow": workflow,
     "ltembed_mode": os.environ["LTSEARCH_RELEASE_MODE"],
+    # model-assets.zip 恒为 real GGUF bundle（--mode 只影响 Lambda ZIP）。
     "ltembed_bundle": {
-        "url": os.environ["LTSEARCH_RELEASE_BUNDLE_URL"],
-        "sha256": os.environ["LTSEARCH_RELEASE_BUNDLE_SHA256"],
+        "format": "gguf",
+        "model": {
+            "url": os.environ["LTSEARCH_RELEASE_GGUF_URL"],
+            "sha256": os.environ["LTSEARCH_RELEASE_GGUF_SHA256"],
+        },
+        "tokenizer": {
+            "url": os.environ["LTSEARCH_RELEASE_TOKENIZER_URL"],
+            "sha256": os.environ["LTSEARCH_RELEASE_TOKENIZER_SHA256"],
+        },
     },
+    # real 模式 Lambda 二进制静态链接的 llama.cpp release；stub 模式不链接，记 null。
+    "static_llama": (
+        {
+            "url": os.environ["LTSEARCH_RELEASE_STATIC_LLAMA_URL"],
+            "sha256": os.environ["LTSEARCH_RELEASE_STATIC_LLAMA_SHA256"],
+        }
+        if os.environ["LTSEARCH_RELEASE_MODE"] == "real"
+        else None
+    ),
     # 镜像 digest 有意不记：push 前未知，registry 是 digest 的权威来源；
     # ref+tag+dockerfile 足以复现构建。
     "local_image": {

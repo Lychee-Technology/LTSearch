@@ -21,7 +21,7 @@ latency SLA, handling datasets up to 10M documents. Updates are processed throug
 batch indexing, using versioned index publishing with an **ETag compare-and-swap** on the
 `index/_head` pointer for atomic, zero-downtime updates.
 
-Embeddings are produced locally by the `jina-embeddings-v5-text-nano-retrieval` ONNX model
+Embeddings are produced locally by the `jina-embeddings-v5-text-nano-retrieval` GGUF model (llama.cpp)
 (provisioned S3→/tmp at cold start on Lambda, mounted or bundled locally); the model outputs
 768-dim raw vectors that the engine Matryoshka-truncates and
 L2-renormalizes to **512-dim**, which is the dimension used end-to-end.
@@ -1440,10 +1440,11 @@ Target latency budget (300ms SLA):
 - `arrow-array` / `arrow-schema` (58): columnar decode
 
 **Embedding Generation** (local, no external API):
-- `ltembed` (git dependency, `optional`, behind the `ltembed` feature): wraps the LTEmbed ONNX
-  engine (`jina-embeddings-v5-text-nano-retrieval`, 512-dim output)
-- `ort` (2.0.0-rc, `load-dynamic`): ONNX Runtime bindings — the `libonnxruntime.so` ships in the
-  ort bundle, so the compiled binary is architecture-portable within arm64
+- `ltembed` (git dependency pinned by `rev`, `optional`, behind the `ltembed` feature): wraps the
+  LTEmbed llama.cpp/GGUF engine (`jina-embeddings-v5-text-nano-retrieval` Q5_K_M, 512-dim output)
+- llama.cpp: statically linked from a prebuilt static-llama-cpp-rs-builder release
+  (`aarch64-graviton2`, located via `STATIC_LLAMA_DIR`, fetched and verified by
+  `scripts/fetch-static-llama.sh`), so `ltembed` binaries only link on linux/arm64
 - Default build uses `--no-default-features`; the `fixed` deterministic stub provider replaces the
   model in CI and unit tests (vendored `ltembed-stub` crate satisfies the optional git dep)
 
@@ -1478,9 +1479,9 @@ Target latency budget (300ms SLA):
 
 ### External Services (Optional)
 
-**Embedding Generation**: none required at runtime — the model is baked into the image and run
-locally via ONNX Runtime. (`minimal-ort-builder` releases supply the pinned ort bundle at build
-time only.)
+**Embedding Generation**: none required at runtime — the model runs in-process via statically linked
+llama.cpp. (The GGUF weights/tokenizer come from commit-pinned HuggingFace URLs and the static
+llama.cpp from a static-llama-cpp-rs-builder release, both at build/packaging time only.)
 
 **Reranking (Optional)**: not implemented; would be an external GPU inference endpoint if added
 (see `docs/arch.md` §9).

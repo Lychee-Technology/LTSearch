@@ -15,7 +15,7 @@
 //!   `0.1`-repeated embedding; the `lang` filter alone selects the top chunk.
 //! - `ltembed` (#143, requires `--features local,ltembed`): real 512-dim
 //!   LTEmbed document embeddings produced by the same bundle the build role
-//!   uses (`LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR`/`LTSEARCH_BUILD_LTEMBED_MODEL_PATH`),
+//!   uses (`LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR`),
 //!   so static retrieval in the real local topology matches the query-side
 //!   embedding profile.
 //!
@@ -199,11 +199,8 @@ fn ltembed_embeddings(dim: i32, rows: &[FixtureRow]) -> Vec<Vec<f32>> {
         ltembed_config_from_env, EmbeddingGenerator, LTEmbedEmbeddingGenerator,
     };
 
-    let config = ltembed_config_from_env(
-        "LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR",
-        "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
-    )
-    .expect("ltembed bundle env must be set for --embedder ltembed");
+    let config = ltembed_config_from_env("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR")
+        .expect("ltembed bundle env must be set for --embedder ltembed");
     let generator = LTEmbedEmbeddingGenerator::from_config(&config, EmbeddingInputKind::Document)
         .expect("LTEmbed engine must initialize from the pinned bundle");
     rows.iter()

@@ -83,8 +83,7 @@ cargo build --features lambda --bin query_lambda
 | `LTSEARCH_QUERY_EMBEDDING_PROVIDER` | Embedding provider: `fixed` or `ltembed` |
 | `LTSEARCH_QUERY_ARTIFACT_ROOT` | Local path to index artifacts |
 | `LTSEARCH_QUERY_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
-| `LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR` | Dir with `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
-| `LTSEARCH_QUERY_LTEMBED_MODEL_PATH` | Path to `model.ort` |
+| `LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR` | GGUF bundle dir with `model.gguf` + `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
 
 Static TurboQuant retrieval uses no implicit `static/` directory or `LTSEARCH_QUERY_STATIC_DIR` override: it resolves through the activation pointer `static/_head` → `static/releases/<id>/` under `LTSEARCH_QUERY_ARTIFACT_ROOT` (see the static-activate flow).
 
@@ -116,8 +115,7 @@ cargo build --features lambda --bin index_builder_lambda
 | `LTSEARCH_BUILD_EMBEDDING_PROVIDER` | Embedding provider: `fixed` or `ltembed` |
 | `LTSEARCH_BUILD_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
 | `LTSEARCH_BUILD_EMBEDDING_DIM` | Embedding dimension |
-| `LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR` | Dir with `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
-| `LTSEARCH_BUILD_LTEMBED_MODEL_PATH` | Path to `model.ort` |
+| `LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR` | GGUF bundle dir with `model.gguf` + `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
 
 ### turbo_index_builder
 
@@ -132,8 +130,7 @@ cargo build --features aws --bin turbo_index_builder
 | `LTSEARCH_BUILD_EMBEDDING_PROVIDER` | Embedding provider: `fixed` or `ltembed` (default: `fixed`) |
 | `LTSEARCH_BUILD_FIXED_EMBEDDING` | Comma-separated fixed embedding values (provider=`fixed`) |
 | `LTSEARCH_BUILD_EMBEDDING_DIM` | Embedding dimension |
-| `LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR` | Dir with `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
-| `LTSEARCH_BUILD_LTEMBED_MODEL_PATH` | Path to `model.ort` |
+| `LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR` | GGUF bundle dir with `model.gguf` + `tokenizer.json` + `build-info.json` (provider=`ltembed`) |
 
 Usage:
 ```bash
@@ -155,9 +152,9 @@ The Lambda ZIP E2E scripts run the full write → build → query pipeline again
 | Mode | Description | When to use |
 |------|-------------|-------------|
 | `fixed` (default) | Deterministic 3-dim stub vector, no model required | CI, quick local iteration |
-| `ltembed` | Real `jinaai/jina-embeddings-v5-text-nano-retrieval` inference via the LTEmbed ONNX engine, 512-dim | Testing real semantic search locally |
+| `ltembed` | Real `jinaai/jina-embeddings-v5-text-nano-retrieval` inference via the LTEmbed llama.cpp/GGUF engine, 512-dim | Testing real semantic search locally |
 
-The `ltembed` mode downloads an ort bundle (`model.ort`, `tokenizer.json`, `build-info.json`, `libonnxruntime.so`) during `docker build` from the public `minimal-ort-builder` release pinned in `sam/builder.Dockerfile` (override `LTEMBED_BUNDLE_URL` to test a different bundle). Rust tests that need real inference look for a sibling `../LTEmbed/ort_bundle/` checkout and skip when absent.
+The `ltembed` mode downloads a GGUF bundle during `docker build`: the Q5_K_M `model.gguf` and `tokenizer.json` come from HuggingFace resolve URLs pinned to a commit (each sha256-verified), and `build-info.json` comes from `sam/ltembed-build-info.json`. All pins (`LTEMBED_{GGUF,TOKENIZER}_{URL,SHA256}`) are single-sourced in `sam/builder.Dockerfile` (`scripts/ltembed-pins.sh` reads them; a same-named env var overrides). Compiling the `ltembed` feature statically links a prebuilt llama.cpp (`STATIC_LLAMA_DIR`, fetched and verified by `scripts/fetch-static-llama.sh`); linking only works for linux/arm64 (Graviton). Rust tests that need real inference look for a sibling `../LTEmbed/gguf_bundle/` checkout and skip when absent.
 
 ### Lambda ZIP invoke E2E (CI-compatible)
 
@@ -171,7 +168,7 @@ docker compose -f docker-compose.moto.yml up -d
 bash scripts/e2e/run-sam-zip-invoke-e2e.sh
 
 # Run real-mode ZIP flow with S3→/tmp model assets (matches CI sam-ltembed-e2e;
-# downloads the pinned ort bundle on first run, ~471 MB)
+# downloads the pinned GGUF bundle on first run, ~186 MB)
 bash scripts/e2e/run-sam-ltembed-invoke-e2e.sh
 
 # Stop Moto
@@ -207,11 +204,11 @@ To run a published release image instead of a local build, set
 
 ### Real-LTEmbed Local Topology (E2E)
 
-A second, test-only topology runs the same three roles with the real LTEmbed model (#141). `sam/local-ltembed.Dockerfile` compiles `ltsearch` with `--features local,ltembed` and bakes the pinned, checksum-verified linux/arm64 ort bundle into the image at `/opt/ltembed` — no Moto, no AWS env vars, no Lambda/SAM. The bundle URL/SHA256 pin stays single-sourced in `sam/builder.Dockerfile` and is injected at build time.
+A second, test-only topology runs the same three roles with the real LTEmbed model (#141). `sam/local-ltembed.Dockerfile` compiles `ltsearch` with `--features local,ltembed` and bakes the pinned, checksum-verified GGUF bundle into the image at `/opt/ltembed` (llama.cpp is statically linked into the linux/arm64 binary) — no Moto, no AWS env vars, no Lambda/SAM. The bundle and static-llama URL/SHA256 pins stay single-sourced in `sam/builder.Dockerfile` and are injected at build time.
 
 ```bash
 # Build the real image (stages the pinned LTEmbed checkout, downloads the
-# ~120 MB ort bundle on first run, linux/arm64 only)
+# ~186 MB GGUF bundle on first run, linux/arm64 only)
 bash scripts/e2e/build-local-ltembed-image.sh
 
 # Blackbox main chain: health → write → automatic build → query,
@@ -232,7 +229,7 @@ bash scripts/e2e/run-local-real-dynamic-contract.sh
 bash scripts/e2e/run-local-real-static-contract.sh
 ```
 
-Each run is fully isolated: a unique compose project (`ltsearch-real-<run_id>`), ephemeral loopback ports discovered via `docker compose port`, and project-scoped volume/network — concurrent runs do not collide. Query/build healthchecks execute a real embedding probe, so `up -d --wait` going healthy means real inference works (first model load is slow; the healthcheck allows for it). On success the runner removes all containers, volumes, and scratch files; on failure it tears the stack down but preserves service logs and recorded request/response payloads under `.e2e-tmp/ltsearch-real-<run_id>/`. This topology is not part of the PR gate. Daily regression runs in the standalone `Local Real LTEmbed E2E` workflow ([`.github/workflows/e2e-local-real.yml`](.github/workflows/e2e-local-real.yml)): every day on a schedule and manually via `gh workflow run e2e-local-real.yml`, a hosted Linux/arm64 runner rebuilds the image from the current checkout (never reusing a stale tag) and runs all four runners in sequence, teeing each runner's own output into `.e2e-tmp/runner-logs/`. The suite is arm64-only, needs no Moto/AWS/SAM, and downloads the pinned ort bundle plus loads the real model on every run — expect a long job (120-minute timeout). On failure, everything preserved under `.e2e-tmp/` — service logs, recorded HTTP request/response payloads, and the runner output logs — is uploaded as a workflow artifact (retained 14 days).
+Each run is fully isolated: a unique compose project (`ltsearch-real-<run_id>`), ephemeral loopback ports discovered via `docker compose port`, and project-scoped volume/network — concurrent runs do not collide. Query/build healthchecks execute a real embedding probe, so `up -d --wait` going healthy means real inference works (first model load is slow; the healthcheck allows for it). On success the runner removes all containers, volumes, and scratch files; on failure it tears the stack down but preserves service logs and recorded request/response payloads under `.e2e-tmp/ltsearch-real-<run_id>/`. This topology is not part of the PR gate. Daily regression runs in the standalone `Local Real LTEmbed E2E` workflow ([`.github/workflows/e2e-local-real.yml`](.github/workflows/e2e-local-real.yml)): every day on a schedule and manually via `gh workflow run e2e-local-real.yml`, a hosted Linux/arm64 runner rebuilds the image from the current checkout (never reusing a stale tag) and runs all four runners in sequence, teeing each runner's own output into `.e2e-tmp/runner-logs/`. The suite is arm64-only, needs no Moto/AWS/SAM, and downloads the pinned GGUF bundle and static llama.cpp plus loads the real model on every run — expect a long job (120-minute timeout). On failure, everything preserved under `.e2e-tmp/` — service logs, recorded HTTP request/response payloads, and the runner output logs — is uploaded as a workflow artifact (retained 14 days).
 
 ## Releases
 

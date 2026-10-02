@@ -23,7 +23,9 @@ create_e2e_bucket "$E2E_BUCKET"
 QUEUE_URL="$(create_e2e_queue "$E2E_QUEUE_NAME")"
 
 # real 模式编译 patch 到 /src/.sam-local-deps/LTEmbed，需先 stage checkout。
-prepare_local_ltembed_checkout "$REPO_ROOT"
+# 严格按 Cargo.lock rev 物化：cargo 缓存里可能残留 ORT 时代旧 rev 的 checkout，
+# 不能任取其一（LTEmbed#149 前后 API 不兼容）。
+prepare_locked_ltembed_checkout "$REPO_ROOT"
 
 LTSEARCH_LTEMBED_MODE=real bash "$REPO_ROOT/scripts/package-lambda-zips.sh"
 bash "$REPO_ROOT/scripts/package-model-assets.sh"

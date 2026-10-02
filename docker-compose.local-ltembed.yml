@@ -11,8 +11,8 @@
 #   - build 也发布端口：#141 AC 要求经 HTTP 实测 build 角色的真实推理健康。
 #
 # healthcheck 即真实推理门：query/build 的 /health 内部跑 embedding_probe()
-# （真实 ONNX 推理），`up -d --wait` 变绿等价于模型可用；首次加载 ~118MB
-# model.ort 较慢，故 start_period/retries 比固定拓扑宽松。
+# （真实 llama.cpp/GGUF 推理），`up -d --wait` 变绿等价于模型可用；首次加载
+# ~169MB model.gguf 较慢，故 start_period/retries 比固定拓扑宽松。
 services:
   write:
     image: ${LTSEARCH_LOCAL_LTEMBED_IMAGE:-ltsearch-local-ltembed:dev}
@@ -23,10 +23,8 @@ services:
       # 自动 worker 建版需要显式 dim（src/build_worker.rs）；jina v5 nano 为 512。
       LTSEARCH_BUILD_EMBEDDING_DIM: "512"
       LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR: /opt/ltembed
-      LTSEARCH_BUILD_LTEMBED_MODEL_PATH: /opt/ltembed/model.ort
       LTSEARCH_QUERY_EMBEDDING_PROVIDER: ltembed
       LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR: /opt/ltembed
-      LTSEARCH_QUERY_LTEMBED_MODEL_PATH: /opt/ltembed/model.ort
     volumes:
       - ltsearch-data:/var/lib/ltsearch
     ports:

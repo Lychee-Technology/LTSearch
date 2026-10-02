@@ -91,9 +91,10 @@ jobs:
       - if: always()
         run: docker compose -f docker-compose.moto.yml down -v
 
-  # real 模式 ltembed ZIP 路径（#111，S3→/tmp）：strip 后函数 ZIP + 模型资产
+  # real 模式 ltembed ZIP 路径（#111，S3→/tmp）：strip 后函数 ZIP + GGUF 模型资产
   # 上传 moto + 250MB/hash/arch 预算守卫 + ltembed/512 全链路冷启动供给。
-  # rust toolchain 供 cargo fetch 取 LTEmbed checkout。
+  # LTEmbed checkout 按 Cargo.lock rev 物化；静态 llama.cpp 由 builder.Dockerfile
+  # 按 pin 取用校验。
   sam-ltembed-e2e:
     needs: integration
     runs-on: ubuntu-24.04-arm
@@ -142,7 +143,12 @@ jobs:
               "index_builder_lambda.zip",
               "model-assets.zip",
           }
-          assert p["ltembed_bundle"]["url"] and len(p["ltembed_bundle"]["sha256"]) == 64
+          bundle = p["ltembed_bundle"]
+          assert bundle["format"] == "gguf"
+          for source in (bundle["model"], bundle["tokenizer"]):
+              assert source["url"] and len(source["sha256"]) == 64
+          # stub 模式 Lambda 二进制不链接 llama.cpp。
+          assert p["static_llama"] is None
           assert p["workflow"] and p["workflow"]["run_id"]
           PY
 

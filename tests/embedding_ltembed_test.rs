@@ -130,10 +130,9 @@ fn ltembed_generator_maps_engine_errors_to_embedding_error() {
 }
 
 #[test]
-fn ltembed_generator_from_config_maps_bootstrap_failures() {
+fn ltembed_generator_from_config_reports_unprovisioned_bundle_dir() {
     let config = LTEmbedConfig {
         bundle_dir: temp_path("missing-bundle").display().to_string(),
-        model_path: temp_path("missing-model.ort").display().to_string(),
     };
 
     let error =
@@ -141,7 +140,34 @@ fn ltembed_generator_from_config_maps_bootstrap_failures() {
 
     let EmbeddingError::Generation { message } = error;
     assert!(
-        message.starts_with("LTEmbed bootstrap failed:"),
+        message.starts_with("LTEmbed bundle dir not found at"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains("model assets not provisioned"),
+        "unexpected message: {message}"
+    );
+}
+
+#[test]
+fn ltembed_generator_from_config_maps_bootstrap_failures() {
+    // 目录存在但为空：越过目录预检，LTEmbed 自身以 MissingFile 拒绝。
+    let bundle_dir = temp_path("empty-bundle");
+    std::fs::create_dir_all(&bundle_dir).unwrap();
+    let config = LTEmbedConfig {
+        bundle_dir: bundle_dir.display().to_string(),
+    };
+
+    let error =
+        LTEmbedEmbeddingGenerator::from_config(&config, EmbeddingInputKind::Query).unwrap_err();
+
+    let EmbeddingError::Generation { message } = error;
+    assert!(
+        message.starts_with("LTEmbed bootstrap failed"),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains("model.gguf"),
         "unexpected message: {message}"
     );
 }

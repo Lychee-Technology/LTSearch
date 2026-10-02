@@ -32,11 +32,11 @@ fn valid_search_request() -> SearchRequest {
 fn maybe_ltembed_bundle_dir() -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .map(|ancestor| ancestor.join("LTEmbed/ort_bundle"))
+        .map(|ancestor| ancestor.join("LTEmbed/gguf_bundle"))
         .find(|candidate| {
             candidate.join("build-info.json").exists()
                 && candidate.join("tokenizer.json").exists()
-                && candidate.join("model.ort").exists()
+                && candidate.join("model.gguf").exists()
         })
 }
 
@@ -135,7 +135,6 @@ fn query_lambda_bootstrap_reports_missing_ltembed_bundle_dir() {
     std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "ltembed");
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
     std::env::remove_var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR");
-    std::env::remove_var("LTSEARCH_QUERY_LTEMBED_MODEL_PATH");
 
     let error = match bootstrap_query_handler_from_env() {
         Ok(_) => panic!("expected bootstrap to fail without LTEmbed bundle dir"),
@@ -164,14 +163,10 @@ fn query_lambda_bootstrap_reports_missing_ltembed_bundle_files() {
 
     std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "ltembed");
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
-    std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR",
-        root.join("no-such-bundle"),
-    );
-    std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
-        root.join("no-such-bundle/model.ort"),
-    );
+    // 目录存在但为空：越过 LTSearch 的目录预检，由 LTEmbed require_file 报缺文件。
+    let bundle_dir = root.join("empty-bundle");
+    std::fs::create_dir_all(&bundle_dir).unwrap();
+    std::env::set_var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR", &bundle_dir);
 
     let error = match bootstrap_query_handler_from_env() {
         Ok(_) => panic!("expected bootstrap to fail when bundle files are missing"),
@@ -185,6 +180,10 @@ fn query_lambda_bootstrap_reports_missing_ltembed_bundle_files() {
         message.starts_with(
             "query lambda bootstrap failed: embedding generation failed: LTEmbed bootstrap failed:"
         ),
+        "unexpected message: {message}"
+    );
+    assert!(
+        message.contains("GGUF model file not found"),
         "unexpected message: {message}"
     );
 }
@@ -347,7 +346,7 @@ fn query_lambda_bootstrap_rejects_fixed_embedding_dim_mismatch_before_serving_re
 fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
     let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
-        eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
+        eprintln!("Skipping: LTEmbed gguf_bundle not found in sibling checkout");
         return;
     };
 
@@ -376,10 +375,6 @@ fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() 
     std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "ltembed");
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
     std::env::set_var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR", &bundle_dir);
-    std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
-        bundle_dir.join("model.ort"),
-    );
 
     let handler = bootstrap_query_handler_from_env().expect("expected LTEmbed bootstrap to work");
     let response = handle_search_request(
@@ -405,7 +400,7 @@ fn query_lambda_bootstrap_builds_ltembed_handler_and_delegates_to_real_router() 
 fn query_lambda_bootstrap_rejects_ltembed_dim_mismatch_before_serving_requests() {
     let _guard = QUERY_LAMBDA_ENV_LOCK.lock().unwrap();
     let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
-        eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
+        eprintln!("Skipping: LTEmbed gguf_bundle not found in sibling checkout");
         return;
     };
 
@@ -420,10 +415,6 @@ fn query_lambda_bootstrap_rejects_ltembed_dim_mismatch_before_serving_requests()
     std::env::set_var("LTSEARCH_QUERY_EMBEDDING_PROVIDER", "ltembed");
     std::env::set_var("LTSEARCH_QUERY_ARTIFACT_ROOT", &root);
     std::env::set_var("LTSEARCH_QUERY_LTEMBED_BUNDLE_DIR", &bundle_dir);
-    std::env::set_var(
-        "LTSEARCH_QUERY_LTEMBED_MODEL_PATH",
-        bundle_dir.join("model.ort"),
-    );
 
     let error = match bootstrap_query_handler_from_env() {
         Ok(_) => panic!("expected bootstrap to fail for LTEmbed embedding dimension mismatch"),

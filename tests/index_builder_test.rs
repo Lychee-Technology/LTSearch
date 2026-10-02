@@ -39,11 +39,11 @@ fn temp_fixture_dir(test_name: &str) -> PathBuf {
 fn maybe_ltembed_bundle_dir() -> Option<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .map(|ancestor| ancestor.join("LTEmbed/ort_bundle"))
+        .map(|ancestor| ancestor.join("LTEmbed/gguf_bundle"))
         .find(|candidate| {
             candidate.join("build-info.json").exists()
                 && candidate.join("tokenizer.json").exists()
-                && candidate.join("model.ort").exists()
+                && candidate.join("model.gguf").exists()
         })
 }
 
@@ -514,7 +514,7 @@ fn local_index_builder_generates_missing_embeddings_and_writes_searcher_compatib
 #[test]
 fn local_index_builder_generates_missing_embeddings_with_ltembed() {
     let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
-        eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
+        eprintln!("Skipping: LTEmbed gguf_bundle not found in sibling checkout");
         return;
     };
 
@@ -522,7 +522,6 @@ fn local_index_builder_generates_missing_embeddings_with_ltembed() {
     let generator = LTEmbedEmbeddingGenerator::from_config(
         &LTEmbedConfig {
             bundle_dir: bundle_dir.display().to_string(),
-            model_path: bundle_dir.join("model.ort").display().to_string(),
         },
         EmbeddingInputKind::Document,
     )
@@ -583,7 +582,6 @@ fn local_index_builder_generates_missing_embeddings_with_ltembed() {
     let query_generator = LTEmbedEmbeddingGenerator::from_config(
         &LTEmbedConfig {
             bundle_dir: bundle_dir.display().to_string(),
-            model_path: bundle_dir.join("model.ort").display().to_string(),
         },
         EmbeddingInputKind::Query,
     )

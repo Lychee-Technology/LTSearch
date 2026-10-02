@@ -114,7 +114,7 @@ pub fn s3_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client 
 /// 模型资产供给专用 S3 client（#111）：在 [`s3_client_from_env`] 之上跳过可选
 /// 的响应 CRC 校验（`WhenRequired`）——完整性由资产 manifest 的逐文件 sha256
 /// 保证（强于 CRC），且 moto 对 multipart 上传对象返回的复合 checksum 会让
-/// SDK 默认校验在大文件（model.ort）上误报 ChecksumMismatch。
+/// SDK 默认校验在大文件（model.gguf）上误报 ChecksumMismatch。
 #[cfg(all(feature = "aws", feature = "ltembed"))]
 pub fn model_assets_s3_client_from_env(config: &aws_config::SdkConfig) -> aws_sdk_s3::Client {
     use aws_sdk_s3::config::ResponseChecksumValidation;
@@ -167,25 +167,22 @@ pub fn build_embedding_generator_from_env(
             message: error.to_string(),
         }),
         #[cfg(feature = "ltembed")]
-        EmbeddingProvider::LTEmbed => ltembed_config_from_env(
-            "LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR",
-            "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
-        )
-        .map_err(|error| BootstrapError::Embedding {
-            message: error.to_string(),
-        })
-        .and_then(|config| {
-            // Build side embeds corpus chunks — Document inputs; the engine
-            // prepends the model's document prefix itself.
-            LTEmbedEmbeddingGenerator::from_config(
-                &config,
-                ltembed::engine::EmbeddingInputKind::Document,
-            )
-            .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
+        EmbeddingProvider::LTEmbed => ltembed_config_from_env("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR")
             .map_err(|error| BootstrapError::Embedding {
                 message: error.to_string(),
             })
-        }),
+            .and_then(|config| {
+                // Build side embeds corpus chunks — Document inputs; the engine
+                // prepends the model's document prefix itself.
+                LTEmbedEmbeddingGenerator::from_config(
+                    &config,
+                    ltembed::engine::EmbeddingInputKind::Document,
+                )
+                .map(|generator| Box::new(generator) as Box<dyn EmbeddingGenerator>)
+                .map_err(|error| BootstrapError::Embedding {
+                    message: error.to_string(),
+                })
+            }),
     }
 }
 
@@ -321,16 +318,16 @@ mod tests {
 
         use super::*;
 
-        /// Locates a sibling-checkout ort bundle: a directory holding
-        /// `tokenizer.json` + `build-info.json` next to `model.ort`.
+        /// Locates a sibling-checkout GGUF bundle: a directory holding
+        /// `model.gguf` + `tokenizer.json` + `build-info.json`.
         fn maybe_ltembed_bundle_dir() -> Option<PathBuf> {
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .ancestors()
-                .map(|ancestor| ancestor.join("LTEmbed/ort_bundle"))
+                .map(|ancestor| ancestor.join("LTEmbed/gguf_bundle"))
                 .find(|candidate| {
                     candidate.join("build-info.json").exists()
                         && candidate.join("tokenizer.json").exists()
-                        && candidate.join("model.ort").exists()
+                        && candidate.join("model.gguf").exists()
                 })
         }
 
@@ -340,7 +337,6 @@ mod tests {
             std::env::remove_var("LTSEARCH_BUILD_FIXED_EMBEDDING");
             std::env::remove_var("LTSEARCH_BUILD_EMBEDDING_DIM");
             std::env::remove_var("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR");
-            std::env::remove_var("LTSEARCH_BUILD_LTEMBED_MODEL_PATH");
 
             let error = match build_embedding_generator_from_env(EmbeddingProvider::LTEmbed) {
                 Ok(_) => panic!("expected LTEmbed bootstrap to fail without bundle dir"),
@@ -353,34 +349,14 @@ mod tests {
         }
 
         #[test]
-        fn ltembed_provider_reports_missing_model_path() {
-            let _guard = env_guard();
-            std::env::set_var("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR", "/tmp/ort_bundle");
-            std::env::remove_var("LTSEARCH_BUILD_LTEMBED_MODEL_PATH");
-
-            let error = match build_embedding_generator_from_env(EmbeddingProvider::LTEmbed) {
-                Ok(_) => panic!("expected LTEmbed bootstrap to fail without model path"),
-                Err(error) => error,
-            };
-            assert_eq!(
-                error.to_string(),
-                "missing LTSEARCH_BUILD_LTEMBED_MODEL_PATH"
-            );
-        }
-
-        #[test]
         fn ltembed_provider_builds_embedding_generator_when_bundle_is_available() {
             let _guard = env_guard();
             let Some(bundle_dir) = maybe_ltembed_bundle_dir() else {
-                eprintln!("Skipping: LTEmbed ort_bundle not found in sibling checkout");
+                eprintln!("Skipping: LTEmbed gguf_bundle not found in sibling checkout");
                 return;
             };
 
             std::env::set_var("LTSEARCH_BUILD_LTEMBED_BUNDLE_DIR", &bundle_dir);
-            std::env::set_var(
-                "LTSEARCH_BUILD_LTEMBED_MODEL_PATH",
-                bundle_dir.join("model.ort"),
-            );
 
             let generator = build_embedding_generator_from_env(EmbeddingProvider::LTEmbed)
                 .expect("expected LTEmbed bootstrap to construct generator");
