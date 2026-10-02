@@ -18,7 +18,7 @@
 | `query_lambda.zip` / `write_lambda.zip` / `index_builder_lambda.zip` | GitHub Release 资产；`bootstrap` 置 zip 根，real 模式编译 + strip（`scripts/package-lambda-zips.sh`） |
 | `model-assets.zip` | GitHub Release 资产；解压得 `model-assets/`（`manifest.json` + GGUF bundle：`model.gguf` / `tokenizer.json` / `build-info.json`，`scripts/package-model-assets.sh` 产出） |
 | `SHA256SUMS` | `sha256sum -c` 兼容，覆盖 4 个 zip + provenance |
-| `release-provenance.json` | schema_version=1：tag、git sha、workflow run、LTEmbed GGUF bundle pin（model/tokenizer 各自 URL+sha256）、static llama.cpp pin（real 模式）、镜像 ref、逐产物 sha256/bytes |
+| `release-provenance.json` | schema_version=2：tag、git sha、workflow run、LTEmbed GGUF bundle pin（`ltembed_bundle.{model,tokenizer}` 各自 URL+sha256）、static llama.cpp pin（`static_llama`，real 模式；stub 为 null）、镜像 ref、逐产物 sha256/bytes。v1（ORT 时代）的 `ltembed_bundle` 为扁平 `{url, sha256}`、无 `static_llama` |
 
 下载后验证：`sha256sum -c SHA256SUMS`。发布前 `scripts/check-lambda-size-budget.sh`
 强制单函数解压 ≤250MB、bootstrap AArch64、资产 hash/预算复核。

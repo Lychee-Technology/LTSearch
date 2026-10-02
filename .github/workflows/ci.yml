@@ -136,7 +136,7 @@ jobs:
           python3 - <<'PY'
           import json
           p = json.load(open("dist/release/release-provenance.json"))
-          assert p["schema_version"] == 1 and p["ltembed_mode"] == "stub"
+          assert p["schema_version"] == 2 and p["ltembed_mode"] == "stub"
           assert {a["name"] for a in p["artifacts"]} == {
               "query_lambda.zip",
               "write_lambda.zip",

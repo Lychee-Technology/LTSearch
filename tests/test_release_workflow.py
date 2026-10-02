@@ -7,6 +7,7 @@
 4. 已退役发布面（server 镜像栈、image-based Lambda）的墓碑——防止回潮。
 """
 
+import re
 import stat
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RELEASE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release.yml"
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PACKAGE_RELEASE_PATH = REPO_ROOT / "scripts" / "package-release.sh"
+DEPLOYMENT_DOC_PATH = REPO_ROOT / "docs" / "deployment.md"
 
 
 class ReleaseWorkflowTest(unittest.TestCase):
@@ -103,6 +105,32 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("sha256sum -c SHA256SUMS", release_assembly)
         self.assertNotIn("ghcr", release_assembly)
         self.assertNotIn("gh release", release_assembly)
+
+    def test_provenance_schema_version_agrees_across_generator_ci_and_docs(self) -> None:
+        # release-provenance.json 是公开契约：形状不兼容变更必须递增
+        # schema_version，且生成器、CI 结构断言、部署文档三处同步。
+        # v2 = GGUF 逐源 ltembed_bundle + static_llama（v1 为扁平 {url, sha256}）。
+        script = PACKAGE_RELEASE_PATH.read_text(encoding="utf-8")
+        match = re.search(r'"schema_version": (\d+),', script)
+        self.assertIsNotNone(match, "package-release.sh must emit schema_version")
+        version = int(match.group(1))
+        self.assertEqual(version, 2)
+        for key in ('"format": "gguf"', '"model": {', '"tokenizer": {', '"static_llama":'):
+            self.assertIn(key, script)
+
+        jobs = _parse_jobs(CI_WORKFLOW_PATH.read_text(encoding="utf-8").splitlines())
+        self.assertIn(
+            f'assert p["schema_version"] == {version}', jobs["release-assembly"]
+        )
+
+        deployment = DEPLOYMENT_DOC_PATH.read_text(encoding="utf-8")
+        provenance_rows = [
+            line
+            for line in deployment.splitlines()
+            if line.startswith("| `release-provenance.json` |")
+        ]
+        self.assertEqual(len(provenance_rows), 1)
+        self.assertIn(f"schema_version={version}", provenance_rows[0])
 
     def test_release_inputs_pinned_and_timestamps_normalized(self) -> None:
         # 可复现性（#113 review P1）：base 镜像 digest pin + dnf releasever 锁，

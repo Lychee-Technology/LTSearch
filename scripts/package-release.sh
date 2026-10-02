@@ -141,8 +141,11 @@ if os.environ.get("GITHUB_RUN_ID"):
         "run_url": f"{server_url}/{repository}/actions/runs/{run_id}",
     }
 
+# schema_version 随不兼容的字段变更递增（字段增删改名、嵌套形状变化）。
+# v2（GGUF 后端）：ltembed_bundle 由 v1 的扁平 {url, sha256} 改为
+# {format, model, tokenizer} 逐源 pin，新增 static_llama。
 provenance = {
-    "schema_version": 1,
+    "schema_version": 2,
     "tag": version,
     "git_sha": os.environ["LTSEARCH_RELEASE_GIT_SHA"],
     "built_at": datetime.datetime.fromtimestamp(
