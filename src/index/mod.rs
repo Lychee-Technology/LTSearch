@@ -15,6 +15,7 @@ pub mod static_builder;
 pub mod static_release;
 pub mod static_source;
 pub mod turbo_codec;
+pub mod turbo_prod;
 
 pub use assets::{AssetError, CentroidTable, ProjectionMatrix};
 pub use codebook::{LloydMaxCodebook, LloydMaxSolution};
@@ -42,3 +43,7 @@ pub use static_release::{StaticReleaseBuilder, V3_RELEASE_OUTPUT_FILES};
 pub use static_source::load_static_chunks_from_s3;
 pub use static_source::{parse_static_source_lines, StaticSourceConfig, TurboBuildConfig};
 pub use turbo_codec::{encode_vector, EncodedTurboVector, PreparedTurboQuery, TurboScoreBreakdown};
+pub use turbo_prod::{
+    EncodedTurboProd, PreparedTurboProdQuery, TurboProdCode, TurboProdError,
+    TurboProdScoreBreakdown, TurboQuantProdV1,
+};

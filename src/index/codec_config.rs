@@ -32,9 +32,10 @@ pub enum TurboCodecId {
     /// per-dimension centroids, plus one sign bit per row of a seeded uniform
     /// projection of the residual, scaled by the residual norm γ.
     Legacy3BitV1,
-    /// TurboQuant_prod (#165): Haar rotation, a `mse_bits`
-    /// [Lloyd-Max codebook](super::LloydMaxCodebook) and a `qjl_dim`-row
-    /// Gaussian QJL sign sketch.
+    /// TurboQuant_prod, implemented by
+    /// [`TurboQuantProdV1`](super::TurboQuantProdV1): Haar rotation, a
+    /// `mse_bits` [Lloyd-Max codebook](super::LloydMaxCodebook) and a
+    /// `qjl_dim`-row Gaussian QJL sign sketch.
     TurboQuantProdV1,
 }
 
@@ -78,6 +79,14 @@ impl TurboCodecId {
             Self::Legacy3BitV1 | Self::TurboQuantProdV1 => dim == 512,
         }
     }
+
+    /// The one norm policy each codec's encoder implements.
+    const fn norm_policy(self) -> NormPolicy {
+        match self {
+            Self::Legacy3BitV1 => NormPolicy::AsIs,
+            Self::TurboQuantProdV1 => NormPolicy::NormalizeAndStore,
+        }
+    }
 }
 
 impl fmt::Display for TurboCodecId {
@@ -86,13 +95,17 @@ impl fmt::Display for TurboCodecId {
     }
 }
 
-/// How a codec treats the input vector's norm. The TurboQuant_prod policy is
-/// decided in #165; this only reserves the field.
+/// How a codec treats the input vector's norm. Each codec implements exactly
+/// one policy, which [`TurboQuantConfig::validate`] enforces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NormPolicy {
     /// Encode the vector as given: no normalization, no norm check, no stored
     /// norm. This is what the legacy codec does.
     AsIs,
+    /// Encode x/‖x‖ and store ‖x‖ as an f32 with the code; the score is ‖x‖
+    /// times the estimate for the unit vector. `TurboQuantProdV1` does this;
+    /// [`super::turbo_prod`] says why.
+    NormalizeAndStore,
 }
 
 /// A codec and every parameter that determines its encoded bytes.
@@ -175,6 +188,12 @@ impl TurboQuantConfig {
                 dim: self.dim,
             });
         }
+        if self.norm_policy != self.codec_id.norm_policy() {
+            return Err(TurboQuantConfigError::UnsupportedNormPolicy {
+                codec_id: self.codec_id,
+                norm_policy: self.norm_policy,
+            });
+        }
         // The legacy record layout and scorer hard-code a 2-bit index and
         // one sign bit per dimension.
         if self.codec_id == TurboCodecId::Legacy3BitV1
@@ -209,11 +228,25 @@ impl TurboQuantConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurboQuantConfigError {
     ZeroDim,
-    UnsupportedMseBits { mse_bits: u8 },
+    UnsupportedMseBits {
+        mse_bits: u8,
+    },
     ZeroQjlDim,
-    UnsupportedDim { codec_id: TurboCodecId, dim: u32 },
-    UnsupportedLegacyLayout { mse_bits: u8, qjl_dim: u32 },
-    NotAV3Codec { codec_id: TurboCodecId },
+    UnsupportedDim {
+        codec_id: TurboCodecId,
+        dim: u32,
+    },
+    UnsupportedNormPolicy {
+        codec_id: TurboCodecId,
+        norm_policy: NormPolicy,
+    },
+    UnsupportedLegacyLayout {
+        mse_bits: u8,
+        qjl_dim: u32,
+    },
+    NotAV3Codec {
+        codec_id: TurboCodecId,
+    },
 }
 
 impl fmt::Display for TurboQuantConfigError {
@@ -227,6 +260,14 @@ impl fmt::Display for TurboQuantConfigError {
             Self::UnsupportedDim { codec_id, dim } => {
                 write!(f, "codec {codec_id} does not support dim {dim}")
             }
+            Self::UnsupportedNormPolicy {
+                codec_id,
+                norm_policy,
+            } => write!(
+                f,
+                "codec {codec_id} requires norm policy {:?}, got {norm_policy:?}",
+                codec_id.norm_policy()
+            ),
             Self::UnsupportedLegacyLayout { mse_bits, qjl_dim } => write!(
                 f,
                 "codec {} requires mse_bits 2 and qjl_dim == dim, got mse_bits {mse_bits} and qjl_dim {qjl_dim}",
@@ -252,6 +293,7 @@ mod tests {
             mse_seed: 163,
             qjl_seed: 165,
             generator_version: GAUSSIAN_GENERATOR_VERSION,
+            norm_policy: NormPolicy::NormalizeAndStore,
             ..TurboQuantConfig::legacy_v1()
         }
     }
@@ -327,6 +369,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn validate_rejects_a_norm_policy_the_codec_does_not_implement() {
+        for (config, norm_policy) in [
+            (TurboQuantConfig::legacy_v1(), NormPolicy::NormalizeAndStore),
+            (prod(), NormPolicy::AsIs),
+        ] {
+            let config = TurboQuantConfig {
+                norm_policy,
+                ..config
+            };
+            assert_eq!(
+                config.validate(),
+                Err(TurboQuantConfigError::UnsupportedNormPolicy {
+                    codec_id: config.codec_id,
+                    norm_policy,
+                })
+            );
+        }
+        assert_eq!(
+            TurboQuantConfig {
+                norm_policy: NormPolicy::AsIs,
+                ..prod()
+            }
+            .validate()
+            .unwrap_err()
+            .to_string(),
+            "codec turbo_quant_prod_v1 requires norm policy NormalizeAndStore, got AsIs"
+        );
     }
 
     #[test]
