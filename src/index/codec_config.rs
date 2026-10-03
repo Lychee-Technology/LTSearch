@@ -109,9 +109,9 @@ pub struct TurboQuantConfig {
     /// m, the number of QJL sign bits (projection rows) per record. Separate
     /// from `dim` even though both codecs use m = d today.
     pub qjl_dim: u32,
-    /// Seeds the MSE stage's random asset: the Haar rotation for
-    /// `TurboQuantProdV1` (#163) and the per-dimension centroid table for
-    /// `Legacy3BitV1`, which has no rotation.
+    /// Seeds the MSE stage's random asset: the Haar
+    /// [`Rotation`](super::Rotation) for `TurboQuantProdV1` and the
+    /// per-dimension centroid table for `Legacy3BitV1`, which has no rotation.
     pub mse_seed: u64,
     /// Seeds the QJL projection: Gaussian rows for `TurboQuantProdV1` (#165)
     /// and the uniform `ProjectionMatrix` for `Legacy3BitV1`.

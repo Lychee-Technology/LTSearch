@@ -8,6 +8,7 @@ pub mod meta_ext;
 pub mod mmap_index;
 pub mod record;
 pub mod release_manifest;
+pub mod rotation;
 pub mod static_builder;
 pub mod static_release;
 pub mod static_source;
@@ -30,6 +31,7 @@ pub use release_manifest::{
     CodecMetadata, EmbeddingProfile, InputFingerprint, OutputFile, ReleaseManifest, ReleaseSource,
     RELEASE_MANIFEST_FILE,
 };
+pub use rotation::Rotation;
 pub use static_builder::{StaticChunk, StaticIndexBuildResult, StaticIndexBuilder};
 pub use static_release::{StaticReleaseBuilder, V3_RELEASE_OUTPUT_FILES};
 #[cfg(feature = "aws")]

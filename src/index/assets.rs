@@ -34,6 +34,10 @@ pub enum AssetError {
         actual: usize,
     },
     InvalidDim,
+    InvalidMagic {
+        expected: [u8; 4],
+        actual: [u8; 4],
+    },
 }
 
 impl fmt::Display for AssetError {
@@ -58,6 +62,12 @@ impl fmt::Display for AssetError {
                 write!(f, "dimension mismatch: expected {expected}, got {actual}")
             }
             Self::InvalidDim => write!(f, "dimensions must be positive"),
+            Self::InvalidMagic { expected, actual } => {
+                write!(
+                    f,
+                    "invalid magic bytes: expected {expected:?}, got {actual:?}"
+                )
+            }
         }
     }
 }
@@ -99,7 +109,7 @@ impl CentroidTable {
 
         let dim = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         let centroids_per_dim = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        let values = parse_values(bytes, dim, centroids_per_dim)?;
+        let values = parse_values(&bytes[ASSET_HEADER_SIZE..], dim, centroids_per_dim)?;
 
         Ok(Self {
             dim,
@@ -186,7 +196,7 @@ impl ProjectionMatrix {
 
         let input_dim = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         let output_dim = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        let values = parse_values(bytes, output_dim, input_dim)?;
+        let values = parse_values(&bytes[ASSET_HEADER_SIZE..], output_dim, input_dim)?;
 
         Ok(Self {
             input_dim,
@@ -243,12 +253,17 @@ impl ProjectionMatrix {
     }
 }
 
-fn parse_values(bytes: &[u8], first_dim: u32, second_dim: u32) -> Result<Vec<f32>, AssetError> {
+/// Parses `data`, the bytes after an asset's header, as exactly
+/// `first_dim × second_dim` little-endian f32 values.
+pub(super) fn parse_values(
+    data: &[u8],
+    first_dim: u32,
+    second_dim: u32,
+) -> Result<Vec<f32>, AssetError> {
     if first_dim == 0 || second_dim == 0 {
         return Err(AssetError::InvalidDim);
     }
 
-    let data = &bytes[ASSET_HEADER_SIZE..];
     if !data.len().is_multiple_of(4) {
         return Err(AssetError::InvalidLayout {
             expected_values: first_dim as usize * second_dim as usize,
@@ -271,7 +286,7 @@ fn parse_values(bytes: &[u8], first_dim: u32, second_dim: u32) -> Result<Vec<f32
         .collect())
 }
 
-fn write_values(out: &mut Vec<u8>, values: &[f32]) {
+pub(super) fn write_values(out: &mut Vec<u8>, values: &[f32]) {
     for value in values {
         out.extend_from_slice(&value.to_le_bytes());
     }
