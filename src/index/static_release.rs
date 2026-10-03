@@ -7,8 +7,8 @@
 //!
 //! Embeddings arrive as a plain `&[Vec<f32>]` with no `Option`: a missing
 //! embedding is unrepresentable here, so re-embedding cannot leak into the
-//! release path. Codec seeds/constants are shared with the v2 writer, so both
-//! versions encode identically.
+//! release path. Both writers take their codec parameters from
+//! [`TurboQuantConfig::legacy_v1`], so both versions encode identically.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -19,14 +19,14 @@ use crate::storage::staged_publish::{append_cleanup_failure, StagedDir};
 
 use super::release_manifest::{
     canonical_metadata_json, content_digest, derive_release_id, sha256_hex, CanonicalRow,
-    CodecMetadata, EmbeddingProfile, InputFingerprint, OutputFile, ReleaseManifest, ReleaseSource,
+    EmbeddingProfile, InputFingerprint, OutputFile, ReleaseManifest, ReleaseSource,
     RELEASE_MANIFEST_FILE,
 };
 use super::static_builder::{
-    corpus_type_id, encode_turbo_record, meta_record_bytes, stable_hash_doc_id, turbo_record_bytes,
-    StaticChunk, CENTROIDS_PER_DIM, CENTROIDS_SEED, PROJECTION_SEED, SUPPORTED_TYPED_DIM,
+    corpus_type_id, encode_turbo_record, legacy_codec_assets, meta_record_bytes,
+    stable_hash_doc_id, turbo_record_bytes, StaticChunk,
 };
-use super::{CentroidTable, MetaExtRecord, MetaRecord, ProjectionMatrix, TurboHeader};
+use super::{MetaExtRecord, MetaRecord, TurboHeader, TurboQuantConfig};
 
 /// The exact set of `.bin` artifact file names a v3 static release must
 /// contain, in ascending `name` order.
@@ -65,6 +65,8 @@ impl StaticReleaseBuilder {
         profile: &EmbeddingProfile,
         source: &ReleaseSource,
     ) -> Result<ReleaseManifest, IndexError> {
+        let codec_config = TurboQuantConfig::legacy_v1();
+
         // --- Step 1: validation ------------------------------------------------
         if chunks.len() != embeddings.len() {
             return Err(IndexError::Operation {
@@ -80,11 +82,11 @@ impl StaticReleaseBuilder {
                 message: "static release requires at least one chunk".into(),
             });
         }
-        if profile.dim != SUPPORTED_TYPED_DIM {
+        if profile.dim != codec_config.dim {
             return Err(IndexError::Operation {
                 message: format!(
                     "static release only supports typed turbo layout for {}-dim embeddings, profile declares {}",
-                    SUPPORTED_TYPED_DIM, profile.dim
+                    codec_config.dim, profile.dim
                 ),
             });
         }
@@ -116,9 +118,8 @@ impl StaticReleaseBuilder {
         detect_hash_collisions(&hashed)?;
 
         // --- Step 2: codec assets (identical seeds/params to the v2 writer) ----
-        let dim = SUPPORTED_TYPED_DIM;
-        let centroids = CentroidTable::generate(dim, CENTROIDS_PER_DIM, CENTROIDS_SEED);
-        let projection = ProjectionMatrix::generate(dim, dim, PROJECTION_SEED);
+        let dim = codec_config.dim;
+        let (centroids, projection) = legacy_codec_assets(&codec_config);
 
         // --- Step 3: single-pass byte construction (order == chunk order) ------
         let mut turbo_static = TurboHeader::new_v3(dim, chunks.len() as u64).to_bytes();
@@ -235,12 +236,11 @@ impl StaticReleaseBuilder {
             doc_count: chunks.len() as u64,
             content_digest: content_digest(&canonical_rows),
         };
-        let codec = CodecMetadata {
-            dim,
-            centroids_per_dim: CENTROIDS_PER_DIM,
-            centroids_seed: CENTROIDS_SEED,
-            projection_seed: PROJECTION_SEED,
-        };
+        let codec = codec_config
+            .to_v3_codec_metadata()
+            .map_err(|error| IndexError::Operation {
+                message: format!("invalid v3 codec config: {error}"),
+            })?;
         let release_id = derive_release_id(
             3,
             profile,

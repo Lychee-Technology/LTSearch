@@ -11,16 +11,10 @@ use crate::models::CorpusType;
 use crate::storage::staged_publish::{append_cleanup_failure, StagedDir};
 
 use super::{
-    encode_vector, CentroidTable, MetaRecord, ProjectionMatrix, TurboHeader, TurboRecord512,
-    META_RECORD_SIZE,
+    encode_vector, CentroidTable, MetaRecord, ProjectionMatrix, TurboHeader, TurboQuantConfig,
+    TurboRecord512, META_RECORD_SIZE,
 };
 
-// Shared with the v3 `StaticReleaseBuilder` so both writers derive the same
-// codec assets and doc_id hashes from a single source of truth.
-pub(crate) const CENTROIDS_PER_DIM: u32 = 4;
-pub(crate) const CENTROIDS_SEED: u64 = 7;
-pub(crate) const PROJECTION_SEED: u64 = 11;
-pub(crate) const SUPPORTED_TYPED_DIM: u32 = 512;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -96,11 +90,12 @@ impl<E> StaticIndexBuilder<E> {
             .ok_or_else(|| IndexError::Operation {
                 message: "static builder requires at least one chunk".into(),
             })?;
-        if embedding_dim != SUPPORTED_TYPED_DIM {
+        let codec_config = TurboQuantConfig::legacy_v1();
+        if embedding_dim != codec_config.dim {
             return Err(IndexError::Operation {
                 message: format!(
                     "static builder only supports typed turbo layout for {}-dim embeddings, got {}",
-                    SUPPORTED_TYPED_DIM, embedding_dim
+                    codec_config.dim, embedding_dim
                 ),
             });
         }
@@ -112,8 +107,7 @@ impl<E> StaticIndexBuilder<E> {
             ),
         })?;
 
-        let centroids = CentroidTable::generate(embedding_dim, CENTROIDS_PER_DIM, CENTROIDS_SEED);
-        let projection = ProjectionMatrix::generate(embedding_dim, embedding_dim, PROJECTION_SEED);
+        let (centroids, projection) = legacy_codec_assets(&codec_config);
         let header = TurboHeader::new(embedding_dim, chunks.len() as u64);
 
         let mut turbo_static = header.to_bytes();
@@ -292,6 +286,25 @@ fn parse_doc_id(doc_id: &str) -> Result<u64, IndexError> {
     }
 
     Ok(stable_hash_doc_id(doc_id))
+}
+
+/// Generates the legacy codec's centroid table and projection matrix. Shared
+/// with the v3 `StaticReleaseBuilder` so both writers derive identical assets.
+pub(crate) fn legacy_codec_assets(
+    codec_config: &TurboQuantConfig,
+) -> (CentroidTable, ProjectionMatrix) {
+    (
+        CentroidTable::generate(
+            codec_config.dim,
+            codec_config.centroids_per_dim(),
+            codec_config.mse_seed,
+        ),
+        ProjectionMatrix::generate(
+            codec_config.dim,
+            codec_config.qjl_dim,
+            codec_config.qjl_seed,
+        ),
+    )
 }
 
 pub(crate) fn stable_hash_doc_id(doc_id: &str) -> u64 {

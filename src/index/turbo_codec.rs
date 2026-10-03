@@ -1,7 +1,11 @@
-use super::{AssetError, CentroidTable, ProjectionMatrix, TurboRecord512};
+use super::{AssetError, CentroidTable, ProjectionMatrix, TurboQuantConfig, TurboRecord512};
 
-const IDX_BITS_PER_DIM: usize = 2;
-const EXPECTED_CENTROIDS_PER_DIM: usize = 1 << IDX_BITS_PER_DIM;
+const LEGACY: TurboQuantConfig = TurboQuantConfig::legacy_v1();
+const IDX_BITS_PER_DIM: usize = LEGACY.mse_bits as usize;
+const IDX_MASK: u8 = (1 << IDX_BITS_PER_DIM) - 1;
+const EXPECTED_CENTROIDS_PER_DIM: usize = LEGACY.centroids_per_dim() as usize;
+// `write_idx`/`read_idx` assume an index never straddles a byte boundary.
+const _: () = assert!(8 % IDX_BITS_PER_DIM == 0);
 /// Dimension of the only typed record layout, [`TurboRecord512`].
 const RECORD_512_DIM: usize = 512;
 
@@ -222,7 +226,7 @@ fn read_idx(bytes: &[u8], dim: usize) -> u8 {
     let bit_offset = dim * IDX_BITS_PER_DIM;
     let byte_offset = bit_offset / 8;
     let shift = bit_offset % 8;
-    (bytes[byte_offset] >> shift) & 0b11
+    (bytes[byte_offset] >> shift) & IDX_MASK
 }
 
 fn write_sign_bit(out: &mut [u8], dim: usize, is_non_negative: bool) {
