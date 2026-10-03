@@ -49,6 +49,12 @@ such as the rotation's QR or sign canonicalization or the QJL matrix's fill orde
 version. Each generator draws from its own `stream_id`, so equal seeds don't make two matrices
 share draws.
 
+A build can run one version of the Gaussian generators, `GAUSSIAN_GENERATOR_VERSION`. A builder
+that generates with them (`TurboQuantProdV1::generate`) therefore rejects a config that names any
+other `generator_version`, rather than generate current-version matrices under it. Readers require
+the config and the stored matrices to agree on the version, whatever their own build's generator
+is.
+
 **Golden pins.** Golden tests pin the sampler's leading values, the digest of a 512 × 512 fill, and
 the digests of a 512 × 512 rotation and a 512 × 512 QJL matrix.
 They also pin the legacy assets, v2 index bytes, and v3 release bytes and release ID

@@ -74,6 +74,7 @@
 use std::fmt;
 
 use super::codec_config::{TurboCodecId, TurboQuantConfig, TurboQuantConfigError};
+use super::gaussian::GAUSSIAN_GENERATOR_VERSION;
 use super::qjl::{PreparedQjlQuery, QjlMatrix};
 use super::{LloydMaxCodebook, Rotation};
 
@@ -97,21 +98,34 @@ impl TurboQuantProdV1 {
     /// Generates the assets `config` names: the builder path. Under the
     /// materialization contract (see [`super::codec_config`]) the query side
     /// loads them with [`from_assets`](Self::from_assets) instead.
+    ///
+    /// The generators only produce [`GAUSSIAN_GENERATOR_VERSION`] matrices,
+    /// so a config that names another `generator_version` is rejected before
+    /// anything is generated. The assets then go through `from_assets`'s
+    /// checks, so a generated codec always reloads from its own config.
     pub fn generate(config: TurboQuantConfig) -> Result<Self, TurboProdError> {
         check_config(&config)?;
-        Ok(Self {
-            rotation: Rotation::generate(config.dim, config.mse_seed),
-            codebook: committed_codebook(&config)?,
-            qjl: QjlMatrix::generate(config.dim, config.qjl_dim, config.qjl_seed),
+        if config.generator_version != GAUSSIAN_GENERATOR_VERSION {
+            return Err(TurboProdError::UnsupportedGeneratorVersion {
+                generator_version: config.generator_version,
+            });
+        }
+        let codebook = committed_codebook(&config)?;
+        Self::from_assets(
             config,
-        })
+            Rotation::generate(config.dim, config.mse_seed),
+            codebook,
+            QjlMatrix::generate(config.dim, config.qjl_dim, config.qjl_seed),
+        )
     }
 
     /// Assembles the codec from stored assets: the loader path (#166). The
     /// rotation and the QJL matrix must be the ones `config` names, by
     /// shape, seed and `generator_version`, so a QJL matrix with m and d
-    /// swapped is rejected here. The codebook must be the committed one (see
-    /// "Codec definition" in the module docs).
+    /// swapped is rejected here. Any `generator_version` loads, not only
+    /// this build's: a release keeps the matrices it was built with. The
+    /// codebook must be the committed one (see "Codec definition" in the
+    /// module docs).
     pub fn from_assets(
         config: TurboQuantConfig,
         rotation: Rotation,
@@ -424,6 +438,11 @@ pub enum TurboProdError {
         dim: u32,
         mse_bits: u8,
     },
+    /// [`TurboQuantProdV1::generate`] can't produce this version's matrices;
+    /// they can only be loaded.
+    UnsupportedGeneratorVersion {
+        generator_version: u32,
+    },
     AssetMismatch {
         asset: &'static str,
         field: &'static str,
@@ -464,6 +483,11 @@ impl fmt::Display for TurboProdError {
                 f,
                 "no committed codebook for dim {dim} and mse_bits {mse_bits}"
             ),
+            Self::UnsupportedGeneratorVersion { generator_version } => write!(
+                f,
+                "cannot generate generator_version {generator_version} assets: \
+                 this build's generators are version {GAUSSIAN_GENERATOR_VERSION}"
+            ),
             Self::AssetMismatch {
                 asset,
                 field,
@@ -495,7 +519,6 @@ mod tests {
 
     use super::*;
     use crate::index::codec_config::NormPolicy;
-    use crate::index::gaussian::GAUSSIAN_GENERATOR_VERSION;
     use crate::index::release_manifest::sha256_hex;
     use crate::index::{fill_standard_normal, LloydMaxSolution, TurboRecord512};
 
@@ -649,16 +672,70 @@ mod tests {
     }
 
     #[test]
-    fn from_assets_accepts_the_stored_assets_of_its_config() {
+    fn a_generated_codec_reloads_from_its_own_config_and_stored_assets() {
         let codec = codec();
         let loaded = TurboQuantProdV1::from_assets(
-            config(),
+            *codec.config(),
             Rotation::from_bytes(&codec.rotation().to_bytes()).unwrap(),
             LloydMaxCodebook::committed(512, 2).unwrap(),
             QjlMatrix::from_bytes(&codec.qjl().to_bytes()).unwrap(),
         )
         .unwrap();
         assert_eq!(&loaded, codec);
+    }
+
+    #[test]
+    fn generate_rejects_generator_versions_this_build_cannot_run() {
+        // 0 is what `..TurboQuantConfig::legacy_v1()` leaves in a prod
+        // config that doesn't set the version.
+        for generator_version in [0, GAUSSIAN_GENERATOR_VERSION + 1] {
+            let config = TurboQuantConfig {
+                generator_version,
+                ..config()
+            };
+            assert_eq!(config.validate(), Ok(()));
+            assert_eq!(
+                TurboQuantProdV1::generate(config),
+                Err(TurboProdError::UnsupportedGeneratorVersion { generator_version })
+            );
+        }
+        assert_eq!(
+            TurboProdError::UnsupportedGeneratorVersion {
+                generator_version: 0
+            }
+            .to_string(),
+            format!(
+                "cannot generate generator_version 0 assets: \
+                 this build's generators are version {GAUSSIAN_GENERATOR_VERSION}"
+            )
+        );
+    }
+
+    #[test]
+    fn from_assets_loads_the_assets_of_another_generator_version() {
+        // A release built under a generator version other than this build's,
+        // as today's releases will be after a bump. `generate` rejects this
+        // config; the loader must not.
+        let generator_version = GAUSSIAN_GENERATOR_VERSION + 1;
+        let codec = codec();
+        let mut rotation = codec.rotation().to_bytes();
+        rotation[16..20].copy_from_slice(&generator_version.to_le_bytes());
+        let mut qjl = codec.qjl().to_bytes();
+        qjl[20..24].copy_from_slice(&generator_version.to_le_bytes());
+
+        let loaded = TurboQuantProdV1::from_assets(
+            TurboQuantConfig {
+                generator_version,
+                ..config()
+            },
+            Rotation::from_bytes(&rotation).unwrap(),
+            codec.codebook().clone(),
+            QjlMatrix::from_bytes(&qjl).unwrap(),
+        )
+        .unwrap();
+        // The same matrices under another version label encode the same.
+        let vector = &golden_vectors()[0];
+        assert_eq!(loaded.encode(vector), codec.encode(vector));
     }
 
     #[test]

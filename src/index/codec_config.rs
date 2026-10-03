@@ -136,6 +136,11 @@ pub struct TurboQuantConfig {
     /// the builder ran. 0 means the legacy uniform generators
     /// (`CentroidTable::generate`, `ProjectionMatrix::generate`), which
     /// predate versioning.
+    ///
+    /// [`validate`](Self::validate) accepts any version, because a release
+    /// built under an older generator must stay loadable. Only
+    /// [`TurboQuantProdV1::generate`](super::TurboQuantProdV1::generate)
+    /// requires the current one.
     pub generator_version: u32,
     pub norm_policy: NormPolicy,
 }
