@@ -44,11 +44,19 @@ it. `rand_distr` is not used because its samplers' output may change between its
 or `libm` upgrade, bumps `GAUSSIAN_GENERATOR_VERSION`, and that version is recorded with the
 matrices it produced (#166 decides where). The version also covers the generators built on the
 sampler: a codec records one `generator_version`, so a change to how `Rotation::generate`
-(`src/index/rotation.rs`) turns draws into a matrix, such as its QR or sign canonicalization,
-bumps the same version.
+(`src/index/rotation.rs`) or `QjlMatrix::generate` (`src/index/qjl.rs`) turns draws into a matrix,
+such as the rotation's QR or sign canonicalization or the QJL matrix's fill order, bumps the same
+version. Each generator draws from its own `stream_id`, so equal seeds don't make two matrices
+share draws.
 
-**Golden pins.** Golden tests pin the sampler's leading values, the digest of a 512 × 512 fill and
-the digest of a 512 × 512 rotation.
+A build can run one version of the Gaussian generators, `GAUSSIAN_GENERATOR_VERSION`. A builder
+that generates with them (`TurboQuantProdV1::generate`) therefore rejects a config that names any
+other `generator_version`, rather than generate current-version matrices under it. Readers require
+the config and the stored matrices to agree on the version, whatever their own build's generator
+is.
+
+**Golden pins.** Golden tests pin the sampler's leading values, the digest of a 512 × 512 fill, and
+the digests of a 512 × 512 rotation and a 512 × 512 QJL matrix.
 They also pin the legacy assets, v2 index bytes, and v3 release bytes and release ID
 (`tests/turbo_legacy_golden_test.rs`). CI runs them on aarch64 against values captured on x86_64.
 
