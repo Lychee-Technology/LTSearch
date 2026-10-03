@@ -1,9 +1,10 @@
 //! Seeded standard-normal sampler for offline codec asset generation.
 //!
 //! This is the one N(0, 1) source shared by the TurboQuant_prod generators
-//! ([`Rotation`](super::Rotation) and the QJL matrix in #165). Under the
-//! materialization contract (see [`super::codec_config`]) only builders run
-//! it; the query side loads the matrices it produced from the release.
+//! ([`Rotation`](super::Rotation) and [`QjlMatrix`](super::QjlMatrix)).
+//! Under the materialization contract (see [`super::codec_config`]) only
+//! builders run it; the query side loads the matrices it produced from the
+//! release.
 //!
 //! # Reproducibility guarantee
 //!
@@ -39,8 +40,9 @@
 //! tests below fail on such a change. The version also covers the matrix
 //! generators built on this sampler, since a codec records a single
 //! `generator_version`: a change to how
-//! [`Rotation::generate`](super::Rotation::generate) turns draws into a
-//! matrix bumps it too, and the rotation's own golden test catches that.
+//! [`Rotation::generate`](super::Rotation::generate) or
+//! [`QjlMatrix::generate`](super::QjlMatrix::generate) turns draws into a
+//! matrix bumps it too, and each generator's own golden test catches that.
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;

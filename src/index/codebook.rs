@@ -135,7 +135,7 @@ impl LloydMaxCodebook {
         }
     }
 
-    fn from_centroids(dim: u32, bits: u8, centroids: Vec<f32>) -> Self {
+    pub(super) fn from_centroids(dim: u32, bits: u8, centroids: Vec<f32>) -> Self {
         debug_assert_eq!(centroids.len(), 1 << bits);
         debug_assert!(centroids.is_sorted_by(|lower, upper| lower < upper));
         let thresholds = centroids

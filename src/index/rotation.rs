@@ -73,9 +73,10 @@ const ROTATION_MAGIC: [u8; 4] = *b"TQRT";
 const ROTATION_HEADER_SIZE: usize = 20;
 
 /// The sampler keystream G is drawn from. A tag rather than a small integer,
-/// so other generators (the QJL matrix in #165) can take their own streams
-/// and stay independent of the rotation even when their seeds are equal.
-const ROTATION_STREAM_ID: u64 = u64::from_le_bytes(*b"rotation");
+/// so other generators (the [QJL matrix](super::QjlMatrix)) can take their
+/// own streams and stay independent of the rotation even when their seeds
+/// are equal.
+pub(super) const ROTATION_STREAM_ID: u64 = u64::from_le_bytes(*b"rotation");
 
 /// A Haar-random d×d orthogonal matrix Π.
 ///
