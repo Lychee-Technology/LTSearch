@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod codebook;
 pub mod codec_config;
 pub mod gaussian;
 pub mod header;
@@ -15,6 +16,7 @@ pub mod static_source;
 pub mod turbo_codec;
 
 pub use assets::{AssetError, CentroidTable, ProjectionMatrix};
+pub use codebook::{LloydMaxCodebook, LloydMaxSolution};
 pub use codec_config::{NormPolicy, TurboCodecId, TurboQuantConfig, TurboQuantConfigError};
 pub use gaussian::{fill_standard_normal, StandardNormalStream, GAUSSIAN_GENERATOR_VERSION};
 pub use header::{

@@ -32,8 +32,9 @@ pub enum TurboCodecId {
     /// per-dimension centroids, plus one sign bit per row of a seeded uniform
     /// projection of the residual, scaled by the residual norm γ.
     Legacy3BitV1,
-    /// TurboQuant_prod (#165): Haar rotation, a `mse_bits` Lloyd-Max codebook
-    /// and a `qjl_dim`-row Gaussian QJL sign sketch.
+    /// TurboQuant_prod (#165): Haar rotation, a `mse_bits`
+    /// [Lloyd-Max codebook](super::LloydMaxCodebook) and a `qjl_dim`-row
+    /// Gaussian QJL sign sketch.
     TurboQuantProdV1,
 }
 
