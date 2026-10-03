@@ -1,7 +1,7 @@
 //! Seeded standard-normal sampler for offline codec asset generation.
 //!
 //! This is the one N(0, 1) source shared by the TurboQuant_prod generators
-//! (the rotation in #163 and the QJL matrix in #165). Under the
+//! ([`Rotation`](super::Rotation) and the QJL matrix in #165). Under the
 //! materialization contract (see [`super::codec_config`]) only builders run
 //! it; the query side loads the matrices it produced from the release.
 //!
@@ -36,13 +36,18 @@
 //!
 //! Any change to the output, whether from this code or from a `rand_chacha`
 //! or `libm` upgrade, must bump [`GAUSSIAN_GENERATOR_VERSION`]. The golden
-//! tests below fail on such a change.
+//! tests below fail on such a change. The version also covers the matrix
+//! generators built on this sampler, since a codec records a single
+//! `generator_version`: a change to how
+//! [`Rotation::generate`](super::Rotation::generate) turns draws into a
+//! matrix bumps it too, and the rotation's own golden test catches that.
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-/// Version of the sampler's output sequence. Bump it whenever any
-/// `(seed, stream_id)` would produce different values.
+/// Version of the sampler's output sequence and of the generators built on
+/// it. Bump it whenever any `(seed, stream_id)` would produce different
+/// values, or a generator would turn the same seed into a different matrix.
 pub const GAUSSIAN_GENERATOR_VERSION: u32 = 1;
 
 /// Fills `out` with the first `out.len()` standard-normal values of the
