@@ -15,13 +15,29 @@ pub struct TurboHeader {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurboHeaderError {
-    InvalidSize { expected: usize, actual: usize },
-    InvalidMagic { actual: [u8; 4] },
+    InvalidSize {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidMagic {
+        actual: [u8; 4],
+    },
     InvalidDim,
-    UnsupportedVersion { version: u32 },
-    UnsupportedLayout { version: u32, dim: u32 },
+    UnsupportedVersion {
+        version: u32,
+    },
+    UnsupportedLayout {
+        version: u32,
+        dim: u32,
+    },
+    /// `record_count` records don't fit in a `u64` file size.
+    RecordCountOverflow {
+        record_count: u64,
+    },
 }
 
+/// The record layouts this binary can read. A layout names the Rust type the
+/// record region is cast to, so the type's size is the only record size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnownRecordLayout {
     V2Dim512,
@@ -47,6 +63,9 @@ impl fmt::Display for TurboHeaderError {
                     "unsupported turbo record layout: version={version}, dim={dim}"
                 )
             }
+            Self::RecordCountOverflow { record_count } => {
+                write!(f, "record count {record_count} overflows the file size")
+            }
         }
     }
 }
@@ -60,7 +79,7 @@ impl KnownRecordLayout {
         }
     }
 
-    pub fn record_size(&self) -> usize {
+    pub const fn record_size(self) -> usize {
         match self {
             Self::V2Dim512 | Self::V3Dim512 => std::mem::size_of::<TurboRecord512>(),
         }
@@ -106,32 +125,18 @@ impl TurboHeader {
         self.record_count
     }
 
-    pub fn idx_size(&self) -> usize {
-        (self.dim as usize * 2).div_ceil(8)
-    }
-
-    pub fn qjl_size(&self) -> usize {
-        (self.dim as usize).div_ceil(8)
-    }
-
-    pub fn record_stride(&self) -> usize {
-        8 + self.idx_size() + self.qjl_size() + 4
-    }
-
-    pub fn expected_file_size(&self) -> u64 {
-        Self::SIZE as u64 + self.record_count * self.record_stride() as u64
-    }
-
-    pub fn idx_offset(&self) -> usize {
-        8
-    }
-
-    pub fn qjl_offset(&self) -> usize {
-        8 + self.idx_size()
-    }
-
-    pub fn gamma_offset(&self) -> usize {
-        8 + self.idx_size() + self.qjl_size()
+    /// The size of a `turbo_static.bin` with this header: the header plus
+    /// `record_count` records of the header's [`KnownRecordLayout`]. Fails for
+    /// a header with no known layout, or a `record_count` too large for a
+    /// `u64` size.
+    pub fn expected_file_size(&self) -> Result<u64, TurboHeaderError> {
+        let layout = KnownRecordLayout::from_header(self)?;
+        self.record_count
+            .checked_mul(layout.record_size() as u64)
+            .and_then(|records| records.checked_add(Self::SIZE as u64))
+            .ok_or(TurboHeaderError::RecordCountOverflow {
+                record_count: self.record_count,
+            })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {

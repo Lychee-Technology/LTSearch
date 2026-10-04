@@ -10,6 +10,12 @@ pub struct MetaExtRecord {
     pub meta_json_len: u32,
 }
 
+// The loader casts the mmapped `turbo_static_meta_ext.bin` to this type.
+const _: () = assert!(
+    std::mem::size_of::<MetaExtRecord>() == META_EXT_RECORD_SIZE
+        && std::mem::align_of::<MetaExtRecord>() == 8
+);
+
 impl MetaExtRecord {
     pub fn doc_id_from_blob<'a>(&self, blob: &'a [u8]) -> &'a str {
         let start = self.docid_offset as usize;

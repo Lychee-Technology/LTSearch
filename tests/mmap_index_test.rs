@@ -77,7 +77,7 @@ fn write_test_index(
 
     fs::write(
         dir.join("centroids.bin"),
-        CentroidTable::generate(dim, 16, 7).to_bytes(),
+        CentroidTable::generate(dim, 4, 7).to_bytes(),
     )
     .unwrap();
     fs::write(
@@ -89,7 +89,7 @@ fn write_test_index(
 
 fn write_unknown_layout_index(dir: &std::path::Path, dim: u32, record_count: u64) {
     let header = TurboHeader::new(dim, record_count);
-    let stride = header.record_stride();
+    let stride = size_of::<TurboRecord512>();
     let mut bin_data = header.to_bytes();
     bin_data.resize(TurboHeader::SIZE + stride * record_count as usize, 0);
     fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
@@ -102,7 +102,7 @@ fn write_unknown_layout_index(dir: &std::path::Path, dim: u32, record_count: u64
     fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
-        CentroidTable::generate(dim, 16, 7).to_bytes(),
+        CentroidTable::generate(dim, 4, 7).to_bytes(),
     )
     .unwrap();
     fs::write(
@@ -171,7 +171,7 @@ fn mmap_index_rejects_truncated_bin_file() {
     fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
-        CentroidTable::generate(512, 16, 7).to_bytes(),
+        CentroidTable::generate(512, 4, 7).to_bytes(),
     )
     .unwrap();
     fs::write(
@@ -182,6 +182,27 @@ fn mmap_index_rejects_truncated_bin_file() {
 
     let err = MmapIndex::load(&dir).unwrap_err();
     assert!(err.to_string().contains("size"));
+}
+
+#[test]
+fn mmap_index_rejects_a_record_count_that_overflows_the_file_size() {
+    // (2^60 + 1) * 208 wraps to 208, so with unchecked arithmetic a one-record
+    // body matched this forged count.
+    let dir = temp_dir("record-count-overflow");
+    write_test_index(&dir, 512, &[(1, 0.0)], &[0], &["a"]);
+    let bin_path = dir.join("turbo_static.bin");
+    let mut bin_data = fs::read(&bin_path).unwrap();
+    bin_data[..TurboHeader::SIZE].copy_from_slice(&TurboHeader::new(512, (1 << 60) + 1).to_bytes());
+    fs::write(&bin_path, &bin_data).unwrap();
+
+    let err = MmapIndex::load(&dir).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            MmapIndexError::Header(ltsearch::index::TurboHeaderError::RecordCountOverflow { .. })
+        ),
+        "{err}"
+    );
 }
 
 #[test]
@@ -305,7 +326,7 @@ fn write_v3_test_index(dir: &std::path::Path, entries: &[(&str, &str)]) {
     fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
-        CentroidTable::generate(512, 16, 7).to_bytes(),
+        CentroidTable::generate(512, 4, 7).to_bytes(),
     )
     .unwrap();
     fs::write(

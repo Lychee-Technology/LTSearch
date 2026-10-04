@@ -5,10 +5,15 @@ use std::path::Path;
 use memmap2::Mmap;
 
 use super::assets::{AssetError, CentroidTable, ProjectionMatrix};
+use super::codec_config::TurboQuantConfig;
 use super::header::{KnownRecordLayout, TurboHeader, TurboHeaderError, TURBO_VERSION_V3};
 use super::meta::{MetaRecord, META_RECORD_SIZE};
 use super::meta_ext::{MetaExtRecord, META_EXT_RECORD_SIZE};
 use super::record::{TurboRecord512, TurboRecordRef, TurboRecordSlice};
+
+const TURBO_STATIC_FILE: &str = "turbo_static.bin";
+const META_FILE: &str = "turbo_static_meta.bin";
+const META_EXT_FILE: &str = "turbo_static_meta_ext.bin";
 
 #[derive(Debug)]
 pub struct MmapIndex {
@@ -64,6 +69,20 @@ pub enum MmapIndexError {
         expected: u32,
         actual: u32,
     },
+    /// A legacy asset has a well-formed header but a shape the legacy codec
+    /// can't score.
+    UnsupportedLegacyAsset {
+        file: &'static str,
+        field: &'static str,
+        expected: u32,
+        actual: u32,
+    },
+    /// The mapped bytes don't start at an address the typed records can be
+    /// read from.
+    MisalignedRecords {
+        file: &'static str,
+        align: usize,
+    },
 }
 
 impl fmt::Display for MmapIndexError {
@@ -111,6 +130,19 @@ impl fmt::Display for MmapIndexError {
                 f,
                 "{file} dimension mismatch: expected {expected}, got {actual}"
             ),
+            Self::UnsupportedLegacyAsset {
+                file,
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{file} has {field}={actual}, but the legacy codec only scores {field}={expected}"
+            ),
+            Self::MisalignedRecords { file, align } => write!(
+                f,
+                "{file} records are not mapped at a {align}-byte aligned address"
+            ),
         }
     }
 }
@@ -125,8 +157,8 @@ impl From<TurboHeaderError> for MmapIndexError {
 
 impl MmapIndex {
     pub fn load(dir: &Path) -> Result<Self, MmapIndexError> {
-        let bin_path = dir.join("turbo_static.bin");
-        let meta_path = dir.join("turbo_static_meta.bin");
+        let bin_path = dir.join(TURBO_STATIC_FILE);
+        let meta_path = dir.join(META_FILE);
         let text_path = dir.join("turbo_static_text.bin");
         let title_path = dir.join("turbo_static_title.bin");
         let centroids_path = dir.join("centroids.bin");
@@ -139,7 +171,7 @@ impl MmapIndex {
         let bin_mmap = mmap_file(&bin_path)?;
         if bin_mmap.len() < TurboHeader::SIZE {
             return Err(MmapIndexError::FileSizeMismatch {
-                file: "turbo_static.bin",
+                file: TURBO_STATIC_FILE,
                 expected: TurboHeader::SIZE as u64,
                 actual: bin_mmap.len() as u64,
             });
@@ -152,14 +184,18 @@ impl MmapIndex {
         let text_mmap = mmap_file(&text_path)?;
         let title_mmap = mmap_file(&title_path)?;
 
-        let expected_bin_size =
-            TurboHeader::SIZE as u64 + header.record_count() * layout.record_size() as u64;
+        let expected_bin_size = header.expected_file_size()?;
         if bin_mmap.len() as u64 != expected_bin_size {
             return Err(MmapIndexError::FileSizeMismatch {
-                file: "turbo_static.bin",
+                file: TURBO_STATIC_FILE,
                 expected: expected_bin_size,
                 actual: bin_mmap.len() as u64,
             });
+        }
+        match layout {
+            KnownRecordLayout::V2Dim512 | KnownRecordLayout::V3Dim512 => {
+                ensure_aligned::<TurboRecord512>(TURBO_STATIC_FILE, &bin_mmap[TurboHeader::SIZE..])?
+            }
         }
 
         if meta_mmap.len() % META_RECORD_SIZE != 0 {
@@ -176,12 +212,13 @@ impl MmapIndex {
                 actual: actual_meta_count,
             });
         }
+        ensure_aligned::<MetaRecord>(META_FILE, &meta_mmap)?;
 
         // v3 images ship three additional sidecars carrying the original string
         // doc_id and canonicalized metadata JSON. v2 images have none of these
         // files, so the branch keeps the legacy load path byte-for-byte.
         let (meta_ext_mmap, docid_mmap, meta_json_mmap) = if header.version() == TURBO_VERSION_V3 {
-            let meta_ext_path = dir.join("turbo_static_meta_ext.bin");
+            let meta_ext_path = dir.join(META_EXT_FILE);
             let docid_path = dir.join("turbo_static_docid.bin");
             let meta_json_path = dir.join("turbo_static_meta_json.bin");
 
@@ -204,6 +241,8 @@ impl MmapIndex {
                 });
             }
 
+            ensure_aligned::<MetaExtRecord>(META_EXT_FILE, &meta_ext_mmap)?;
+
             // Validate every record's blob slice at load time so the accessors
             // (`original_doc_id` / `metadata_json`) can index the sidecars
             // without bounds or UTF-8 panics. A corrupt sidecar fails here
@@ -213,8 +252,9 @@ impl MmapIndex {
             for i in 0..actual_meta_ext_count as usize {
                 let offset = i * META_EXT_RECORD_SIZE;
                 // Safety: the sidecar length was validated above to be exactly
-                // `record_count * META_EXT_RECORD_SIZE`, and `offset` is a
-                // multiple of 8, matching `MetaExtRecord`'s alignment.
+                // `record_count * META_EXT_RECORD_SIZE`, its start was checked
+                // to be aligned for `MetaExtRecord`, and `offset` is a multiple
+                // of the record size.
                 let ext = unsafe { &*(meta_ext_mmap[offset..].as_ptr() as *const MetaExtRecord) };
 
                 validate_ext_blob(
@@ -253,6 +293,18 @@ impl MmapIndex {
                 file: "centroids.bin",
                 expected: header.dim(),
                 actual: centroids.dim(),
+            });
+        }
+        // A legacy record stores a 2-bit centroid index per dimension, and the
+        // scorer reads exactly that many centroids. A larger table would load
+        // and then be scored against the wrong centroids.
+        let legacy_centroids_per_dim = TurboQuantConfig::legacy_v1().centroids_per_dim();
+        if centroids.centroids_per_dim() != legacy_centroids_per_dim {
+            return Err(MmapIndexError::UnsupportedLegacyAsset {
+                file: "centroids.bin",
+                field: "centroids_per_dim",
+                expected: legacy_centroids_per_dim,
+                actual: centroids.centroids_per_dim(),
             });
         }
 
@@ -323,9 +375,9 @@ impl MmapIndex {
             return None;
         }
         let offset = i * META_EXT_RECORD_SIZE;
-        // Safety: the sidecar length was validated in `load` to be exactly
-        // `record_count * META_EXT_RECORD_SIZE`, and `MetaExtRecord` is
-        // `#[repr(C)]` with no alignment above the `u64`-aligned mmap base.
+        // Safety: `load` validated the sidecar length to be exactly
+        // `record_count * META_EXT_RECORD_SIZE` and its start to be aligned
+        // for `MetaExtRecord`.
         Some(unsafe { &*(mmap[offset..].as_ptr() as *const MetaExtRecord) })
     }
 
@@ -356,11 +408,9 @@ impl MmapIndex {
             self.header.record_count()
         );
 
-        match self.records() {
-            TurboRecordSlice::V2Dim512(records) => {
-                TurboRecordRef::from_turbo_record_512(&records[index as usize], &self.header)
-            }
-        }
+        let record_size = self.layout.record_size();
+        let start = index as usize * record_size;
+        TurboRecordRef::new(&self.record_data()[start..start + record_size], self.layout)
     }
 
     pub fn records(&self) -> TurboRecordSlice<'_> {
@@ -369,6 +419,9 @@ impl MmapIndex {
                 let bytes = &self.bin_mmap[TurboHeader::SIZE..];
                 let ptr = bytes.as_ptr() as *const TurboRecord512;
                 let len = self.header.record_count() as usize;
+                // Safety: `load` validated that the region holds exactly
+                // `record_count` records and starts at an address aligned for
+                // `TurboRecord512`, which has no invalid bit patterns.
                 let records = unsafe { std::slice::from_raw_parts(ptr, len) };
                 TurboRecordSlice::V2Dim512(records)
             }
@@ -383,6 +436,8 @@ impl MmapIndex {
         );
 
         let offset = index as usize * META_RECORD_SIZE;
+        // Safety: `load` validated that the file holds exactly `record_count`
+        // records and starts at an address aligned for `MetaRecord`.
         unsafe { &*(self.meta_mmap[offset..].as_ptr() as *const MetaRecord) }
     }
 
@@ -466,6 +521,21 @@ fn validate_ext_blob(
     Ok(())
 }
 
+/// Rejects a region that the accessors would cast to `&T` at an address `T`
+/// can't be read from. A file mapping starts on a page boundary, so this only
+/// fails if a region's offset into its file stops being a multiple of `T`'s
+/// alignment.
+fn ensure_aligned<T>(file: &'static str, bytes: &[u8]) -> Result<(), MmapIndexError> {
+    if bytes.as_ptr().cast::<T>().is_aligned() {
+        Ok(())
+    } else {
+        Err(MmapIndexError::MisalignedRecords {
+            file,
+            align: std::mem::align_of::<T>(),
+        })
+    }
+}
+
 fn mmap_file(path: &Path) -> Result<Mmap, MmapIndexError> {
     let file = File::open(path).map_err(|source| MmapIndexError::Io {
         path: path.display().to_string(),
@@ -529,7 +599,7 @@ mod tests {
         fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
         fs::write(
             dir.join("centroids.bin"),
-            CentroidTable::generate(512, 16, 7).to_bytes(),
+            CentroidTable::generate(512, 4, 7).to_bytes(),
         )
         .unwrap();
         fs::write(
@@ -547,6 +617,61 @@ mod tests {
         let index = MmapIndex::load_from_dir_for_tests(&dir).unwrap();
         assert_eq!(index.record_count(), 1);
         assert_eq!(index.dim(), 512);
+    }
+
+    #[test]
+    fn load_rejects_a_centroid_table_the_legacy_record_cannot_index() {
+        let dir = temp_dir("sixteen-centroids");
+        write_test_index(&dir);
+        fs::write(
+            dir.join("centroids.bin"),
+            CentroidTable::generate(512, 16, 7).to_bytes(),
+        )
+        .unwrap();
+
+        let err = MmapIndex::load_from_dir_for_tests(&dir).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                super::MmapIndexError::UnsupportedLegacyAsset {
+                    file: "centroids.bin",
+                    field: "centroids_per_dim",
+                    expected: 4,
+                    actual: 16,
+                }
+            ),
+            "{err}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "centroids.bin has centroids_per_dim=16, but the legacy codec only scores \
+             centroids_per_dim=4"
+        );
+    }
+
+    #[test]
+    fn ensure_aligned_rejects_a_region_at_an_odd_address() {
+        // `u64` storage is 8-aligned, so one byte in is misaligned for every
+        // record type and eight bytes in is aligned again.
+        let storage = [0u64; 64];
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), size_of_val(&storage))
+        };
+
+        super::ensure_aligned::<TurboRecord512>("turbo_static.bin", bytes).unwrap();
+        super::ensure_aligned::<TurboRecord512>("turbo_static.bin", &bytes[8..]).unwrap();
+        let err = super::ensure_aligned::<TurboRecord512>("turbo_static.bin", &bytes[1..])
+            .expect_err("a record region one byte off alignment must be rejected");
+        assert!(
+            matches!(
+                err,
+                super::MmapIndexError::MisalignedRecords {
+                    file: "turbo_static.bin",
+                    align: 8,
+                }
+            ),
+            "{err}"
+        );
     }
 
     #[test]
