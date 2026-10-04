@@ -19,13 +19,16 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use ltsearch::embedding::FixedEmbeddingGenerator;
 use ltsearch::index::{
-    sha256_hex, CentroidTable, EmbeddingProfile, ProjectionMatrix, ReleaseSource, StaticChunk,
-    StaticIndexBuilder, StaticReleaseBuilder,
+    sha256_hex, CentroidTable, EmbeddingProfile, MmapIndex, ProjectionMatrix, ReleaseSource,
+    StaticChunk, StaticIndexBuilder, StaticReleaseBuilder,
 };
-use ltsearch::models::CorpusType;
+use ltsearch::models::{CorpusType, IndexManifest};
+use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
+use ltsearch::storage::{ActiveManifest, ManifestHead};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -92,6 +95,64 @@ const V2_INDEX_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Search results over the fixture, as `(doc_id, score bits)` in rank order
+/// for each of the three [`queries`], with `top_k` covering all six records.
+/// Captured from `main` at 16789d5, before #166 touched the loader and the
+/// searcher. v2 results carry the hashed doc_id, v3 the original one; the
+/// rankings and scores are the same because both versions encode identically.
+const V3_SEARCH_RESULTS: [[(&str, u32); 6]; 3] = [
+    [
+        ("doc-03", 0x44fcd3b2),
+        ("doc-04", 0xc378a641),
+        ("doc-02", 0xc3848bf9),
+        ("doc-01", 0xc4ca3bfa),
+        ("doc-05", 0xc4de006f),
+        ("doc-00", 0xc4de49ec),
+    ],
+    [
+        ("doc-03", 0x43c7d880),
+        ("doc-04", 0x43a856ca),
+        ("doc-02", 0xc4ca6ab7),
+        ("doc-01", 0xc4e70f73),
+        ("doc-00", 0xc4e7f8e7),
+        ("doc-05", 0xc538a7d3),
+    ],
+    [
+        ("doc-04", 0x4557d573),
+        ("doc-03", 0x450a8af8),
+        ("doc-05", 0x44d8cdfe),
+        ("doc-01", 0xc30c7b56),
+        ("doc-02", 0xc386b82a),
+        ("doc-00", 0xc435ce38),
+    ],
+];
+const V2_SEARCH_RESULTS: [[(&str, u32); 6]; 3] = [
+    [
+        ("10108727749282401313", 0x44fcd3b2),
+        ("10108728848794029524", 0xc378a641),
+        ("10108726649770773102", 0xc3848bf9),
+        ("10108725550259144891", 0xc4ca3bfa),
+        ("10108729948305657735", 0xc4de006f),
+        ("10108724450747516680", 0xc4de49ec),
+    ],
+    [
+        ("10108727749282401313", 0x43c7d880),
+        ("10108728848794029524", 0x43a856ca),
+        ("10108726649770773102", 0xc4ca6ab7),
+        ("10108725550259144891", 0xc4e70f73),
+        ("10108724450747516680", 0xc4e7f8e7),
+        ("10108729948305657735", 0xc538a7d3),
+    ],
+    [
+        ("10108728848794029524", 0x4557d573),
+        ("10108727749282401313", 0x450a8af8),
+        ("10108729948305657735", 0x44d8cdfe),
+        ("10108725550259144891", 0xc30c7b56),
+        ("10108726649770773102", 0xc386b82a),
+        ("10108724450747516680", 0xc435ce38),
+    ],
+];
+
 #[test]
 fn legacy_centroid_table_bytes_are_pinned() {
     let bytes = CentroidTable::generate(512, 4, 7).to_bytes();
@@ -151,6 +212,113 @@ fn v2_static_index_bytes_are_pinned() {
         .unwrap();
 
     assert_eq!(file_digests(&output), pinned(V2_INDEX_FILES));
+}
+
+#[test]
+fn v3_search_ranking_and_scores_are_pinned() {
+    let dir = TempDir::new().unwrap();
+    let output = dir.path().join("release");
+    let (chunks, embeddings) = fixture();
+
+    StaticReleaseBuilder
+        .build_release(
+            &output,
+            &chunks,
+            &embeddings,
+            &EmbeddingProfile {
+                model_id: "jina-v5-nano/512".to_string(),
+                dim: 512,
+            },
+            &ReleaseSource {
+                kind: "lance".to_string(),
+                dataset_path: "/data/golden.lance".to_string(),
+                table_version: 3,
+                table_row_count: chunks.len() as u64,
+                corpus_type: CorpusType::Legal,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(search_results(&output), pinned_results(&V3_SEARCH_RESULTS));
+}
+
+#[test]
+fn v2_search_ranking_and_scores_are_pinned() {
+    let dir = TempDir::new().unwrap();
+    let output = dir.path().join("static");
+    let (chunks, embeddings) = fixture();
+    let embeddings: Vec<Option<Vec<f32>>> = embeddings.into_iter().map(Some).collect();
+
+    StaticIndexBuilder::new()
+        .build(
+            &output,
+            &chunks,
+            &embeddings,
+            &FixedEmbeddingGenerator::new(vec![0.0; 512]),
+        )
+        .unwrap();
+
+    assert_eq!(search_results(&output), pinned_results(&V2_SEARCH_RESULTS));
+}
+
+/// The full ranking of the index at `dir` for each of [`queries`]: every
+/// result's doc_id and the bits of its score.
+fn search_results(dir: &Path) -> Vec<Vec<(String, u32)>> {
+    let searcher = TurboQuantSearcher::new(Arc::new(MmapIndex::load(dir).unwrap()));
+    queries()
+        .iter()
+        .map(|query| {
+            searcher
+                .search(&stub_manifest(), query, 6)
+                .unwrap()
+                .into_iter()
+                .map(|result| (result.doc_id, result.score.to_bits()))
+                .collect()
+        })
+        .collect()
+}
+
+fn pinned_results(results: &[[(&str, u32); 6]; 3]) -> Vec<Vec<(String, u32)>> {
+    results
+        .iter()
+        .map(|ranking| {
+            ranking
+                .iter()
+                .map(|(doc_id, score_bits)| (doc_id.to_string(), *score_bits))
+                .collect()
+        })
+        .collect()
+}
+
+/// Three non-unit queries drawn like the fixture's embeddings, from other
+/// SplitMix64 states.
+fn queries() -> Vec<Vec<f32>> {
+    (0..3u64)
+        .map(|index| {
+            let mut state = 0xC0DE_0000 + index;
+            (0..512)
+                .map(|_| (splitmix64(&mut state) >> 40) as f32 / (1u64 << 23) as f32 - 1.0)
+                .collect()
+        })
+        .collect()
+}
+
+fn stub_manifest() -> ActiveManifest {
+    ActiveManifest {
+        head: ManifestHead {
+            version_id: 1,
+            manifest_path: "m.json".into(),
+            updated_at: 0,
+        },
+        manifest: IndexManifest {
+            version_id: 1,
+            created_at: 0,
+            embedding_dim: 512,
+            document_count: 0,
+            num_shards: 0,
+            shards: Vec::new(),
+        },
+    }
 }
 
 /// Six doc_id-sorted chunks: every corpus type, chunks with and without a
