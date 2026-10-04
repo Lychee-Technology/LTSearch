@@ -1,3 +1,11 @@
+// The static index files are little-endian. Builders write the record and
+// sidecar types (`TurboRecord512`, `TurboProdRecord512`, `MetaRecord`,
+// `MetaExtRecord`) as their in-memory bytes, and `MmapIndex` casts the mapped
+// files back to them without byte swapping, so on a big-endian target both
+// sides would use the wrong byte order without any error.
+#[cfg(not(target_endian = "little"))]
+compile_error!("the static index format is little-endian; build for a little-endian target");
+
 pub mod assets;
 pub mod codebook;
 pub mod codec_config;
