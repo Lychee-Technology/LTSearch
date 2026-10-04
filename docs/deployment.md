@@ -162,8 +162,18 @@ llama.cpp 静态链接进二进制（预编译 static-llama release 为 `aarch64
 
 ## 4. Static release 激活 runbook（#110/#112）
 
-静态 TurboQuant v3 release 与动态索引版本独立发布/激活；查询响应同时报告
+静态 TurboQuant release 与动态索引版本独立发布/激活；查询响应同时报告
 `(dynamic_version, static_release_id)` 对。build 与 activate 严格分离。
+
+release 格式由 static-build 配置的可选字段 `release_format` 决定：缺省 `"v3"`；`"v4"` 用
+`TurboQuantProdV1` codec 编码，release 目录以 `rotation.bin` / `codebook.bin` / `qjl.bin`
+取代 v3 的 `centroids.bin` / `projection.bin`。verify、安装与上传都按 manifest 的
+`turbo_version` 选文件集，下面的 activate 命令两种格式通用。
+
+**激活 v4 之前，所有 query 读者必须已部署能读 v4 的构建。** `static/_head` 指针为所有读者
+共享，activate 不检查读者版本；读不了 v4 的构建在 bootstrap 加载该 release 时失败，报
+`unsupported version: 4`。回滚方式不变：重激活旧 release。生产 rollout 顺序与缺省格式切换
+由 #169 负责。
 
 ### 本地（单镜像 / 原生进程）
 

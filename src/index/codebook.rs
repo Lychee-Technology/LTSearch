@@ -19,7 +19,20 @@
 //! ([`LloydMaxCodebook::committed`]), so its values are visible in review and
 //! no build runs the solver. A test re-derives them with
 //! [`LloydMaxSolution::solve`]. A release stores the codebook it was encoded
-//! with (#166), so the query side never recomputes it.
+//! with, as [`CODEBOOK_FILE`], so the query side never recomputes it.
+//!
+//! # File format
+//!
+//! All integers and values are little-endian.
+//!
+//! | offset | size      | field                                   |
+//! |--------|-----------|-----------------------------------------|
+//! | 0      | 4         | magic `TQCB`                            |
+//! | 4      | 4         | `dim` (u32)                             |
+//! | 8      | 4         | `bits` (u32)                            |
+//! | 12     | 4·2^bits  | the centroids as f32, ascending         |
+//!
+//! The thresholds are not stored: they are a function of the centroids.
 //!
 //! # Solver
 //!
@@ -58,6 +71,17 @@
 //! sampler](super::gaussian). A golden test pins the d = 512, b = 2 solution.
 
 use std::f64::consts::FRAC_PI_2;
+
+use super::assets::{parse_values, write_values, AssetError};
+
+/// The codebook's file name in a v4 static release.
+pub const CODEBOOK_FILE: &str = "codebook.bin";
+
+const CODEBOOK_MAGIC: [u8; 4] = *b"TQCB";
+const CODEBOOK_HEADER_SIZE: usize = 12;
+/// The widest index a codebook file can declare. `TurboQuantConfig` accepts
+/// the same range.
+const MAX_BITS: u32 = 4;
 
 /// Centroids of the committed codebook for d = 512, b = 2:
 /// [`LloydMaxSolution::solve`]`(512, 2)` rounded to f32. The thresholds are
@@ -148,6 +172,51 @@ impl LloydMaxCodebook {
             centroids,
             thresholds,
         }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(CODEBOOK_HEADER_SIZE + self.centroids.len() * 4);
+        out.extend_from_slice(&CODEBOOK_MAGIC);
+        out.extend_from_slice(&self.dim.to_le_bytes());
+        out.extend_from_slice(&u32::from(self.bits).to_le_bytes());
+        write_values(&mut out, &self.centroids);
+        out
+    }
+
+    /// Parses the file format in the module docs. It checks that the bytes
+    /// are a codebook: `2^bits` finite, strictly ascending centroids. Whether
+    /// it is the codebook a codec expects is for the loader to check
+    /// ([`TurboQuantProdV1::from_assets`](super::TurboQuantProdV1::from_assets)).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AssetError> {
+        let Some((header, data)) = bytes.split_first_chunk::<CODEBOOK_HEADER_SIZE>() else {
+            return Err(AssetError::InvalidSize {
+                minimum: CODEBOOK_HEADER_SIZE,
+                actual: bytes.len(),
+            });
+        };
+
+        let magic: [u8; 4] = header[0..4].try_into().unwrap();
+        if magic != CODEBOOK_MAGIC {
+            return Err(AssetError::InvalidMagic {
+                expected: CODEBOOK_MAGIC,
+                actual: magic,
+            });
+        }
+        let dim = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        if dim == 0 {
+            return Err(AssetError::InvalidDim);
+        }
+        let bits = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        if !(1..=MAX_BITS).contains(&bits) {
+            return Err(AssetError::UnsupportedCodebookBits { bits });
+        }
+        let centroids = parse_values(data, 1 << bits, 1)?;
+        let ascending = centroids.is_sorted_by(|lower, upper| lower < upper);
+        if !ascending || centroids.iter().any(|centroid| !centroid.is_finite()) {
+            return Err(AssetError::CentroidsNotAscending);
+        }
+
+        Ok(Self::from_centroids(dim, bits as u8, centroids))
     }
 
     /// The index of the cell `x` falls in: the number of thresholds at or
@@ -815,6 +884,114 @@ mod tests {
             assert!(
                 relative_error(variance, 1.0 / f64::from(dim)) <= 1e-14,
                 "dim {dim}: variance {variance}"
+            );
+        }
+    }
+
+    #[test]
+    fn bytes_round_trip_in_the_documented_layout() {
+        let codebook = committed();
+        let bytes = codebook.to_bytes();
+        assert_eq!(bytes.len(), 12 + 4 * 4);
+        assert_eq!(&bytes[0..4], b"TQCB");
+        assert_eq!(bytes[4..8], 512u32.to_le_bytes());
+        assert_eq!(bytes[8..12], 2u32.to_le_bytes());
+        // Ascending: the most negative centroid comes first.
+        assert_eq!(bytes[12..16], (-0.06669391f32).to_le_bytes());
+        assert_eq!(bytes[24..28], 0.06669391f32.to_le_bytes());
+
+        // The thresholds aren't stored; parsing derives the same ones.
+        let parsed = LloydMaxCodebook::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, codebook);
+        assert_eq!(parsed.thresholds(), codebook.thresholds());
+
+        for bits in [1, 3, 4] {
+            let codebook = LloydMaxSolution::solve(512, bits).to_codebook();
+            let bytes = codebook.to_bytes();
+            assert_eq!(bytes.len(), 12 + 4 * (1 << bits));
+            assert_eq!(LloydMaxCodebook::from_bytes(&bytes), Ok(codebook));
+        }
+    }
+
+    #[test]
+    fn from_bytes_rejects_malformed_input() {
+        let bytes = committed().to_bytes();
+        let with_field = |offset: usize, value: &[u8]| {
+            let mut edited = bytes.clone();
+            edited[offset..offset + value.len()].copy_from_slice(value);
+            LloydMaxCodebook::from_bytes(&edited)
+        };
+        let wrong_value_count = |actual_values| {
+            Err(AssetError::InvalidLayout {
+                expected_values: 4,
+                actual_values,
+            })
+        };
+
+        assert_eq!(
+            LloydMaxCodebook::from_bytes(&bytes[..11]),
+            Err(AssetError::InvalidSize {
+                minimum: 12,
+                actual: 11
+            })
+        );
+        assert_eq!(
+            with_field(0, b"TQRT"),
+            Err(AssetError::InvalidMagic {
+                expected: *b"TQCB",
+                actual: *b"TQRT"
+            })
+        );
+        assert_eq!(
+            with_field(4, &0u32.to_le_bytes()),
+            Err(AssetError::InvalidDim)
+        );
+        for bits in [0u32, 5, 8, u32::MAX] {
+            assert_eq!(
+                with_field(8, &bits.to_le_bytes()),
+                Err(AssetError::UnsupportedCodebookBits { bits })
+            );
+        }
+        // 2 centroids declared, 4 present.
+        assert_eq!(
+            with_field(8, &1u32.to_le_bytes()),
+            Err(AssetError::InvalidLayout {
+                expected_values: 2,
+                actual_values: 4
+            })
+        );
+        assert_eq!(
+            LloydMaxCodebook::from_bytes(&bytes[..12]),
+            wrong_value_count(0)
+        );
+        assert_eq!(
+            LloydMaxCodebook::from_bytes(&bytes[..bytes.len() - 4]),
+            wrong_value_count(3)
+        );
+        assert_eq!(
+            LloydMaxCodebook::from_bytes(&bytes[..bytes.len() - 1]),
+            wrong_value_count(3)
+        );
+        assert_eq!(
+            LloydMaxCodebook::from_bytes(&[&bytes[..], &[0; 4]].concat()),
+            wrong_value_count(5)
+        );
+
+        // Centroids that `encode` could not use: out of order, repeated, or
+        // not finite.
+        let inner = (-0.02000666f32).to_le_bytes();
+        for (offset, value) in [
+            (12, 0.5f32.to_le_bytes()),
+            (12, inner),
+            (24, f32::NAN.to_le_bytes()),
+            (24, f32::INFINITY.to_le_bytes()),
+            (12, f32::NEG_INFINITY.to_le_bytes()),
+        ] {
+            assert_eq!(
+                with_field(offset, &value),
+                Err(AssetError::CentroidsNotAscending),
+                "centroid at {offset} set to {:?}",
+                f32::from_le_bytes(value)
             );
         }
     }

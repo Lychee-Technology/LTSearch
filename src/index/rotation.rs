@@ -64,10 +64,13 @@
 //! | 16     | 4        | `generator_version` (u32)              |
 //! | 20     | 4·dim²   | Π as row-major f32, `Π[i][j]` at `i·dim + j` |
 //!
-//! The release file name and placement belong to #166.
+//! A v4 static release stores it as [`ROTATION_FILE`].
 
 use super::assets::{parse_values, write_values, AssetError};
 use super::gaussian::{fill_standard_normal, GAUSSIAN_GENERATOR_VERSION};
+
+/// The rotation's file name in a v4 static release.
+pub const ROTATION_FILE: &str = "rotation.bin";
 
 const ROTATION_MAGIC: [u8; 4] = *b"TQRT";
 const ROTATION_HEADER_SIZE: usize = 20;

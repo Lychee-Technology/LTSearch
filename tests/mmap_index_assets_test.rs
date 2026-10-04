@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use ltsearch::index::mmap_index::MmapIndexError;
 use ltsearch::index::{
-    CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader, TurboRecord512,
-    META_RECORD_SIZE,
+    CentroidTable, IndexCodec, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader,
+    TurboRecord512, META_RECORD_SIZE,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -91,8 +91,15 @@ fn mmap_index_loads_centroids_and_projection_assets() {
 
     let index = MmapIndex::load(&dir).unwrap();
 
-    assert_eq!(index.centroids(), &centroids);
-    assert_eq!(index.projection(), &projection);
+    let IndexCodec::Legacy {
+        centroids: loaded_centroids,
+        projection: loaded_projection,
+    } = index.codec()
+    else {
+        panic!("a v2 index loads the legacy codec");
+    };
+    assert_eq!(loaded_centroids, &centroids);
+    assert_eq!(loaded_projection, &projection);
 }
 
 #[test]

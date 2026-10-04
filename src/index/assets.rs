@@ -38,6 +38,12 @@ pub enum AssetError {
         expected: [u8; 4],
         actual: [u8; 4],
     },
+    /// A codebook file declares an index width outside 1..=4 bits.
+    UnsupportedCodebookBits {
+        bits: u32,
+    },
+    /// A codebook file's centroids are not finite and strictly ascending.
+    CentroidsNotAscending,
 }
 
 impl fmt::Display for AssetError {
@@ -66,6 +72,15 @@ impl fmt::Display for AssetError {
                 write!(
                     f,
                     "invalid magic bytes: expected {expected:?}, got {actual:?}"
+                )
+            }
+            Self::UnsupportedCodebookBits { bits } => {
+                write!(f, "codebook bits must be in 1..=4, got {bits}")
+            }
+            Self::CentroidsNotAscending => {
+                write!(
+                    f,
+                    "codebook centroids must be finite and strictly ascending"
                 )
             }
         }

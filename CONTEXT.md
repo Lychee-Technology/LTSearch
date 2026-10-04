@@ -9,9 +9,11 @@ builder materializes and publishes immutable index versions, and query resolves 
 
 AWS is optional: local deployment uses SQLite for durable events, build jobs, and active-release
 coordination, while AWS remains an adapter implementation. Static corpora are built from immutable
-Lance releases into versioned TurboQuant v3 releases and are activated separately from dynamic
-indexes. A release stores the seeded codec matrices it was encoded with; only builders generate
-them, and query only loads them (ADR-0002).
+Lance releases into versioned TurboQuant releases and are activated separately from dynamic
+indexes. Builds write the v3 format unless the build config selects v4 (`release_format`), which
+encodes with the `TurboQuantProdV1` codec; query reads v2, v3 and v4. A release stores the seeded
+codec matrices it was encoded with; only builders generate them, and query only loads them
+(ADR-0002).
 
 Release artifacts (#113) are exactly one local OCI image (`ghcr.io/lychee-technology/ltsearch-local`,
 the unified `ltsearch` binary with write/build/query/static-build/static-activate subcommands) plus

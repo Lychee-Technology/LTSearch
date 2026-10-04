@@ -13,18 +13,16 @@ use std::path::Path;
 
 use crate::error::PublishError;
 use crate::index::{
-    derive_release_id, sha256_hex, MmapIndex, ReleaseManifest, RELEASE_MANIFEST_FILE,
-    V3_RELEASE_OUTPUT_FILES,
+    derive_release_id, release_output_files, sha256_hex, IndexCodec, ManifestCodec, MmapIndex,
+    ReleaseManifest, TurboQuantConfig, RELEASE_MANIFEST_FILE,
 };
 use crate::storage::{static_release_dir_key, StaticReleaseHead, STATIC_HEAD_KEY};
 
 use super::publisher::PublishStorage;
 
-/// The TurboQuant version a static release must declare.
-const EXPECTED_TURBO_VERSION: u32 = 3;
 /// The manifest schema version this activation understands.
 const EXPECTED_MANIFEST_SCHEMA_VERSION: u32 = 1;
-/// The only embedding dimension supported by the v3 static codec.
+/// The only embedding dimension the static codecs support.
 const EXPECTED_EMBEDDING_DIM: u32 = 512;
 
 /// Failure modes of the static release activation orchestration.
@@ -80,25 +78,31 @@ pub struct StaticActivationResult {
     pub previous_release_id: Option<String>,
 }
 
-/// Verifies that `dir` holds a self-consistent v3 static release, returning the
-/// parsed [`ReleaseManifest`] on success.
+/// Verifies that `dir` holds a self-consistent v3 or v4 static release,
+/// returning the parsed [`ReleaseManifest`] on success. The manifest's
+/// `turbo_version` selects the file set and the codec checks; a release whose
+/// manifest, codec section and files are not all of that one version is
+/// rejected.
 ///
 /// The eight steps (from the plan's 设计要点 2) each independently reject a
 /// tampered or mismatched release:
 ///
 /// 1. Parse `release_manifest.json` into a [`ReleaseManifest`].
-/// 2. `manifest_schema_version == 1 && turbo_version == 3`.
-/// 3. `outputs[]` names exactly the nine v3 artifact files (name-ascending),
-///    then recompute every entry's `sha256` + `size_bytes` from disk and
-///    compare field-by-field. Pinning the set is what stops a self-consistent
-///    manifest that simply omits `.bin` files from serving them unchecked.
+/// 2. `manifest_schema_version == 1`, `turbo_version` is 3 or 4, and the
+///    `codec` section is the one that version writes.
+/// 3. `outputs[]` names exactly that version's artifact files
+///    (name-ascending), then recompute every entry's `sha256` + `size_bytes`
+///    from disk and compare field-by-field. Pinning the set is what stops a
+///    self-consistent manifest that simply omits `.bin` files from serving
+///    them unchecked.
 /// 4. Recompute `derive_release_id(..)` and require it to equal `release_id`.
 /// 5. Lance provenance is coherent (`kind == "lance"`, non-empty `dataset_path`,
 ///    positive `table_version`, `table_row_count == doc_count`).
 /// 6. Embedding profile matches the codec and the requested `dim` == 512, with a
 ///    non-empty `model_id`; honor optional `expect_model_id` / `expect_dim`.
-/// 7. `MmapIndex::load(dir)` succeeds with `version() == 3` and
-///    `record_count() == table_row_count`.
+/// 7. `MmapIndex::load(dir)` succeeds with `version() == turbo_version`,
+///    `record_count() == table_row_count` and, for v4, the codec config the
+///    manifest records.
 /// 8. Return the verified manifest.
 pub fn verify_release_dir(
     dir: &Path,
@@ -121,21 +125,39 @@ pub fn verify_release_dir(
             ),
         })?;
 
-    // Step 2: schema/turbo version.
+    // Step 2: schema/turbo version. The version picks the file set of step 3
+    // and the codec checks of step 7.
     if manifest.manifest_schema_version != EXPECTED_MANIFEST_SCHEMA_VERSION {
         return Err(verify_err(format!(
             "manifest_schema_version {} != {EXPECTED_MANIFEST_SCHEMA_VERSION}",
             manifest.manifest_schema_version
         )));
     }
-    if manifest.turbo_version != EXPECTED_TURBO_VERSION {
+    let turbo_version = manifest.turbo_version;
+    let expected_files = release_output_files(turbo_version).ok_or_else(|| {
+        verify_err(format!(
+            "turbo_version {turbo_version} is not a static release version this build verifies \
+             (3 or 4)"
+        ))
+    })?;
+    // The codec section is untagged, so its shape says which version wrote
+    // it. A v4 section under `turbo_version: 3` (or the reverse) would hash
+    // into a self-consistent release_id, so it has to be rejected here.
+    if manifest.codec.turbo_version() != turbo_version {
         return Err(verify_err(format!(
-            "turbo_version {} != {EXPECTED_TURBO_VERSION}",
-            manifest.turbo_version
+            "turbo_version {turbo_version} has a v{} codec section",
+            manifest.codec.turbo_version()
         )));
     }
+    let v4_config = match &manifest.codec {
+        ManifestCodec::V3(_) => None,
+        ManifestCodec::V4(codec) => Some(
+            TurboQuantConfig::from_v4_codec_metadata(codec)
+                .map_err(|error| verify_err(format!("invalid codec section: {error}")))?,
+        ),
+    };
 
-    // Step 3a: `outputs[]` must name EXACTLY the nine v3 artifact files, no more
+    // Step 3a: `outputs[]` must name EXACTLY the version's artifact files, no more
     // and no less, AND in the canonical name-ascending order the `ReleaseManifest`
     // contract mandates. Step 3b only re-hashes the files the manifest lists, and
     // step 4's release_id is derived over that same list, so a crafted manifest
@@ -148,17 +170,17 @@ pub fn verify_release_dir(
     // self-consistent through step 4 — only an order-sensitive check here rejects
     // it, enforcing the stored-name-ascending contract rather than mere set equality.
     let actual_names: Vec<&str> = manifest.outputs.iter().map(|o| o.name.as_str()).collect();
-    if actual_names != V3_RELEASE_OUTPUT_FILES {
+    if actual_names != expected_files {
         // Distinguish a set difference (files missing/unexpected) from a pure
         // ordering violation (same set, wrong order) so the error is actionable.
         let mut sorted_names = actual_names.clone();
         sorted_names.sort_unstable();
-        if sorted_names == V3_RELEASE_OUTPUT_FILES {
+        if sorted_names == expected_files {
             return Err(verify_err(format!(
-                "outputs not name-ascending: expected {V3_RELEASE_OUTPUT_FILES:?}, got {actual_names:?}"
+                "outputs not name-ascending: expected {expected_files:?}, got {actual_names:?}"
             )));
         }
-        let missing: Vec<&str> = V3_RELEASE_OUTPUT_FILES
+        let missing: Vec<&str> = expected_files
             .iter()
             .copied()
             .filter(|expected| !actual_names.contains(expected))
@@ -166,11 +188,12 @@ pub fn verify_release_dir(
         let unexpected: Vec<&str> = actual_names
             .iter()
             .copied()
-            .filter(|name| !V3_RELEASE_OUTPUT_FILES.contains(name))
+            .filter(|name| !expected_files.contains(name))
             .collect();
         return Err(verify_err(format!(
-            "outputs must list exactly the {} v3 artifact files; missing {:?}, unexpected {:?}",
-            V3_RELEASE_OUTPUT_FILES.len(),
+            "outputs must list exactly the {} v{turbo_version} artifact files; missing {:?}, \
+             unexpected {:?}",
+            expected_files.len(),
             missing,
             unexpected
         )));
@@ -243,10 +266,10 @@ pub fn verify_release_dir(
             manifest.embedding_profile.dim
         )));
     }
-    if manifest.codec.dim != EXPECTED_EMBEDDING_DIM {
+    if manifest.codec.dim() != EXPECTED_EMBEDDING_DIM {
         return Err(verify_err(format!(
             "codec.dim {} != {EXPECTED_EMBEDDING_DIM}",
-            manifest.codec.dim
+            manifest.codec.dim()
         )));
     }
     if manifest.embedding_profile.model_id.is_empty() {
@@ -271,18 +294,38 @@ pub fn verify_release_dir(
         }
     }
 
-    // Step 7: the image must actually load as a v3 index with a matching count.
+    // Step 7: the image must actually load as an index of the manifest's
+    // version, with a matching count and codec.
     let index = MmapIndex::load(dir).map_err(|error| {
         verify_err(format!(
             "MmapIndex::load({}) failed: {error}",
             dir.display()
         ))
     })?;
-    if index.version() != EXPECTED_TURBO_VERSION {
+    if index.version() != turbo_version {
         return Err(verify_err(format!(
-            "loaded image version {} != {EXPECTED_TURBO_VERSION}",
+            "loaded image version {} != manifest turbo_version {turbo_version}",
             index.version()
         )));
+    }
+    // The loader takes a v4 codec config from the asset files, never from the
+    // manifest, so this is the only place the two are compared.
+    if let Some(expected) = v4_config {
+        match index.codec() {
+            IndexCodec::Prod(codec) if *codec.config() == expected => {}
+            IndexCodec::Prod(codec) => {
+                return Err(verify_err(format!(
+                    "manifest codec {expected:?} != the loaded assets' codec {:?}",
+                    codec.config()
+                )));
+            }
+            IndexCodec::Legacy { .. } => {
+                return Err(verify_err(
+                    "manifest records a v4 codec but the image loaded with the legacy codec"
+                        .to_string(),
+                ));
+            }
+        }
     }
     if index.record_count() != manifest.source.table_row_count {
         return Err(verify_err(format!(

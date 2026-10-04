@@ -42,8 +42,9 @@ it. `rand_distr` is not used because its samplers' output may change between its
 
 **Versioning.** Any change to the sampler's output, whether from our code or from a `rand_chacha`
 or `libm` upgrade, bumps `GAUSSIAN_GENERATOR_VERSION`, and that version is recorded with the
-matrices it produced (#166 decides where). The version also covers the generators built on the
-sampler: a codec records one `generator_version`, so a change to how `Rotation::generate`
+matrices it produced: a v4 release keeps it in the header of `rotation.bin` and of `qjl.bin`, and
+in the codec section of `release_manifest.json` (#166). The version also covers the generators
+built on the sampler: a codec records one `generator_version`, so a change to how `Rotation::generate`
 (`src/index/rotation.rs`) or `QjlMatrix::generate` (`src/index/qjl.rs`) turns draws into a matrix,
 such as the rotation's QR or sign canonicalization or the QJL matrix's fill order, bumps the same
 version. Each generator draws from its own `stream_id`, so equal seeds don't make two matrices

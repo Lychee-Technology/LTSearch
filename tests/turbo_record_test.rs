@@ -1,6 +1,9 @@
-use std::mem::size_of;
+use std::mem::{align_of, size_of};
 
-use ltsearch::index::{KnownRecordLayout, TurboHeader, TurboRecord512, TurboRecordRef};
+use ltsearch::index::{
+    EncodedTurboProd, KnownRecordLayout, TurboHeader, TurboProdRecord512, TurboRecord512,
+    TurboRecordRef,
+};
 
 const LAYOUT: KnownRecordLayout = KnownRecordLayout::V3Dim512;
 
@@ -48,6 +51,80 @@ fn record_ref_reads_the_fields_of_the_typed_record() {
         assert_eq!(view.idx(), &record.idx);
         assert_eq!(view.qjl(), &record.qjl);
         assert_eq!(view.gamma(), record.gamma);
+        // v2 and v3 store no norm: those four bytes are reserved.
+        assert_eq!(view.norm(), None);
+    }
+}
+
+/// A code with distinct bytes at both ends of each array.
+fn test_prod_code() -> EncodedTurboProd {
+    let mut encoded = EncodedTurboProd {
+        idx: vec![0; 128],
+        signs: vec![0; 64],
+        gamma: -0.25,
+        norm: 3.5,
+    };
+    encoded.idx[0] = 0xAB;
+    encoded.idx[127] = 0xCD;
+    encoded.signs[0] = 0xFF;
+    encoded.signs[63] = 0x7E;
+    encoded
+}
+
+#[test]
+fn prod_record_is_the_size_and_alignment_of_the_legacy_record() {
+    assert_eq!(size_of::<TurboProdRecord512>(), 208);
+    assert_eq!(align_of::<TurboProdRecord512>(), 8);
+    assert_eq!(size_of::<TurboRecord512>(), 208);
+    assert_eq!(align_of::<TurboRecord512>(), 8);
+    assert_eq!(KnownRecordLayout::V4Dim512.record_size(), 208);
+}
+
+#[test]
+fn prod_record_stores_the_code_it_is_built_from() {
+    let encoded = test_prod_code();
+    let record = TurboProdRecord512::new(0x0102_0304_0506_0708, &encoded).unwrap();
+
+    assert_eq!(record.doc_id, 0x0102_0304_0506_0708);
+    assert_eq!(record.code(), encoded.code());
+}
+
+#[test]
+fn prod_record_file_bytes_are_the_documented_layout() {
+    let encoded = test_prod_code();
+    let record = TurboProdRecord512::new(0x0102_0304_0506_0708, &encoded).unwrap();
+    let bytes = record.as_bytes();
+
+    assert_eq!(bytes.len(), 208);
+    assert_eq!(bytes[0..8], 0x0102_0304_0506_0708u64.to_le_bytes());
+    assert_eq!(bytes[8..136], encoded.idx[..]);
+    assert_eq!(bytes[136..200], encoded.signs[..]);
+    assert_eq!(bytes[200..204], (-0.25f32).to_le_bytes());
+    // The norm is where a v2/v3 record has its reserved bytes.
+    assert_eq!(bytes[204..208], 3.5f32.to_le_bytes());
+
+    let view = TurboRecordRef::new(bytes, KnownRecordLayout::V4Dim512);
+    assert_eq!(view.doc_id(), record.doc_id);
+    assert_eq!(view.idx(), &record.idx);
+    assert_eq!(view.qjl(), &record.signs);
+    assert_eq!(view.gamma(), record.gamma);
+    assert_eq!(view.norm(), Some(3.5));
+}
+
+#[test]
+fn prod_record_rejects_a_code_of_another_length() {
+    let code = test_prod_code();
+    for (idx_len, signs_len) in [(127, 64), (129, 64), (128, 63), (128, 65), (0, 0)] {
+        let encoded = EncodedTurboProd {
+            idx: vec![0; idx_len],
+            signs: vec![0; signs_len],
+            ..code.clone()
+        };
+        assert_eq!(
+            TurboProdRecord512::new(1, &encoded),
+            None,
+            "idx {idx_len}, signs {signs_len}"
+        );
     }
 }
 

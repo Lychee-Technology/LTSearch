@@ -1,14 +1,24 @@
-//! v3 static-release writer.
+//! Static-release writer.
 //!
 //! [`StaticReleaseBuilder`] turns pre-embedded, doc_id-sorted chunks into a
-//! self-describing TurboQuant **v3** static release: the six v2 blobs plus the
-//! v3 sidecars (original doc_id, canonicalized metadata JSON, `MetaExtRecord`)
-//! and a deterministic [`ReleaseManifest`].
+//! self-describing TurboQuant static release: the records, the codec's
+//! assets, the text and title blobs, the sidecars (original doc_id,
+//! canonicalized metadata JSON, `MetaExtRecord`) and a deterministic
+//! [`ReleaseManifest`].
+//!
+//! A [`StaticReleaseFormat`] picks the codec and with it the record layout
+//! and the asset files; everything else is the same in both formats:
+//!
+//! | format | codec              | records              | assets ([file list](release_output_files)) |
+//! |--------|--------------------|----------------------|--------------------------------------------|
+//! | v3     | `Legacy3BitV1`     | `TurboRecord512`     | `centroids.bin`, `projection.bin`          |
+//! | v4     | `TurboQuantProdV1` | `TurboProdRecord512` | `codebook.bin`, `qjl.bin`, `rotation.bin`  |
 //!
 //! Embeddings arrive as a plain `&[Vec<f32>]` with no `Option`: a missing
 //! embedding is unrepresentable here, so re-embedding cannot leak into the
-//! release path. Both writers take their codec parameters from
-//! [`TurboQuantConfig::legacy_v1`], so both versions encode identically.
+//! release path. The v3 format and the v2 writer both take their codec
+//! parameters from [`TurboQuantConfig::legacy_v1`], so both encode
+//! identically.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -19,14 +29,18 @@ use crate::storage::staged_publish::{append_cleanup_failure, StagedDir};
 
 use super::release_manifest::{
     canonical_metadata_json, content_digest, derive_release_id, sha256_hex, CanonicalRow,
-    EmbeddingProfile, InputFingerprint, OutputFile, ReleaseManifest, ReleaseSource,
+    EmbeddingProfile, InputFingerprint, ManifestCodec, OutputFile, ReleaseManifest, ReleaseSource,
     RELEASE_MANIFEST_FILE,
 };
 use super::static_builder::{
     corpus_type_id, encode_turbo_record, legacy_codec_assets, meta_record_bytes,
     stable_hash_doc_id, turbo_record_bytes, StaticChunk,
 };
-use super::{MetaExtRecord, MetaRecord, TurboHeader, TurboQuantConfig};
+use super::{
+    CentroidTable, HeaderCodec, MetaExtRecord, MetaRecord, ProjectionMatrix, TurboHeader,
+    TurboProdRecord512, TurboQuantConfig, TurboQuantProdV1, CODEBOOK_FILE, QJL_FILE, ROTATION_FILE,
+    TURBO_VERSION_V3, TURBO_VERSION_V4,
+};
 
 /// The exact set of `.bin` artifact file names a v3 static release must
 /// contain, in ascending `name` order.
@@ -47,11 +61,231 @@ pub const V3_RELEASE_OUTPUT_FILES: [&str; 9] = [
     "turbo_static_title.bin",
 ];
 
-/// Writes self-describing TurboQuant v3 static releases.
-pub struct StaticReleaseBuilder;
+/// The `.bin` artifact file names of a v4 static release, in ascending `name`
+/// order: [`V3_RELEASE_OUTPUT_FILES`] with the legacy codec's two assets
+/// replaced by the three of `TurboQuantProdV1`.
+pub const V4_RELEASE_OUTPUT_FILES: [&str; 10] = [
+    CODEBOOK_FILE,
+    QJL_FILE,
+    ROTATION_FILE,
+    "turbo_static.bin",
+    "turbo_static_docid.bin",
+    "turbo_static_meta.bin",
+    "turbo_static_meta_ext.bin",
+    "turbo_static_meta_json.bin",
+    "turbo_static_text.bin",
+    "turbo_static_title.bin",
+];
+
+/// The `.bin` files a release of `turbo_version` consists of, in ascending
+/// name order; `None` for a version that isn't a release format. The writer,
+/// the verify layer and the uploader all take their file list from here.
+pub fn release_output_files(turbo_version: u32) -> Option<&'static [&'static str]> {
+    match turbo_version {
+        TURBO_VERSION_V3 => Some(&V3_RELEASE_OUTPUT_FILES),
+        TURBO_VERSION_V4 => Some(&V4_RELEASE_OUTPUT_FILES),
+        _ => None,
+    }
+}
+
+/// The format a static release is written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StaticReleaseFormat {
+    /// `turbo_version` 3: the `Legacy3BitV1` codec of
+    /// [`TurboQuantConfig::legacy_v1`].
+    #[default]
+    V3,
+    /// `turbo_version` 4: the `TurboQuantProdV1` codec this config names.
+    V4(TurboQuantConfig),
+}
+
+impl StaticReleaseFormat {
+    /// The format `name` selects in a `static-build` config: `"v3"`, or
+    /// `"v4"` for [`TurboQuantConfig::prod_v1`].
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "v3" => Some(Self::V3),
+            "v4" => Some(Self::V4(TurboQuantConfig::prod_v1())),
+            _ => None,
+        }
+    }
+
+    pub const fn turbo_version(&self) -> u32 {
+        match self {
+            Self::V3 => TURBO_VERSION_V3,
+            Self::V4(_) => TURBO_VERSION_V4,
+        }
+    }
+
+    /// The config of the codec the format's records are encoded with.
+    pub const fn codec_config(&self) -> TurboQuantConfig {
+        match self {
+            Self::V3 => TurboQuantConfig::legacy_v1(),
+            Self::V4(config) => *config,
+        }
+    }
+}
+
+/// A release's codec with the assets generated for it: everything that
+/// differs between the formats while a release is written.
+enum ReleaseCodec {
+    V3 {
+        config: TurboQuantConfig,
+        centroids: CentroidTable,
+        projection: ProjectionMatrix,
+    },
+    V4(TurboQuantProdV1),
+}
+
+impl ReleaseCodec {
+    fn generate(format: StaticReleaseFormat) -> Result<Self, IndexError> {
+        match format {
+            StaticReleaseFormat::V3 => {
+                let config = format.codec_config();
+                let (centroids, projection) = legacy_codec_assets(&config);
+                Ok(Self::V3 {
+                    config,
+                    centroids,
+                    projection,
+                })
+            }
+            StaticReleaseFormat::V4(config) => {
+                let codec =
+                    TurboQuantProdV1::generate(config).map_err(|error| IndexError::Operation {
+                        message: format!("invalid v4 codec config: {error}"),
+                    })?;
+                if !TurboProdRecord512::holds_codes_of(&codec) {
+                    return Err(IndexError::Operation {
+                        message: format!(
+                            "v4 records hold 128 index bytes and 64 sign bytes, but the codec \
+                             config produces {} and {}",
+                            codec.idx_len(),
+                            codec.signs_len()
+                        ),
+                    });
+                }
+                Ok(Self::V4(codec))
+            }
+        }
+    }
+
+    /// The codec's asset files, by release file name.
+    fn asset_files(&self) -> Vec<(&'static str, Vec<u8>)> {
+        match self {
+            Self::V3 {
+                centroids,
+                projection,
+                ..
+            } => vec![
+                ("centroids.bin", centroids.to_bytes()),
+                ("projection.bin", projection.to_bytes()),
+            ],
+            Self::V4(codec) => vec![
+                (CODEBOOK_FILE, codec.codebook().to_bytes()),
+                (QJL_FILE, codec.qjl().to_bytes()),
+                (ROTATION_FILE, codec.rotation().to_bytes()),
+            ],
+        }
+    }
+
+    /// The `turbo_static.bin` header. A v4 header carries the fingerprint of
+    /// `asset_files`, which ties the records to these assets.
+    fn header(&self, record_count: u64, asset_files: &[(&'static str, Vec<u8>)]) -> TurboHeader {
+        match self {
+            Self::V3 { config, .. } => TurboHeader::new_v3(config.dim, record_count),
+            Self::V4(codec) => {
+                let config = codec.config();
+                let files: Vec<(&str, &[u8])> = asset_files
+                    .iter()
+                    .map(|(name, bytes)| (*name, bytes.as_slice()))
+                    .collect();
+                TurboHeader::new_v4(
+                    config.dim,
+                    record_count,
+                    HeaderCodec {
+                        codec_id: config.codec_id,
+                        fingerprint: config.fingerprint(&files),
+                    },
+                )
+            }
+        }
+    }
+
+    /// Encodes `embedding` and appends its record to `out`. `label` is the
+    /// chunk's doc_id, for error messages.
+    fn append_record(
+        &self,
+        out: &mut Vec<u8>,
+        doc_hash: u64,
+        embedding: &[f32],
+        label: &str,
+    ) -> Result<(), IndexError> {
+        match self {
+            Self::V3 {
+                centroids,
+                projection,
+                ..
+            } => {
+                let record =
+                    encode_turbo_record(doc_hash, embedding, centroids, projection, label)?;
+                out.extend_from_slice(turbo_record_bytes(&record));
+            }
+            Self::V4(codec) => {
+                let encoded = codec
+                    .encode(embedding)
+                    .map_err(|error| IndexError::Operation {
+                        message: format!("failed to encode static chunk {label}: {error}"),
+                    })?;
+                // `generate` checked that the codec's codes fit the record.
+                let record = TurboProdRecord512::new(doc_hash, &encoded).ok_or_else(|| {
+                    IndexError::Operation {
+                        message: format!(
+                            "static chunk {label} produced a code that does not fit a v4 record"
+                        ),
+                    }
+                })?;
+                out.extend_from_slice(record.as_bytes());
+            }
+        }
+        Ok(())
+    }
+
+    fn manifest_codec(&self) -> Result<ManifestCodec, IndexError> {
+        match self {
+            Self::V3 { config, .. } => config
+                .to_v3_codec_metadata()
+                .map(ManifestCodec::V3)
+                .map_err(|error| IndexError::Operation {
+                    message: format!("invalid v3 codec config: {error}"),
+                }),
+            Self::V4(codec) => codec
+                .config()
+                .to_v4_codec_metadata()
+                .map(ManifestCodec::V4)
+                .map_err(|error| IndexError::Operation {
+                    message: format!("invalid v4 codec config: {error}"),
+                }),
+        }
+    }
+}
+
+/// Writes self-describing TurboQuant static releases in one
+/// [`StaticReleaseFormat`]. `default()` writes the default format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StaticReleaseBuilder {
+    format: StaticReleaseFormat,
+}
 
 impl StaticReleaseBuilder {
-    /// Builds a v3 static release into `output_dir`, atomically replacing any
+    pub const fn new(format: StaticReleaseFormat) -> Self {
+        Self { format }
+    }
+
+    pub const fn format(&self) -> StaticReleaseFormat {
+        self.format
+    }
+
+    /// Builds a static release into `output_dir`, atomically replacing any
     /// previous contents, and returns the deterministic [`ReleaseManifest`].
     ///
     /// `chunks` must already be sorted by `doc_id` (Task 6 guarantees this) and
@@ -65,7 +299,8 @@ impl StaticReleaseBuilder {
         profile: &EmbeddingProfile,
         source: &ReleaseSource,
     ) -> Result<ReleaseManifest, IndexError> {
-        let codec_config = TurboQuantConfig::legacy_v1();
+        let turbo_version = self.format.turbo_version();
+        let codec_config = self.format.codec_config();
 
         // --- Step 1: validation ------------------------------------------------
         if chunks.len() != embeddings.len() {
@@ -117,12 +352,12 @@ impl StaticReleaseBuilder {
             .collect();
         detect_hash_collisions(&hashed)?;
 
-        // --- Step 2: codec assets (identical seeds/params to the v2 writer) ----
-        let dim = codec_config.dim;
-        let (centroids, projection) = legacy_codec_assets(&codec_config);
+        // --- Step 2: codec assets (v3: identical seeds/params to the v2 writer) -
+        let codec = ReleaseCodec::generate(self.format)?;
+        let asset_files = codec.asset_files();
 
         // --- Step 3: single-pass byte construction (order == chunk order) ------
-        let mut turbo_static = TurboHeader::new_v3(dim, chunks.len() as u64).to_bytes();
+        let mut turbo_static = codec.header(chunks.len() as u64, &asset_files).to_bytes();
         let mut turbo_static_meta = Vec::new();
         let mut turbo_static_text = Vec::new();
         let mut turbo_static_title = Vec::new();
@@ -133,9 +368,7 @@ impl StaticReleaseBuilder {
 
         for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
             let doc_hash = stable_hash_doc_id(&chunk.doc_id);
-            let record =
-                encode_turbo_record(doc_hash, embedding, &centroids, &projection, &chunk.doc_id)?;
-            turbo_static.extend_from_slice(turbo_record_bytes(&record));
+            codec.append_record(&mut turbo_static, doc_hash, embedding, &chunk.doc_id)?;
 
             let text_offset = turbo_static_text.len() as u64;
             turbo_static_text.extend_from_slice(chunk.text.as_bytes());
@@ -196,7 +429,7 @@ impl StaticReleaseBuilder {
             });
         }
 
-        // --- Step 4: stage-and-write the nine .bin artifacts -------------------
+        // --- Step 4: stage-and-write the .bin artifacts ------------------------
         let staging_base = output_dir.parent().ok_or_else(|| IndexError::Operation {
             message: format!("path {} has no parent", output_dir.display()),
         })?;
@@ -209,24 +442,38 @@ impl StaticReleaseBuilder {
             .into_owned();
         let staged = StagedDir::create(staging_base, &staging_label)?;
 
-        let write_result = write_release_files(
-            staged.path(),
-            &centroids.to_bytes(),
-            &projection.to_bytes(),
-            &turbo_static,
-            &turbo_static_meta,
-            &turbo_static_text,
-            &turbo_static_title,
-            &turbo_static_meta_ext,
-            &turbo_static_docid,
-            &turbo_static_meta_json,
-        );
+        let mut files: Vec<(&str, &[u8])> = asset_files
+            .iter()
+            .map(|(name, bytes)| (*name, bytes.as_slice()))
+            .collect();
+        files.extend([
+            ("turbo_static.bin", turbo_static.as_slice()),
+            ("turbo_static_meta.bin", turbo_static_meta.as_slice()),
+            ("turbo_static_text.bin", turbo_static_text.as_slice()),
+            ("turbo_static_title.bin", turbo_static_title.as_slice()),
+            (
+                "turbo_static_meta_ext.bin",
+                turbo_static_meta_ext.as_slice(),
+            ),
+            ("turbo_static_docid.bin", turbo_static_docid.as_slice()),
+            (
+                "turbo_static_meta_json.bin",
+                turbo_static_meta_json.as_slice(),
+            ),
+        ]);
+        let write_result = files
+            .iter()
+            .try_for_each(|(name, bytes)| write_file(&staged.path().join(name), bytes));
         if let Err(error) = write_result {
             return Err(append_cleanup_failure(error, staged.abort()));
         }
 
         // --- Step 5: hash the staged files (name-ascending, manifest excluded) -
-        let outputs = match collect_outputs(staged.path()) {
+        // Reading the format's own file list back fails the build if the
+        // files written above ever stop matching it.
+        let output_files =
+            release_output_files(turbo_version).expect("every release format has a file list");
+        let outputs = match collect_outputs(staged.path(), output_files) {
             Ok(outputs) => outputs,
             Err(error) => return Err(append_cleanup_failure(error, staged.abort())),
         };
@@ -236,13 +483,12 @@ impl StaticReleaseBuilder {
             doc_count: chunks.len() as u64,
             content_digest: content_digest(&canonical_rows),
         };
-        let codec = codec_config
-            .to_v3_codec_metadata()
-            .map_err(|error| IndexError::Operation {
-                message: format!("invalid v3 codec config: {error}"),
-            })?;
+        let codec = match codec.manifest_codec() {
+            Ok(codec) => codec,
+            Err(error) => return Err(append_cleanup_failure(error, staged.abort())),
+        };
         let release_id = derive_release_id(
-            3,
+            turbo_version,
             profile,
             &codec,
             &input_fingerprint.content_digest,
@@ -252,7 +498,7 @@ impl StaticReleaseBuilder {
         // --- Step 7: assemble + serialize the manifest (compact, deterministic)
         let manifest = ReleaseManifest {
             manifest_schema_version: 1,
-            turbo_version: 3,
+            turbo_version,
             release_id,
             source: source.clone(),
             embedding_profile: profile.clone(),
@@ -329,53 +575,16 @@ fn meta_ext_record_bytes(record: &MetaExtRecord) -> &[u8] {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_release_files(
-    staged_dir: &Path,
-    centroids: &[u8],
-    projection: &[u8],
-    turbo_static: &[u8],
-    turbo_static_meta: &[u8],
-    turbo_static_text: &[u8],
-    turbo_static_title: &[u8],
-    turbo_static_meta_ext: &[u8],
-    turbo_static_docid: &[u8],
-    turbo_static_meta_json: &[u8],
-) -> Result<(), IndexError> {
-    write_file(&staged_dir.join("centroids.bin"), centroids)?;
-    write_file(&staged_dir.join("projection.bin"), projection)?;
-    write_file(&staged_dir.join("turbo_static.bin"), turbo_static)?;
-    write_file(&staged_dir.join("turbo_static_meta.bin"), turbo_static_meta)?;
-    write_file(&staged_dir.join("turbo_static_text.bin"), turbo_static_text)?;
-    write_file(
-        &staged_dir.join("turbo_static_title.bin"),
-        turbo_static_title,
-    )?;
-    write_file(
-        &staged_dir.join("turbo_static_meta_ext.bin"),
-        turbo_static_meta_ext,
-    )?;
-    write_file(
-        &staged_dir.join("turbo_static_docid.bin"),
-        turbo_static_docid,
-    )?;
-    write_file(
-        &staged_dir.join("turbo_static_meta_json.bin"),
-        turbo_static_meta_json,
-    )
-}
-
-/// Hashes every `.bin` in the staged directory into `OutputFile`s sorted by
-/// name ascending. Excludes `release_manifest.json`, which is written after and
-/// cannot describe its own hash.
-fn collect_outputs(staged_dir: &Path) -> Result<Vec<OutputFile>, IndexError> {
-    let names = V3_RELEASE_OUTPUT_FILES;
+/// Hashes the `names` files in the staged directory into `OutputFile`s sorted
+/// by name ascending. `release_manifest.json` is never among them: it is
+/// written after and cannot describe its own hash.
+fn collect_outputs(staged_dir: &Path, names: &[&str]) -> Result<Vec<OutputFile>, IndexError> {
     // `names` is authored in ascending order; assert it so a future edit that
     // breaks the ordering fails loudly instead of silently changing release_id.
     debug_assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
 
     let mut outputs = Vec::with_capacity(names.len());
-    for name in names {
+    for &name in names {
         let bytes = fs::read(staged_dir.join(name)).map_err(|error| IndexError::Operation {
             message: format!("failed to read staged output {name}: {error}"),
         })?;

@@ -5,15 +5,34 @@ use std::path::Path;
 use memmap2::Mmap;
 
 use super::assets::{AssetError, CentroidTable, ProjectionMatrix};
-use super::codec_config::TurboQuantConfig;
-use super::header::{KnownRecordLayout, TurboHeader, TurboHeaderError, TURBO_VERSION_V3};
+use super::codebook::{LloydMaxCodebook, CODEBOOK_FILE};
+use super::codec_config::{NormPolicy, TurboCodecId, TurboQuantConfig, CODEC_FINGERPRINT_LEN};
+use super::header::{KnownRecordLayout, TurboHeader, TurboHeaderError};
 use super::meta::{MetaRecord, META_RECORD_SIZE};
 use super::meta_ext::{MetaExtRecord, META_EXT_RECORD_SIZE};
-use super::record::{TurboRecord512, TurboRecordRef, TurboRecordSlice};
+use super::qjl::{QjlMatrix, QJL_FILE};
+use super::record::{TurboProdRecord512, TurboRecord512, TurboRecordRef, TurboRecordSlice};
+use super::rotation::{Rotation, ROTATION_FILE};
+use super::turbo_prod::{TurboProdError, TurboQuantProdV1};
 
 const TURBO_STATIC_FILE: &str = "turbo_static.bin";
 const META_FILE: &str = "turbo_static_meta.bin";
 const META_EXT_FILE: &str = "turbo_static_meta_ext.bin";
+const CENTROIDS_FILE: &str = "centroids.bin";
+const PROJECTION_FILE: &str = "projection.bin";
+
+/// The codec an index's records are scored with, assembled from the asset
+/// files stored next to them.
+#[derive(Debug)]
+pub enum IndexCodec {
+    /// v2 and v3: `Legacy3BitV1`.
+    Legacy {
+        centroids: CentroidTable,
+        projection: ProjectionMatrix,
+    },
+    /// v4.
+    Prod(TurboQuantProdV1),
+}
 
 #[derive(Debug)]
 pub struct MmapIndex {
@@ -23,13 +42,12 @@ pub struct MmapIndex {
     meta_mmap: Mmap,
     text_mmap: Mmap,
     title_mmap: Mmap,
-    // v3-only sidecars carrying the original string doc_id and canonicalized
-    // metadata JSON. `None` for v2 images, which have no such files.
+    // Sidecars carrying the original string doc_id and canonicalized metadata
+    // JSON. `None` for v2 images, which have no such files.
     meta_ext_mmap: Option<Mmap>,
     docid_mmap: Option<Mmap>,
     meta_json_mmap: Option<Mmap>,
-    centroids: CentroidTable,
-    projection: ProjectionMatrix,
+    codec: IndexCodec,
 }
 
 #[derive(Debug)]
@@ -82,6 +100,22 @@ pub enum MmapIndexError {
     MisalignedRecords {
         file: &'static str,
         align: usize,
+    },
+    /// The v4 asset files parse, but aren't the assets of one
+    /// `TurboQuantProdV1` codec for the header's dim.
+    Codec(TurboProdError),
+    /// The v4 assets are a valid codec whose codes aren't the size of the
+    /// record's `idx` and `signs` fields.
+    UnsupportedCodeLayout {
+        idx_len: usize,
+        signs_len: usize,
+    },
+    /// The asset files aren't the ones the v4 records were encoded with.
+    CodecFingerprintMismatch {
+        /// From the `turbo_static.bin` header.
+        expected: [u8; CODEC_FINGERPRINT_LEN],
+        /// Of the asset files found.
+        actual: [u8; CODEC_FINGERPRINT_LEN],
     },
 }
 
@@ -143,6 +177,19 @@ impl fmt::Display for MmapIndexError {
                 f,
                 "{file} records are not mapped at a {align}-byte aligned address"
             ),
+            Self::Codec(err) => write!(f, "invalid codec assets: {err}"),
+            Self::UnsupportedCodeLayout { idx_len, signs_len } => write!(
+                f,
+                "the codec's codes ({idx_len} index bytes, {signs_len} sign bytes) are not the \
+                 128 and 64 bytes a v4 record holds"
+            ),
+            Self::CodecFingerprintMismatch { expected, actual } => write!(
+                f,
+                "codec fingerprint mismatch: {TURBO_STATIC_FILE} was encoded with {}, the asset \
+                 files are {}; the records and the assets are not from the same build",
+                hex::encode(expected),
+                hex::encode(actual)
+            ),
         }
     }
 }
@@ -161,8 +208,6 @@ impl MmapIndex {
         let meta_path = dir.join(META_FILE);
         let text_path = dir.join("turbo_static_text.bin");
         let title_path = dir.join("turbo_static_title.bin");
-        let centroids_path = dir.join("centroids.bin");
-        let projection_path = dir.join("projection.bin");
 
         // Parse the header (and reject unsupported versions/layouts) before
         // touching the other blobs, so a legacy v1 image — which has no
@@ -196,6 +241,10 @@ impl MmapIndex {
             KnownRecordLayout::V2Dim512 | KnownRecordLayout::V3Dim512 => {
                 ensure_aligned::<TurboRecord512>(TURBO_STATIC_FILE, &bin_mmap[TurboHeader::SIZE..])?
             }
+            KnownRecordLayout::V4Dim512 => ensure_aligned::<TurboProdRecord512>(
+                TURBO_STATIC_FILE,
+                &bin_mmap[TurboHeader::SIZE..],
+            )?,
         }
 
         if meta_mmap.len() % META_RECORD_SIZE != 0 {
@@ -214,10 +263,14 @@ impl MmapIndex {
         }
         ensure_aligned::<MetaRecord>(META_FILE, &meta_mmap)?;
 
-        // v3 images ship three additional sidecars carrying the original string
-        // doc_id and canonicalized metadata JSON. v2 images have none of these
-        // files, so the branch keeps the legacy load path byte-for-byte.
-        let (meta_ext_mmap, docid_mmap, meta_json_mmap) = if header.version() == TURBO_VERSION_V3 {
+        // v3 and v4 images ship three additional sidecars carrying the original
+        // string doc_id and canonicalized metadata JSON. v2 images have none of
+        // these files, so the branch keeps the legacy load path byte-for-byte.
+        let has_doc_sidecars = matches!(
+            layout,
+            KnownRecordLayout::V3Dim512 | KnownRecordLayout::V4Dim512
+        );
+        let (meta_ext_mmap, docid_mmap, meta_json_mmap) = if has_doc_sidecars {
             let meta_ext_path = dir.join(META_EXT_FILE);
             let docid_path = dir.join("turbo_static_docid.bin");
             let meta_json_path = dir.join("turbo_static_meta_json.bin");
@@ -280,55 +333,12 @@ impl MmapIndex {
             (None, None, None)
         };
 
-        let centroids_mmap = mmap_file(&centroids_path)?;
-        let projection_mmap = mmap_file(&projection_path)?;
-
-        let centroids =
-            CentroidTable::from_bytes(&centroids_mmap).map_err(|source| MmapIndexError::Asset {
-                file: "centroids.bin",
-                source,
-            })?;
-        if centroids.dim() != header.dim() {
-            return Err(MmapIndexError::AssetDimensionMismatch {
-                file: "centroids.bin",
-                expected: header.dim(),
-                actual: centroids.dim(),
-            });
-        }
-        // A legacy record stores a 2-bit centroid index per dimension, and the
-        // scorer reads exactly that many centroids. A larger table would load
-        // and then be scored against the wrong centroids.
-        let legacy_centroids_per_dim = TurboQuantConfig::legacy_v1().centroids_per_dim();
-        if centroids.centroids_per_dim() != legacy_centroids_per_dim {
-            return Err(MmapIndexError::UnsupportedLegacyAsset {
-                file: "centroids.bin",
-                field: "centroids_per_dim",
-                expected: legacy_centroids_per_dim,
-                actual: centroids.centroids_per_dim(),
-            });
-        }
-
-        let projection = ProjectionMatrix::from_bytes(&projection_mmap).map_err(|source| {
-            MmapIndexError::Asset {
-                file: "projection.bin",
-                source,
+        let codec = match layout {
+            KnownRecordLayout::V2Dim512 | KnownRecordLayout::V3Dim512 => {
+                load_legacy_codec(dir, &header)?
             }
-        })?;
-        if projection.input_dim() != header.dim() {
-            return Err(MmapIndexError::AssetDimensionMismatch {
-                file: "projection.bin",
-                expected: header.dim(),
-                actual: projection.input_dim(),
-            });
-        }
-        let expected_projection_output = header.dim();
-        if projection.output_dim() != expected_projection_output {
-            return Err(MmapIndexError::AssetDimensionMismatch {
-                file: "projection.bin",
-                expected: expected_projection_output,
-                actual: projection.output_dim(),
-            });
-        }
+            KnownRecordLayout::V4Dim512 => load_prod_codec(dir, &header)?,
+        };
 
         Ok(Self {
             header,
@@ -340,8 +350,7 @@ impl MmapIndex {
             meta_ext_mmap,
             docid_mmap,
             meta_json_mmap,
-            centroids,
-            projection,
+            codec,
         })
     }
 
@@ -393,12 +402,14 @@ impl MmapIndex {
         self.layout
     }
 
-    pub fn centroids(&self) -> &CentroidTable {
-        &self.centroids
+    pub fn codec(&self) -> &IndexCodec {
+        &self.codec
     }
 
-    pub fn projection(&self) -> &ProjectionMatrix {
-        &self.projection
+    /// Whether the image carries the original doc_id and metadata JSON
+    /// sidecars: v3 and v4 do, v2 doesn't.
+    pub fn has_doc_sidecars(&self) -> bool {
+        self.meta_ext_mmap.is_some()
     }
 
     pub fn record(&self, index: u64) -> TurboRecordRef<'_> {
@@ -424,6 +435,14 @@ impl MmapIndex {
                 // `TurboRecord512`, which has no invalid bit patterns.
                 let records = unsafe { std::slice::from_raw_parts(ptr, len) };
                 TurboRecordSlice::V2Dim512(records)
+            }
+            KnownRecordLayout::V4Dim512 => {
+                let bytes = &self.bin_mmap[TurboHeader::SIZE..];
+                let ptr = bytes.as_ptr() as *const TurboProdRecord512;
+                let len = self.header.record_count() as usize;
+                // Safety: as above, for `TurboProdRecord512`.
+                let records = unsafe { std::slice::from_raw_parts(ptr, len) };
+                TurboRecordSlice::V4Dim512(records)
             }
         }
     }
@@ -479,6 +498,118 @@ impl MmapIndex {
             Ok(index) => Ok(index),
             Err(error) => Err(error.clone()),
         }
+    }
+}
+
+/// Loads the legacy codec's `centroids.bin` and `projection.bin`.
+fn load_legacy_codec(dir: &Path, header: &TurboHeader) -> Result<IndexCodec, MmapIndexError> {
+    let centroids_mmap = mmap_file(&dir.join(CENTROIDS_FILE))?;
+    let projection_mmap = mmap_file(&dir.join(PROJECTION_FILE))?;
+
+    let centroids =
+        CentroidTable::from_bytes(&centroids_mmap).map_err(|source| MmapIndexError::Asset {
+            file: CENTROIDS_FILE,
+            source,
+        })?;
+    if centroids.dim() != header.dim() {
+        return Err(MmapIndexError::AssetDimensionMismatch {
+            file: CENTROIDS_FILE,
+            expected: header.dim(),
+            actual: centroids.dim(),
+        });
+    }
+    // A legacy record stores a 2-bit centroid index per dimension, and the
+    // scorer reads exactly that many centroids. A larger table would load
+    // and then be scored against the wrong centroids.
+    let legacy_centroids_per_dim = TurboQuantConfig::legacy_v1().centroids_per_dim();
+    if centroids.centroids_per_dim() != legacy_centroids_per_dim {
+        return Err(MmapIndexError::UnsupportedLegacyAsset {
+            file: CENTROIDS_FILE,
+            field: "centroids_per_dim",
+            expected: legacy_centroids_per_dim,
+            actual: centroids.centroids_per_dim(),
+        });
+    }
+
+    let projection =
+        ProjectionMatrix::from_bytes(&projection_mmap).map_err(|source| MmapIndexError::Asset {
+            file: PROJECTION_FILE,
+            source,
+        })?;
+    if projection.input_dim() != header.dim() {
+        return Err(MmapIndexError::AssetDimensionMismatch {
+            file: PROJECTION_FILE,
+            expected: header.dim(),
+            actual: projection.input_dim(),
+        });
+    }
+    let expected_projection_output = header.dim();
+    if projection.output_dim() != expected_projection_output {
+        return Err(MmapIndexError::AssetDimensionMismatch {
+            file: PROJECTION_FILE,
+            expected: expected_projection_output,
+            actual: projection.output_dim(),
+        });
+    }
+
+    Ok(IndexCodec::Legacy {
+        centroids,
+        projection,
+    })
+}
+
+/// Loads the `TurboQuantProdV1` codec of a v4 image from `rotation.bin`,
+/// `codebook.bin` and `qjl.bin`.
+///
+/// The loader never reads the release manifest: the query side maps a
+/// directory of files, and the manifest belongs to the publish path. The
+/// codec config is therefore read back from the assets' own headers, and two
+/// checks stand in for the manifest. [`TurboQuantProdV1::from_assets`]
+/// requires the three assets to agree with each other and with the header's
+/// dim. The header's fingerprint then requires them to be, byte for byte,
+/// the assets the records were encoded with.
+fn load_prod_codec(dir: &Path, header: &TurboHeader) -> Result<IndexCodec, MmapIndexError> {
+    let rotation_mmap = mmap_file(&dir.join(ROTATION_FILE))?;
+    let codebook_mmap = mmap_file(&dir.join(CODEBOOK_FILE))?;
+    let qjl_mmap = mmap_file(&dir.join(QJL_FILE))?;
+
+    let asset_error = |file| move |source| MmapIndexError::Asset { file, source };
+    let rotation = Rotation::from_bytes(&rotation_mmap).map_err(asset_error(ROTATION_FILE))?;
+    let codebook =
+        LloydMaxCodebook::from_bytes(&codebook_mmap).map_err(asset_error(CODEBOOK_FILE))?;
+    let qjl = QjlMatrix::from_bytes(&qjl_mmap).map_err(asset_error(QJL_FILE))?;
+
+    let config = TurboQuantConfig {
+        codec_id: TurboCodecId::TurboQuantProdV1,
+        dim: header.dim(),
+        mse_bits: codebook.bits(),
+        qjl_dim: qjl.qjl_dim(),
+        mse_seed: rotation.seed(),
+        qjl_seed: qjl.seed(),
+        generator_version: rotation.generator_version(),
+        norm_policy: NormPolicy::NormalizeAndStore,
+    };
+    let codec = TurboQuantProdV1::from_assets(config, rotation, codebook, qjl)
+        .map_err(MmapIndexError::Codec)?;
+    if !TurboProdRecord512::holds_codes_of(&codec) {
+        return Err(MmapIndexError::UnsupportedCodeLayout {
+            idx_len: codec.idx_len(),
+            signs_len: codec.signs_len(),
+        });
+    }
+
+    let actual = config.fingerprint(&[
+        (ROTATION_FILE, &rotation_mmap),
+        (CODEBOOK_FILE, &codebook_mmap),
+        (QJL_FILE, &qjl_mmap),
+    ]);
+    match header.codec_fingerprint() {
+        Some(expected) if expected == actual => Ok(IndexCodec::Prod(codec)),
+        expected => Err(MmapIndexError::CodecFingerprintMismatch {
+            // `TurboHeader` only holds a v4 header with a fingerprint.
+            expected: expected.unwrap_or_default(),
+            actual,
+        }),
     }
 }
 

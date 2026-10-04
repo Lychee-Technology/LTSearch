@@ -24,7 +24,7 @@ use std::sync::Arc;
 use ltsearch::embedding::FixedEmbeddingGenerator;
 use ltsearch::index::{
     sha256_hex, CentroidTable, EmbeddingProfile, MmapIndex, ProjectionMatrix, ReleaseSource,
-    StaticChunk, StaticIndexBuilder, StaticReleaseBuilder,
+    StaticChunk, StaticIndexBuilder, StaticReleaseBuilder, StaticReleaseFormat,
 };
 use ltsearch::models::{CorpusType, IndexManifest};
 use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
@@ -171,7 +171,7 @@ fn v3_release_bytes_and_release_id_are_pinned() {
     let output = dir.path().join("release");
     let (chunks, embeddings) = fixture();
 
-    let manifest = StaticReleaseBuilder
+    let manifest = StaticReleaseBuilder::new(StaticReleaseFormat::V3)
         .build_release(
             &output,
             &chunks,
@@ -220,7 +220,7 @@ fn v3_search_ranking_and_scores_are_pinned() {
     let output = dir.path().join("release");
     let (chunks, embeddings) = fixture();
 
-    StaticReleaseBuilder
+    StaticReleaseBuilder::new(StaticReleaseFormat::V3)
         .build_release(
             &output,
             &chunks,

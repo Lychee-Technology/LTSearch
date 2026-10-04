@@ -1,4 +1,5 @@
-//! Task 7: `run_static_build` CLI 重接线——从 pin 版本的 Lance 快照源产出 v3 release。
+//! Task 7: `run_static_build` CLI 重接线——从 pin 版本的 Lance 快照源产出 v3 release;
+//! 配置带 `"release_format": "v4"` 时产出 v4 release(#166)。
 //!
 //! Fixture 复用 `lance_source_test.rs` 的写法:用 arrow + lancedb 建一个含 512 维
 //! `FixedSizeList<Float32,512>` 的 `documents` 表,捕获 `table.version()`,写 config
@@ -17,7 +18,8 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use ltsearch::app::run_static_build;
-use ltsearch::index::MmapIndex;
+use ltsearch::index::{MmapIndex, V3_RELEASE_OUTPUT_FILES, V4_RELEASE_OUTPUT_FILES};
+use ltsearch::indexing::verify_release_dir;
 use tempfile::TempDir;
 
 struct FixtureRow {
@@ -88,9 +90,9 @@ fn embedding_for(base: f32) -> Vec<f32> {
     (0..512).map(|i| base + (i as f32) * 0.0009765625).collect()
 }
 
-#[tokio::test]
-async fn run_static_build_builds_v3_release_from_lance_dataset() {
-    let dir = TempDir::new().unwrap();
+/// 建两行的 Lance fixture 并写出 static-build 配置;`release_format` 为 `None` 时配置里
+/// 不带该字段(即 #166 之前的配置原样)。返回 (config 路径, 输出目录)。
+async fn write_fixture_and_config(dir: &TempDir, release_format: Option<&str>) -> (String, String) {
     let dataset_path = dir.path().join("lance");
     let dataset_path = dataset_path.to_str().unwrap().to_string();
     let out_dir = dir.path().join("out");
@@ -114,26 +116,53 @@ async fn run_static_build_builds_v3_release_from_lance_dataset() {
     let table = create_documents_table(&dataset_path, 512, &rows).await;
     let version = table.version().await.unwrap();
 
-    let cfg_json = serde_json::json!({
+    let mut cfg = serde_json::json!({
         "dataset_path": dataset_path,
         "table_version": version,
         "corpus_type": "legal",
         "embedding_profile": { "model_id": "jina-v5-nano/512", "dim": 512 }
-    })
-    .to_string();
+    });
+    if let Some(release_format) = release_format {
+        cfg["release_format"] = serde_json::json!(release_format);
+    }
     let cfg_path = dir.path().join("config.json");
-    std::fs::write(&cfg_path, cfg_json).unwrap();
+    std::fs::write(&cfg_path, cfg.to_string()).unwrap();
     let cfg_path = cfg_path.to_str().unwrap().to_string();
+
+    (cfg_path, out_dir)
+}
+
+/// 目录下的文件名,升序。
+fn file_names(dir: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn run_static_build_builds_v3_release_from_lance_dataset() {
+    let dir = TempDir::new().unwrap();
+    // 不带 release_format:缺省格式仍是 v3(改缺省属于 #169)。
+    let (cfg_path, out_dir) = write_fixture_and_config(&dir, None).await;
 
     let summary = run_static_build(["--config", &cfg_path, "--output", &out_dir])
         .await
         .expect("static build must succeed");
 
     // 输出目录含全部 10 个文件(9 .bin + release_manifest.json)。
-    let file_count = std::fs::read_dir(&out_dir).unwrap().count();
-    assert_eq!(file_count, 10, "expected 9 .bin + release_manifest.json");
+    let mut expected: Vec<&str> = V3_RELEASE_OUTPUT_FILES.to_vec();
+    expected.push("release_manifest.json");
+    expected.sort_unstable();
+    assert_eq!(file_names(&out_dir), expected);
+    assert_eq!(
+        expected.len(),
+        10,
+        "expected 9 .bin + release_manifest.json"
+    );
     let manifest_path = std::path::Path::new(&out_dir).join("release_manifest.json");
-    assert!(manifest_path.exists());
 
     // 摘要必须携带非空、且与 manifest 一致的 release_id。
     let manifest: serde_json::Value =
@@ -144,9 +173,69 @@ async fn run_static_build_builds_v3_release_from_lance_dataset() {
         summary.contains(release_id),
         "summary must contain release_id {release_id}: {summary}"
     );
+    assert!(summary.contains("format v3"), "summary: {summary}");
+    assert_eq!(manifest["turbo_version"], 3);
 
     // 产物是可加载的 v3 image。
     let index = MmapIndex::load(std::path::Path::new(&out_dir)).expect("v3 image must load");
     assert_eq!(index.version(), 3);
     assert_eq!(index.record_count(), 2);
+}
+
+#[tokio::test]
+async fn run_static_build_builds_v4_release_when_the_config_selects_it() {
+    let dir = TempDir::new().unwrap();
+    let (cfg_path, out_dir) = write_fixture_and_config(&dir, Some("v4")).await;
+
+    let summary = run_static_build(["--config", &cfg_path, "--output", &out_dir])
+        .await
+        .expect("static build must succeed");
+
+    // 输出目录含全部 11 个文件(10 .bin + release_manifest.json)。
+    let mut expected: Vec<&str> = V4_RELEASE_OUTPUT_FILES.to_vec();
+    expected.push("release_manifest.json");
+    expected.sort_unstable();
+    assert_eq!(file_names(&out_dir), expected);
+    assert_eq!(
+        expected.len(),
+        11,
+        "expected 10 .bin + release_manifest.json"
+    );
+
+    // 产物通过 activate 用的同一套校验,manifest 记的是 v4 与完整 codec 配置。
+    let manifest = verify_release_dir(
+        std::path::Path::new(&out_dir),
+        Some("jina-v5-nano/512"),
+        Some(512),
+    )
+    .expect("v4 release must verify");
+    assert_eq!(manifest.turbo_version, 4);
+    assert!(
+        summary.contains(&manifest.release_id),
+        "summary must contain release_id {}: {summary}",
+        manifest.release_id
+    );
+    assert!(summary.contains("format v4"), "summary: {summary}");
+
+    // 产物是可加载的 v4 image。
+    let index = MmapIndex::load(std::path::Path::new(&out_dir)).expect("v4 image must load");
+    assert_eq!(index.version(), 4);
+    assert_eq!(index.record_count(), 2);
+}
+
+#[tokio::test]
+async fn run_static_build_rejects_an_unknown_release_format() {
+    let dir = TempDir::new().unwrap();
+    let (cfg_path, out_dir) = write_fixture_and_config(&dir, Some("v5")).await;
+
+    let error = run_static_build(["--config", &cfg_path, "--output", &out_dir])
+        .await
+        .expect_err("an unknown release_format must not fall back to a default")
+        .to_string();
+    assert!(
+        error.contains(r#"release_format must be "v3" or "v4", got "v5""#),
+        "{error}"
+    );
+    // 配置在读数据源之前就被拒绝,什么都没写出。
+    assert!(!std::path::Path::new(&out_dir).exists());
 }

@@ -64,12 +64,15 @@
 //! | 20     | 4           | `generator_version` (u32)               |
 //! | 24     | 4·m·d       | S as row-major f32, `S[j][i]` at `j·d + i` |
 //!
-//! The release file name and placement belong to #166.
+//! A v4 static release stores it as [`QJL_FILE`].
 
 use std::f64::consts::FRAC_PI_2;
 
 use super::assets::{parse_values, write_values, AssetError};
 use super::gaussian::{StandardNormalStream, GAUSSIAN_GENERATOR_VERSION};
+
+/// The QJL matrix's file name in a v4 static release.
+pub const QJL_FILE: &str = "qjl.bin";
 
 const QJL_MAGIC: [u8; 4] = *b"TQJL";
 const QJL_HEADER_SIZE: usize = 24;

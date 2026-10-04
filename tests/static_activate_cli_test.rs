@@ -4,6 +4,9 @@
 //! SQLite `static_release_head` 行可经 `StaticReleaseHead::from_json` 解析且 release_id
 //! 与 manifest 一致。
 //!
+//! v4 release(`"release_format": "v4"`)走同一条路径:验证与安装按 manifest 的
+//! `turbo_version` 选文件集(#166)。
+//!
 //! Fixture 复用 `static_release_cli_test.rs` 的 Lance 建表写法。
 
 // `ltsearch::app` 仅在 local profile 下编译。
@@ -18,6 +21,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use ltsearch::app::{run_static_activate, run_static_build};
+use ltsearch::index::{MmapIndex, V4_RELEASE_OUTPUT_FILES};
 use ltsearch::local::{SqliteDb, SqliteStaticReleaseStore};
 use ltsearch::storage::StaticReleaseStore;
 use tempfile::TempDir;
@@ -86,9 +90,15 @@ fn embedding_for(base: f32) -> Vec<f32> {
     (0..512).map(|i| base + (i as f32) * 0.0009765625).collect()
 }
 
-/// Builds a real v3 release into `release_dir` via `run_static_build`, reusing the
-/// Lance fixture. Returns the built release's `release_id` (read from the manifest).
-async fn build_v3_release_via_cli(work: &TempDir, release_dir: &std::path::Path) -> String {
+/// Builds a real release into `release_dir` via `run_static_build`, reusing the
+/// Lance fixture: v3 when `release_format` is `None` (the config then carries no
+/// such field), otherwise the named format. Returns the built release's
+/// `release_id` (read from the manifest).
+async fn build_release_via_cli(
+    work: &TempDir,
+    release_dir: &std::path::Path,
+    release_format: Option<&str>,
+) -> String {
     let dataset_path = work.path().join("lance");
     let dataset_path = dataset_path.to_str().unwrap().to_string();
 
@@ -118,15 +128,17 @@ async fn build_v3_release_via_cli(work: &TempDir, release_dir: &std::path::Path)
         .await
         .unwrap();
 
-    let cfg_json = serde_json::json!({
+    let mut cfg = serde_json::json!({
         "dataset_path": dataset_path,
         "table_version": version,
         "corpus_type": "legal",
         "embedding_profile": { "model_id": "jina-v5-nano/512", "dim": 512 }
-    })
-    .to_string();
+    });
+    if let Some(release_format) = release_format {
+        cfg["release_format"] = serde_json::json!(release_format);
+    }
     let cfg_path = work.path().join("config.json");
-    std::fs::write(&cfg_path, cfg_json).unwrap();
+    std::fs::write(&cfg_path, cfg.to_string()).unwrap();
 
     run_static_build([
         "--config",
@@ -150,7 +162,7 @@ async fn run_static_activate_installs_and_flips_pointer() {
     let root = work.path().join("root");
     let release = work.path().join("release");
 
-    let release_id = build_v3_release_via_cli(&work, &release).await;
+    let release_id = build_release_via_cli(&work, &release, None).await;
 
     let summary = run_static_activate([
         "--release",
@@ -181,6 +193,48 @@ async fn run_static_activate_installs_and_flips_pointer() {
     let db = SqliteDb::open(root.join("ltsearch.db")).unwrap();
     let store = SqliteStaticReleaseStore::new(db);
     let head = store
+        .load_active_release()
+        .expect("static release head must load")
+        .expect("static/_head pointer row must exist after activation");
+    assert_eq!(head.release_id, release_id);
+}
+
+#[tokio::test]
+async fn run_static_activate_installs_a_v4_release() {
+    let work = TempDir::new().unwrap();
+    let root = work.path().join("root");
+    let release = work.path().join("release");
+
+    let release_id = build_release_via_cli(&work, &release, Some("v4")).await;
+
+    let summary = run_static_activate([
+        "--release",
+        release.to_str().unwrap(),
+        "--root",
+        root.to_str().unwrap(),
+        "--expect-model-id",
+        "jina-v5-nano/512",
+        "--expect-dim",
+        "512",
+    ])
+    .await
+    .expect("static activate must accept a v4 release");
+    assert!(summary.contains("activated"), "summary: {summary}");
+    assert!(summary.contains(&release_id), "summary: {summary}");
+
+    // 受管存储里是完整的 v4 文件集(含三个 codec asset),且 query 侧的加载路径
+    // (`MmapIndex::load`)能把它读成 v4 image。
+    let installed = root.join("static/releases").join(&release_id);
+    for name in V4_RELEASE_OUTPUT_FILES {
+        assert!(installed.join(name).exists(), "{name} must be installed");
+    }
+    assert!(installed.join("release_manifest.json").exists());
+    let index = MmapIndex::load(&installed).expect("installed v4 release must load");
+    assert_eq!(index.version(), 4);
+    assert_eq!(index.record_count(), 2);
+
+    let db = SqliteDb::open(root.join("ltsearch.db")).unwrap();
+    let head = SqliteStaticReleaseStore::new(db)
         .load_active_release()
         .expect("static release head must load")
         .expect("static/_head pointer row must exist after activation");

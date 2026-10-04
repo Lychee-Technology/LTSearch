@@ -515,11 +515,10 @@ fn mmap_index_exposes_typed_record_slice() {
 
     let index = MmapIndex::load(&dir).unwrap();
 
-    match index.records() {
-        TurboRecordSlice::V2Dim512(records) => {
-            assert_eq!(records.len(), 2);
-            assert_eq!(records[0].doc_id, 11);
-            assert!((records[1].gamma - 0.75).abs() < f32::EPSILON);
-        }
-    }
+    let TurboRecordSlice::V2Dim512(records) = index.records() else {
+        panic!("a v2 index holds legacy records");
+    };
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].doc_id, 11);
+    assert!((records[1].gamma - 0.75).abs() < f32::EPSILON);
 }
