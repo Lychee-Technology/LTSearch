@@ -89,7 +89,8 @@ pub struct StaticActivationResult {
 ///
 /// 1. Parse `release_manifest.json` into a [`ReleaseManifest`].
 /// 2. `manifest_schema_version == 1`, `turbo_version` is 3 or 4, and the
-///    `codec` section is the one that version writes.
+///    `codec` section is the one that version writes: for v3 exactly the
+///    legacy codec's, for v4 a config this build can decode.
 /// 3. `outputs[]` names exactly that version's artifact files
 ///    (name-ascending), then recompute every entry's `sha256` + `size_bytes`
 ///    from disk and compare field-by-field. Pinning the set is what stops a
@@ -150,7 +151,23 @@ pub fn verify_release_dir(
         )));
     }
     let v4_config = match &manifest.codec {
-        ManifestCodec::V3(_) => None,
+        // Every v3 release is written with the legacy codec, so its section
+        // must be that codec's. Unlike v4 (step 7), it can't be compared with
+        // the assets: `centroids.bin` and `projection.bin` record their shape,
+        // which the loader checks, but not their seeds, and regenerating them
+        // from the seeds doesn't reproduce releases built before #156
+        // (ADR-0002).
+        ManifestCodec::V3(codec) => {
+            let legacy = TurboQuantConfig::legacy_v1()
+                .to_v3_codec_metadata()
+                .map_err(|error| verify_err(format!("invalid legacy codec config: {error}")))?;
+            if *codec != legacy {
+                return Err(verify_err(format!(
+                    "v3 codec section {codec:?} is not the legacy codec {legacy:?}"
+                )));
+            }
+            None
+        }
         ManifestCodec::V4(codec) => Some(
             TurboQuantConfig::from_v4_codec_metadata(codec)
                 .map_err(|error| verify_err(format!("invalid codec section: {error}")))?,

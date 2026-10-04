@@ -360,9 +360,8 @@ mod tests {
     use async_trait::async_trait;
     use ltsearch::error::PublishError;
     use ltsearch::index::{
-        CodecMetadata, EmbeddingProfile, InputFingerprint, ManifestCodec, ReleaseManifest,
-        ReleaseSource, TurboQuantConfig, RELEASE_MANIFEST_FILE, V3_RELEASE_OUTPUT_FILES,
-        V4_RELEASE_OUTPUT_FILES,
+        EmbeddingProfile, InputFingerprint, ManifestCodec, ReleaseManifest, ReleaseSource,
+        TurboQuantConfig, RELEASE_MANIFEST_FILE, V3_RELEASE_OUTPUT_FILES, V4_RELEASE_OUTPUT_FILES,
     };
     use ltsearch::indexing::{PublishStorage, UploadMode, VersionedObject};
     use ltsearch::models::CorpusType;
@@ -438,12 +437,11 @@ mod tests {
     }
 
     fn v3_codec() -> ManifestCodec {
-        ManifestCodec::V3(CodecMetadata {
-            dim: 512,
-            centroids_per_dim: 8,
-            centroids_seed: 7,
-            projection_seed: 11,
-        })
+        ManifestCodec::V3(
+            TurboQuantConfig::legacy_v1()
+                .to_v3_codec_metadata()
+                .unwrap(),
+        )
     }
 
     fn v4_codec() -> ManifestCodec {
