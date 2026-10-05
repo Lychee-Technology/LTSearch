@@ -103,7 +103,7 @@ pub struct StaticActivationResult {
 ///    non-empty `model_id`; honor optional `expect_model_id` / `expect_dim`.
 /// 7. `MmapIndex::load(dir)` succeeds with `version() == turbo_version`,
 ///    `record_count() == table_row_count` and, for v4, the codec config the
-///    manifest records.
+///    manifest records, and every doc_id and metadata sidecar entry is UTF-8.
 /// 8. Return the verified manifest.
 pub fn verify_release_dir(
     dir: &Path,
@@ -351,6 +351,16 @@ pub fn verify_release_dir(
             manifest.source.table_row_count
         )));
     }
+    // The loader leaves the sidecars' UTF-8 to each read, to keep a reader's
+    // load from reading every byte. Step 3 has just hashed every byte, so
+    // checking it all here costs little, and a release that verifies has no
+    // hit whose doc_id or metadata can't be read.
+    index.check_sidecar_utf8().map_err(|error| {
+        verify_err(format!(
+            "MmapIndex::check_sidecar_utf8({}) failed: {error}",
+            dir.display()
+        ))
+    })?;
 
     // Step 8: return the verified manifest.
     Ok(manifest)

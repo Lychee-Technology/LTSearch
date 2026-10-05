@@ -115,12 +115,15 @@ fn release_builder_writes_v3_artifacts_loadable_by_mmap_index() {
     assert_eq!(index.title(1), Some("合同法则"));
 
     // Original string doc_id round-trips per record.
-    assert_eq!(index.original_doc_id(0), Some("文档-1"));
-    assert_eq!(index.original_doc_id(1), Some("文档-2"));
+    assert_eq!(index.original_doc_id(0).unwrap(), Some("文档-1"));
+    assert_eq!(index.original_doc_id(1).unwrap(), Some("文档-2"));
 
     // metadata_json round-trips into a map that rebuilds a Citation.
     for (i, resource_id) in ["res-1", "res-2"].iter().enumerate() {
-        let json = index.metadata_json(i).expect("v3 image has metadata_json");
+        let json = index
+            .metadata_json(i)
+            .unwrap()
+            .expect("v3 image has metadata_json");
         let map: HashMap<String, Value> = serde_json::from_str(json).expect("valid metadata JSON");
         let citation = Citation::from_metadata(&map).expect("citation rebuildable");
         assert_eq!(citation.resource_id, *resource_id);

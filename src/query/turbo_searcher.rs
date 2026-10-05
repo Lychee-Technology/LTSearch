@@ -88,7 +88,7 @@ impl StaticRetriever for TurboQuantSearcher {
         // Materialize text/title only for the selected top-K, keeping the
         // parallel scan above zero-copy over the mmap.
         let has_doc_sidecars = self.index.has_doc_sidecars();
-        Ok(ranked
+        ranked
             .into_iter()
             .map(|candidate| {
                 let corpus_type =
@@ -100,16 +100,29 @@ impl StaticRetriever for TurboQuantSearcher {
                 // doc_id, `metadata: None`, title-only citation).
                 let (doc_id, metadata) = if has_doc_sidecars {
                     // Prefer the original string doc_id; fall back to the hashed
-                    // u64 only if the sidecar is missing for this record.
+                    // u64 only if the sidecar is missing for this record. A
+                    // doc_id whose bytes aren't UTF-8 fails the request: the
+                    // hash would stand in for an ID no caller knows.
                     let doc_id = self
                         .index
                         .original_doc_id(candidate.record_index as usize)
+                        .map_err(|source| SearchError::Execution {
+                            message: format!("failed to read static index doc_id: {source}"),
+                        })?
                         .map(|id| id.to_string())
                         .unwrap_or_else(|| candidate.doc_id.to_string());
-                    let metadata = self
-                        .index
-                        .metadata_json(candidate.record_index as usize)
-                        .and_then(|json| parse_metadata(json, &doc_id));
+                    // Metadata is optional, so bytes that aren't UTF-8 are
+                    // dropped like JSON that doesn't parse.
+                    let metadata = match self.index.metadata_json(candidate.record_index as usize) {
+                        Ok(json) => json.and_then(|json| parse_metadata(json, &doc_id)),
+                        Err(error) => {
+                            eprintln!(
+                                "warning: turbo static doc {doc_id} has unreadable metadata \
+                                 json, falling back to metadata: None ({error})"
+                            );
+                            None
+                        }
+                    };
                     (doc_id, metadata)
                 } else {
                     (candidate.doc_id.to_string(), None)
@@ -135,7 +148,7 @@ impl StaticRetriever for TurboQuantSearcher {
                             })
                     });
 
-                SearchResult {
+                Ok(SearchResult {
                     doc_id,
                     score: candidate.score,
                     text,
@@ -144,9 +157,9 @@ impl StaticRetriever for TurboQuantSearcher {
                     chunk_source: ChunkSource::Static,
                     corpus_type: Some(corpus_type),
                     citation,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 }
 

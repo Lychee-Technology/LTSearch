@@ -284,6 +284,39 @@ fn a_missing_v4_file_is_rejected_at_load_and_verify() {
     }
 }
 
+/// A doc_id or metadata sidecar whose bytes aren't UTF-8, in a release whose
+/// manifest hashes match them. `MmapIndex::load` accepts it, because it checks
+/// the sidecar ranges and leaves UTF-8 to each read; `verify_release_dir`
+/// checks every entry and rejects it before activation.
+#[test]
+fn a_sidecar_that_is_not_utf8_loads_but_is_rejected_at_verify() {
+    let dir = TempDir::new().unwrap();
+    for (version, format) in [("v3", StaticReleaseFormat::V3), ("v4", v4())] {
+        let release = dir.path().join(version);
+        build(format, &release);
+        for blob in ["docid", "meta_json"] {
+            let damaged = dir.path().join(format!("{version}-{blob}"));
+            copy_release(&release, &damaged);
+            let path = damaged.join(format!("turbo_static_{blob}.bin"));
+            let len = fs::metadata(&path).unwrap().len() as usize;
+            fs::write(&path, vec![0xFF; len]).unwrap();
+            forge_manifest(&damaged, |_| {});
+
+            let index = MmapIndex::load(&damaged).unwrap();
+            let err = index.check_sidecar_utf8().unwrap_err();
+            assert!(
+                matches!(err, MmapIndexError::MetaExtBlobInvalidUtf8 { index: 0, blob: b } if b == blob),
+                "{version} {blob}: {err:?}"
+            );
+            let message = verify_error(&damaged);
+            assert!(
+                message.contains(&format!("meta ext {blob} blob contains invalid UTF-8")),
+                "{version} {blob}: {message}"
+            );
+        }
+    }
+}
+
 // --- records and assets of different builds ----------------------------------
 
 #[test]

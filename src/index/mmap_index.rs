@@ -78,6 +78,8 @@ pub enum MmapIndexError {
         index: u64,
         blob: &'static str,
     },
+    /// Returned by the sidecar accessors and [`MmapIndex::check_sidecar_utf8`],
+    /// not by `load`, which checks the blob ranges but not their UTF-8.
     MetaExtBlobInvalidUtf8 {
         index: u64,
         blob: &'static str,
@@ -296,10 +298,12 @@ impl MmapIndex {
 
             ensure_aligned::<MetaExtRecord>(META_EXT_FILE, &meta_ext_mmap)?;
 
-            // Validate every record's blob slice at load time so the accessors
+            // Check every record's blob ranges at load time so the accessors
             // (`original_doc_id` / `metadata_json`) can index the sidecars
-            // without bounds or UTF-8 panics. A corrupt sidecar fails here
-            // instead of deep inside a query path.
+            // without an out-of-bounds panic. This reads only the meta_ext
+            // records. The accessors check UTF-8 when they read a range:
+            // checking it here would read every doc_id and metadata byte at
+            // each load, where a query reads only its top-K.
             let docid_blob_len = docid_mmap.len();
             let meta_json_blob_len = meta_json_mmap.len();
             for i in 0..actual_meta_ext_count as usize {
@@ -310,16 +314,14 @@ impl MmapIndex {
                 // of the record size.
                 let ext = unsafe { &*(meta_ext_mmap[offset..].as_ptr() as *const MetaExtRecord) };
 
-                validate_ext_blob(
-                    &docid_mmap,
+                check_ext_blob_bounds(
                     docid_blob_len,
                     ext.docid_offset,
                     ext.docid_len,
                     i as u64,
                     "docid",
                 )?;
-                validate_ext_blob(
-                    &meta_json_mmap,
+                check_ext_blob_bounds(
                     meta_json_blob_len,
                     ext.meta_json_offset,
                     ext.meta_json_len,
@@ -363,19 +365,48 @@ impl MmapIndex {
     }
 
     /// The original string doc_id for record `i`, or `None` for v2 images (which
-    /// carry no doc_id sidecar) or an out-of-range index.
-    pub fn original_doc_id(&self, i: usize) -> Option<&str> {
-        let ext = self.meta_ext_record(i)?;
-        let blob = self.docid_mmap.as_ref()?;
-        Some(ext.doc_id_from_blob(blob))
+    /// carry no doc_id sidecar) or an out-of-range index. Fails with
+    /// [`MmapIndexError::MetaExtBlobInvalidUtf8`] if the stored bytes aren't
+    /// UTF-8.
+    pub fn original_doc_id(&self, i: usize) -> Result<Option<&str>, MmapIndexError> {
+        let (Some(ext), Some(blob)) = (self.meta_ext_record(i), self.docid_mmap.as_ref()) else {
+            return Ok(None);
+        };
+        ext.doc_id_from_blob(blob)
+            .map(Some)
+            .map_err(|_| MmapIndexError::MetaExtBlobInvalidUtf8 {
+                index: i as u64,
+                blob: "docid",
+            })
     }
 
     /// The canonicalized metadata JSON for record `i`, or `None` for v2 images
-    /// (which carry no metadata sidecar) or an out-of-range index.
-    pub fn metadata_json(&self, i: usize) -> Option<&str> {
-        let ext = self.meta_ext_record(i)?;
-        let blob = self.meta_json_mmap.as_ref()?;
-        Some(ext.metadata_json_from_blob(blob))
+    /// (which carry no metadata sidecar) or an out-of-range index. Fails with
+    /// [`MmapIndexError::MetaExtBlobInvalidUtf8`] if the stored bytes aren't
+    /// UTF-8.
+    pub fn metadata_json(&self, i: usize) -> Result<Option<&str>, MmapIndexError> {
+        let (Some(ext), Some(blob)) = (self.meta_ext_record(i), self.meta_json_mmap.as_ref())
+        else {
+            return Ok(None);
+        };
+        ext.metadata_json_from_blob(blob).map(Some).map_err(|_| {
+            MmapIndexError::MetaExtBlobInvalidUtf8 {
+                index: i as u64,
+                blob: "meta_json",
+            }
+        })
+    }
+
+    /// Checks that every record's doc_id and metadata JSON are UTF-8, which
+    /// `load` leaves to the accessors. This reads every sidecar byte, so it
+    /// belongs where the whole release is read anyway, such as verification
+    /// before activation, not on a reader's load path.
+    pub fn check_sidecar_utf8(&self) -> Result<(), MmapIndexError> {
+        for i in 0..self.record_count() as usize {
+            self.original_doc_id(i)?;
+            self.metadata_json(i)?;
+        }
+        Ok(())
     }
 
     fn meta_ext_record(&self, i: usize) -> Option<&MetaExtRecord> {
@@ -613,10 +644,8 @@ fn load_prod_codec(dir: &Path, header: &TurboHeader) -> Result<IndexCodec, MmapI
     }
 }
 
-/// Verifies that `offset + len` stays within `blob` and that the resulting
-/// slice is valid UTF-8, mapping failures to the two blob error variants.
-fn validate_ext_blob(
-    blob: &[u8],
+/// Verifies that `offset + len` stays within a blob of `blob_len` bytes.
+fn check_ext_blob_bounds(
     blob_len: usize,
     offset: u64,
     len: u32,
@@ -636,20 +665,13 @@ fn validate_ext_blob(
         index,
         blob: blob_name,
     })?;
-    let end = start
-        .checked_add(len)
-        .filter(|end| *end <= blob_len)
-        .ok_or(MmapIndexError::MetaExtBlobOutOfBounds {
+    match start.checked_add(len) {
+        Some(end) if end <= blob_len => Ok(()),
+        _ => Err(MmapIndexError::MetaExtBlobOutOfBounds {
             index,
             blob: blob_name,
-        })?;
-    if std::str::from_utf8(&blob[start..end]).is_err() {
-        return Err(MmapIndexError::MetaExtBlobInvalidUtf8 {
-            index,
-            blob: blob_name,
-        });
+        }),
     }
-    Ok(())
 }
 
 /// Rejects a region that the accessors would cast to `&T` at an address `T`
@@ -820,14 +842,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_ext_blob_rejects_huge_offset_without_wrapping() {
+    fn check_ext_blob_bounds_rejects_huge_offset_without_wrapping() {
         // A forged offset near `u64::MAX` must be rejected. On 64-bit targets the
         // value fits `usize` so the `checked_add`/bounds path catches it; on 32-bit
         // targets it would not fit `usize` and the new `usize::try_from` guard
         // catches it before any truncating cast could wrap it into bounds. Either
         // way the result must be the out-of-bounds error, never a false pass.
-        let blob = [0u8; 8];
-        let err = super::validate_ext_blob(&blob, blob.len(), u64::MAX - 3, 4, 0, "docid")
+        let err = super::check_ext_blob_bounds(8, u64::MAX - 3, 4, 0, "docid")
             .expect_err("huge offset must be rejected as out of bounds");
         assert!(matches!(
             err,
