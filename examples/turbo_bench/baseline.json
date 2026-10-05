@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "tolerances": {
+    "recall_at_10_max_drop": 0.01,
+    "ndcg_at_10_max_drop": 0.01,
+    "score_rmse_max_rise": 0.1,
+    "scan_ratio_max_rise": 0.25
+  },
+  "measured_on": {
+    "git_sha": "d1b6a409ea9e66df202cad71715462911de0f123-dirty",
+    "build_profile": "release",
+    "opt_level": "z",
+    "threads": 12,
+    "cpu_model": "AMD Ryzen 5 5600G with Radeon Graphics",
+    "arch": "x86_64",
+    "os": "linux"
+  },
+  "fixtures": {
+    "synthetic-agm-v1-n1000": {
+      "dataset_digest": "07b0e3b2dfcc8a38ebad6267020924691fcec36865022ce6c5842fb05e3b64a3",
+      "quality": {
+        "legacy_v3": {
+          "recall_at_10": 0.021500000000000005,
+          "ndcg_at_10": 0.29115994693049296,
+          "score_rmse": 86.86587888704994
+        },
+        "prod_v4": {
+          "recall_at_10": 0.932500000000002,
+          "ndcg_at_10": 0.9964644145728476,
+          "score_rmse": 0.01869365839808334
+        }
+      },
+      "scan_ratio_to_exact": {}
+    },
+    "synthetic-agm-v1-n10000": {
+      "dataset_digest": "ca177c1fd7def5c6906051d269c3e19455fc4dd63d7e94600fda804dc8f7c6f9",
+      "quality": {
+        "legacy_v3": {
+          "recall_at_10": 0.003,
+          "ndcg_at_10": 0.27748854569111214,
+          "score_rmse": 87.05460607481285
+        },
+        "prod_v4": {
+          "recall_at_10": 0.6679999999999994,
+          "ndcg_at_10": 0.9896636100530738,
+          "score_rmse": 0.01865683188259115
+        }
+      },
+      "scan_ratio_to_exact": {}
+    }
+  }
+}

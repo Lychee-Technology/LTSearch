@@ -33,6 +33,7 @@ class CiWorkflowTest(unittest.TestCase):
                 "local-image-e2e",
                 "local-e2e",
                 "release-assembly",
+                "turbo-bench",
             },
         )
 
@@ -186,6 +187,28 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertIn("run: bash scripts/e2e/run-static-release-flow.sh", local_e2e)
         self.assertNotIn("docker", local_e2e)
         self.assertNotIn("awscli", local_e2e)
+
+        # TurboQuant benchmark gates (#168): standalone, release profile, gated
+        # against the committed baseline, with the report kept even on failure.
+        turbo_bench = jobs["turbo-bench"]
+        self.assertNotIn("needs:", turbo_bench)
+        self.assertIn("runs-on: ubuntu-24.04-arm", turbo_bench)
+        self.assertIn("timeout-minutes: 90", turbo_bench)
+        self.assertIn("uses: actions/checkout@v6", turbo_bench)
+        self.assertIn("uses: actions-rust-lang/setup-rust-toolchain@v1", turbo_bench)
+        self.assertIn("cache: true", turbo_bench)
+        self.assertIn(
+            "run: cargo run --locked --release --example turbo_bench -- run "
+            "--sizes 1000,10000 --queries 200 "
+            "--baseline examples/turbo_bench/baseline.json "
+            "--out target/turbo-bench/report.json",
+            turbo_bench,
+        )
+        self.assertIn(
+            "- if: always()\n        uses: actions/upload-artifact@v4", turbo_bench
+        )
+        self.assertIn("path: target/turbo-bench/report.json", turbo_bench)
+        self.assertNotIn("docker", turbo_bench)
 
     def _parse_jobs(self, lines: list[str]) -> dict[str, str]:
         jobs: dict[str, list[str]] = {}

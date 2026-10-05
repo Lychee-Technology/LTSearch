@@ -130,3 +130,10 @@ required-features = ["aws"]
 name = "emit_static_lance_fixture"
 path = "examples/emit_static_lance_fixture.rs"
 required-features = ["local"]
+
+# TurboQuant quality and performance benchmark (#168). `test = true` puts its
+# unit tests under `cargo test --tests`.
+[[example]]
+name = "turbo_bench"
+path = "examples/turbo_bench/main.rs"
+test = true

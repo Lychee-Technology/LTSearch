@@ -57,6 +57,7 @@ CI mirrors the same split:
 
 - a fast Docker-free verification path for build, non-Moto tests, formatting, linting, and workflow guard checks
 - a Moto-backed integration path for `tests/write_build_publish_test.rs`
+- a TurboQuant benchmark gate (`turbo-bench`) that measures exact f32, the legacy v3 codec and v4 at N = 1k/10k against a committed baseline; see [`examples/turbo_bench/README.md`](examples/turbo_bench/README.md)
 
 ## Build Profiles
 
