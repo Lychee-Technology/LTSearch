@@ -7,12 +7,12 @@
     "scan_ratio_max_rise": 0.25
   },
   "measured_on": {
-    "git_sha": "d1b6a409ea9e66df202cad71715462911de0f123-dirty",
+    "git_sha": "3bd6e8138aa81c3fb612fe2d2051de7b8621a27d",
     "build_profile": "release",
     "opt_level": "z",
-    "threads": 12,
-    "cpu_model": "AMD Ryzen 5 5600G with Radeon Graphics",
-    "arch": "x86_64",
+    "threads": 4,
+    "cpu_model": "implementer 0x41 part 0xd49",
+    "arch": "aarch64",
     "os": "linux"
   },
   "fixtures": {
@@ -46,7 +46,10 @@
           "score_rmse": 0.01865683188259115
         }
       },
-      "scan_ratio_to_exact": {}
+      "scan_ratio_to_exact": {
+        "legacy_v3": 2.400719179450094,
+        "prod_v4": 2.0452309425854724
+      }
     }
   }
 }

@@ -18,6 +18,7 @@ ranks differently from what the harness measured.
 
 ```sh
 # What CI's turbo-bench job runs: N = 1k and 10k, gated against the baseline.
+# On another machine type its performance gate can fail (see Gates).
 cargo run --release --example turbo_bench -- run --sizes 1000,10000 --queries 200 \
   --baseline examples/turbo_bench/baseline.json
 
@@ -77,8 +78,12 @@ existing report again.
   scan p50 divided by the exact-f32 scan p50 of the same run rises more than
   25% above the baseline ratio. The ratio cancels most runner-to-runner speed
   differences, but not differences between machine types. The baseline's
-  ratios come from CI's `ubuntu-24.04-arm` runner, and a run elsewhere prints a
-  note saying the comparison is across machines.
+  ratios come from CI's `ubuntu-24.04-arm` runner. On another CPU the gate
+  still applies them and prints a note saying the comparison is across
+  machines, so the run can fail (an x86 desktop does); locally, gate quality
+  alone with `--quality-only`. The gate stays on deliberately: if CI's runner
+  hardware changes, a failure asking for a new baseline is better than a gate
+  that quietly stops checking.
 - Each fixture is pinned by its dataset digest. A changed generator fails the
   gate instead of quietly moving the numbers.
 
