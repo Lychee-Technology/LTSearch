@@ -28,6 +28,7 @@ use crate::http::write::{write_router, WriteServerState};
 use crate::http::{port_from_env, serve};
 use crate::index::{
     load_lance_snapshot, LanceStaticSourceConfig, ReleaseSource, StaticReleaseBuilder,
+    StaticReleaseFormat,
 };
 use crate::indexing::{
     activate_static_pointer, install_into_managed_store, verify_release_dir, BuildIndexRequest,
@@ -162,8 +163,9 @@ pub async fn run_query() -> Result<(), AppError> {
 
 /// static-build 角色：一次性 CLI（非服务）。与 `turbo_index_builder` 同形的
 /// `--config <json> --output <dir>`，但静态源是一个 **pin 版本的 Lance 快照**
-/// （`LanceStaticSourceConfig`）：确定性全表扫描、零重嵌，直接产出 TurboQuant v3
-/// release。本地 profile 不携带 AWS 客户端。
+/// （`LanceStaticSourceConfig`）：确定性全表扫描、零重嵌，直接产出 TurboQuant
+/// release。格式由配置里可选的 `release_format`（`"v3"` | `"v4"`）决定，缺省为
+/// `StaticReleaseFormat::default()`。本地 profile 不携带 AWS 客户端。
 pub async fn run_static_build<I, S>(args: I) -> Result<String, AppError>
 where
     I: IntoIterator<Item = S>,
@@ -172,7 +174,7 @@ where
     let parsed = parse_static_build_args(args)?;
     let config_text = std::fs::read_to_string(&parsed.config_path)
         .map_err(|error| format!("failed to read {}: {error}", parsed.config_path))?;
-    let config: LanceStaticSourceConfig = serde_json::from_str(&config_text)
+    let (config, format) = parse_static_build_config(&config_text)
         .map_err(|error| format!("failed to parse {}: {error}", parsed.config_path))?;
 
     let snapshot = load_lance_snapshot(&config)
@@ -187,7 +189,7 @@ where
         corpus_type: config.corpus_type.clone(),
     };
 
-    let manifest = StaticReleaseBuilder
+    let manifest = StaticReleaseBuilder::new(format)
         .build_release(
             std::path::Path::new(&parsed.output_dir),
             &snapshot.chunks,
@@ -198,12 +200,38 @@ where
         .map_err(|error| error.to_string())?;
 
     Ok(format!(
-        "built static release {} ({} records, dim={}) into {}",
+        "built static release {} (format v{}, {} records, dim={}) into {}",
         manifest.release_id,
+        manifest.turbo_version,
         manifest.input_fingerprint.doc_count,
         manifest.embedding_profile.dim,
         parsed.output_dir
     ))
+}
+
+/// static-build 的配置文件：`LanceStaticSourceConfig` 的字段平铺在顶层，外加可选的
+/// `release_format`。格式是构建选项而非数据源属性，所以不放进源配置里。
+#[derive(Debug, serde::Deserialize)]
+struct StaticBuildConfig {
+    #[serde(flatten)]
+    source: LanceStaticSourceConfig,
+    #[serde(default)]
+    release_format: Option<String>,
+}
+
+/// 解析 static-build 配置。`release_format` 缺省时用 `StaticReleaseFormat::default()`，
+/// 未知取值直接报错（不静默回退到默认格式）。
+fn parse_static_build_config(
+    text: &str,
+) -> Result<(LanceStaticSourceConfig, StaticReleaseFormat), String> {
+    let config: StaticBuildConfig =
+        serde_json::from_str(text).map_err(|error| error.to_string())?;
+    let format = match config.release_format.as_deref() {
+        None => StaticReleaseFormat::default(),
+        Some(name) => StaticReleaseFormat::from_name(name)
+            .ok_or_else(|| format!("release_format must be \"v3\" or \"v4\", got {name:?}"))?,
+    };
+    Ok((config.source, format))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -498,6 +526,48 @@ mod tests {
         assert!(parse_static_build_args(["--output", "o"])
             .unwrap_err()
             .contains("--config"));
+    }
+
+    const STATIC_BUILD_SOURCE_JSON: &str = r#""dataset_path": "/tmp/static.lance",
+        "table_version": 7,
+        "corpus_type": "legal",
+        "embedding_profile": { "model_id": "jina-embeddings-v2", "dim": 512 }"#;
+
+    #[test]
+    fn static_build_config_defaults_to_the_v3_format() {
+        let (source, format) =
+            parse_static_build_config(&format!("{{ {STATIC_BUILD_SOURCE_JSON} }}")).unwrap();
+        assert_eq!(format, StaticReleaseFormat::V3);
+        assert_eq!(source.dataset_path, "/tmp/static.lance");
+        assert_eq!(source.table_version, 7);
+        assert_eq!(source.embedding_profile.dim, 512);
+    }
+
+    #[test]
+    fn static_build_config_selects_the_release_format() {
+        for (name, turbo_version) in [("v3", 3), ("v4", 4)] {
+            let (_, format) = parse_static_build_config(&format!(
+                r#"{{ {STATIC_BUILD_SOURCE_JSON}, "release_format": "{name}" }}"#
+            ))
+            .unwrap();
+            assert_eq!(
+                format.turbo_version(),
+                turbo_version,
+                "release_format {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_build_config_rejects_an_unknown_release_format() {
+        let error = parse_static_build_config(&format!(
+            r#"{{ {STATIC_BUILD_SOURCE_JSON}, "release_format": "v5" }}"#
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("release_format") && error.contains("\"v5\""),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

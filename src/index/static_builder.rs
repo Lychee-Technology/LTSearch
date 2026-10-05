@@ -289,7 +289,8 @@ fn parse_doc_id(doc_id: &str) -> Result<u64, IndexError> {
 }
 
 /// Generates the legacy codec's centroid table and projection matrix. Shared
-/// with the v3 `StaticReleaseBuilder` so both writers derive identical assets.
+/// with `StaticReleaseBuilder`'s v3 format so both writers derive identical
+/// assets.
 pub(crate) fn legacy_codec_assets(
     codec_config: &TurboQuantConfig,
 ) -> (CentroidTable, ProjectionMatrix) {
@@ -317,7 +318,7 @@ pub(crate) fn stable_hash_doc_id(doc_id: &str) -> u64 {
 }
 
 /// Encodes one embedding into a `TurboRecord512`. Shared by the v2
-/// `StaticIndexBuilder` and the v3 `StaticReleaseBuilder` so both writers
+/// `StaticIndexBuilder` and `StaticReleaseBuilder`'s v3 format so both writers
 /// produce byte-identical records for the same input. `label` is only used in
 /// error messages (the caller's original doc_id string).
 pub(crate) fn encode_turbo_record(

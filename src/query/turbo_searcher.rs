@@ -6,7 +6,7 @@ use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::error::SearchError;
-use crate::index::{MmapIndex, PreparedTurboQuery, TurboRecordSlice};
+use crate::index::{IndexCodec, MmapIndex, PreparedTurboQuery, TurboRecordSlice};
 use crate::models::{ChunkSource, Citation, CorpusType, SearchResult, SearchSource};
 use crate::storage::ActiveManifest;
 
@@ -41,21 +41,45 @@ impl StaticRetriever for TurboQuantSearcher {
         validate_embedding_dim(query_embedding, self.index.dim() as usize)?;
         validate_top_k(top_k)?;
 
-        let prepared_query = PreparedTurboQuery::prepare(
-            query_embedding,
-            self.index.centroids(),
-            self.index.projection(),
-        )
-        .map_err(|source| SearchError::Execution {
-            message: format!("failed to prepare turbo query: {source}"),
-        })?;
-
         // Dispatch on the record layout once, outside the scan, so each
-        // layout's inner loop is monomorphic.
-        let heap = match self.index.records() {
-            TurboRecordSlice::V2Dim512(records) => scan_top_k(records, top_k, |record| {
-                (record.doc_id, prepared_query.score(record))
-            }),
+        // layout's inner loop is monomorphic. Each layout is scored by its
+        // own codec's prepared query.
+        let heap = match (self.index.records(), self.index.codec()) {
+            (
+                TurboRecordSlice::V2Dim512(records),
+                IndexCodec::Legacy {
+                    centroids,
+                    projection,
+                },
+            ) => {
+                let prepared_query =
+                    PreparedTurboQuery::prepare(query_embedding, centroids, projection).map_err(
+                        |source| SearchError::Execution {
+                            message: format!("failed to prepare turbo query: {source}"),
+                        },
+                    )?;
+                scan_top_k(records, top_k, |record| {
+                    (record.doc_id, prepared_query.score(record))
+                })
+            }
+            (TurboRecordSlice::V4Dim512(records), IndexCodec::Prod(codec)) => {
+                let prepared_query = codec.prepare_query(query_embedding).map_err(|source| {
+                    SearchError::Execution {
+                        message: format!("failed to prepare turbo query: {source}"),
+                    }
+                })?;
+                scan_top_k(records, top_k, |record| {
+                    (record.doc_id, prepared_query.score(record.code()))
+                })
+            }
+            // `MmapIndex::load` loads each layout's own codec, so a loaded
+            // index never gets here.
+            (TurboRecordSlice::V2Dim512(_), IndexCodec::Prod(_))
+            | (TurboRecordSlice::V4Dim512(_), IndexCodec::Legacy { .. }) => {
+                return Err(SearchError::Execution {
+                    message: "static index records and codec are of different versions".into(),
+                })
+            }
         };
 
         let mut ranked = heap.into_vec();
@@ -63,36 +87,48 @@ impl StaticRetriever for TurboQuantSearcher {
 
         // Materialize text/title only for the selected top-K, keeping the
         // parallel scan above zero-copy over the mmap.
-        let is_v3 = self.index.version() == 3;
-        Ok(ranked
+        let has_doc_sidecars = self.index.has_doc_sidecars();
+        ranked
             .into_iter()
             .map(|candidate| {
                 let corpus_type =
                     CorpusType::from_id(self.index.meta(candidate.record_index).corpus_type);
                 let text = self.index.text(candidate.record_index).to_string();
 
-                // v3 images carry a doc_id/metadata sidecar; v2 images do not,
-                // so v2 keeps its legacy behavior verbatim (hashed u64 doc_id,
-                // `metadata: None`, title-only citation). Only the top-K
-                // materialization differs — the scan/scoring path is shared.
-                let (doc_id, metadata) = if is_v3 {
+                // v3 and v4 images carry a doc_id/metadata sidecar; v2 images
+                // do not, so v2 keeps its legacy behavior verbatim (hashed u64
+                // doc_id, `metadata: None`, title-only citation).
+                let (doc_id, metadata) = if has_doc_sidecars {
                     // Prefer the original string doc_id; fall back to the hashed
-                    // u64 only if the sidecar is missing for this record.
+                    // u64 only if the sidecar is missing for this record. A
+                    // doc_id whose bytes aren't UTF-8 fails the request: the
+                    // hash would stand in for an ID no caller knows.
                     let doc_id = self
                         .index
                         .original_doc_id(candidate.record_index as usize)
+                        .map_err(|source| SearchError::Execution {
+                            message: format!("failed to read static index doc_id: {source}"),
+                        })?
                         .map(|id| id.to_string())
                         .unwrap_or_else(|| candidate.doc_id.to_string());
-                    let metadata = self
-                        .index
-                        .metadata_json(candidate.record_index as usize)
-                        .and_then(|json| parse_metadata(json, &doc_id));
+                    // Metadata is optional, so bytes that aren't UTF-8 are
+                    // dropped like JSON that doesn't parse.
+                    let metadata = match self.index.metadata_json(candidate.record_index as usize) {
+                        Ok(json) => json.and_then(|json| parse_metadata(json, &doc_id)),
+                        Err(error) => {
+                            eprintln!(
+                                "warning: turbo static doc {doc_id} has unreadable metadata \
+                                 json, falling back to metadata: None ({error})"
+                            );
+                            None
+                        }
+                    };
                     (doc_id, metadata)
                 } else {
                     (candidate.doc_id.to_string(), None)
                 };
 
-                // A metadata-derived citation wins for v3 records; otherwise fall
+                // A metadata-derived citation wins for v3/v4 records; otherwise fall
                 // back to the title-only citation shared with v2. A title makes
                 // the chunk citable: ContextBuilder reads `citation.title` to
                 // render `[法规 #1] <title>`. Without either, `citation` stays
@@ -112,7 +148,7 @@ impl StaticRetriever for TurboQuantSearcher {
                             })
                     });
 
-                SearchResult {
+                Ok(SearchResult {
                     doc_id,
                     score: candidate.score,
                     text,
@@ -121,9 +157,9 @@ impl StaticRetriever for TurboQuantSearcher {
                     chunk_source: ChunkSource::Static,
                     corpus_type: Some(corpus_type),
                     citation,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 }
 

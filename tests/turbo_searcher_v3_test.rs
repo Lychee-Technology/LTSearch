@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ltsearch::error::SearchError;
 use ltsearch::index::{
     encode_vector, CentroidTable, MetaExtRecord, MetaRecord, MmapIndex, ProjectionMatrix,
     TurboHeader, TurboRecord512, META_EXT_RECORD_SIZE, META_RECORD_SIZE,
@@ -366,6 +367,76 @@ fn v3_searcher_falls_back_to_none_on_unparseable_metadata() {
     assert_eq!(citation.resource_id, "doc-γ");
     assert_eq!(citation.source_ref, "doc-γ");
     assert_eq!(citation.url, None);
+}
+
+/// Overwrites the whole `turbo_static_{blob}.bin` sidecar with bytes that
+/// aren't UTF-8, keeping its length, so `MmapIndex::load` still accepts it.
+fn corrupt_sidecar_to_invalid_utf8(dir: &Path, blob: &str) {
+    let path = dir.join(format!("turbo_static_{blob}.bin"));
+    let len = fs::metadata(&path).unwrap().len() as usize;
+    fs::write(&path, vec![0xFF; len]).unwrap();
+}
+
+fn gamma_doc() -> Doc {
+    Doc {
+        doc_id: 333,
+        doc_id_str: "doc-γ",
+        corpus_type: 0,
+        text: "损坏元数据文本",
+        title: Some("损坏条目"),
+        metadata_json: Some(alpha_metadata()),
+        embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+    }
+}
+
+#[test]
+fn v3_searcher_fails_the_request_on_a_doc_id_that_is_not_utf8() {
+    let dir = temp_dir("docid-utf8");
+    write_index(&dir, &[gamma_doc()]);
+    corrupt_sidecar_to_invalid_utf8(&dir, "docid");
+
+    let searcher = load_searcher(&dir);
+    let err = searcher
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            10,
+        )
+        .expect_err("a hit whose doc_id can't be read must fail the request, not panic");
+
+    let SearchError::Execution { message } = err else {
+        panic!("expected an execution error, got {err:?}");
+    };
+    assert!(message.contains("docid"), "{message}");
+}
+
+#[test]
+fn v3_searcher_drops_metadata_that_is_not_utf8() {
+    let dir = temp_dir("meta-json-utf8");
+    write_index(&dir, &[gamma_doc()]);
+    corrupt_sidecar_to_invalid_utf8(&dir, "meta_json");
+
+    let searcher = load_searcher(&dir);
+    let results = searcher
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            10,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    let result = &results[0];
+    assert_eq!(result.doc_id, "doc-γ");
+    assert_eq!(
+        result.metadata, None,
+        "unreadable metadata falls back to None"
+    );
+    let citation = result
+        .citation
+        .as_ref()
+        .expect("title-only citation must survive the metadata fallback");
+    assert_eq!(citation.title.as_deref(), Some("损坏条目"));
 }
 
 #[test]

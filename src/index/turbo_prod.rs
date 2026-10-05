@@ -40,11 +40,11 @@
 //! but not every embedding source normalizes: `FixedEmbeddingGenerator` and
 //! the test fixtures produce non-unit vectors, and v3 never checked. The
 //! codec therefore follows [`NormalizeAndStore`]: it encodes `u = x/‖x‖`
-//! and stores ‖x‖ as an f32 next to the code. #166 decides where the record
-//! keeps it; #165 proposed the 4 reserved bytes. The score is linear in
-//! ‖x‖, so this costs one multiply per record and keeps the estimate
-//! unbiased for any input norm, up to the f32 rounding of ‖x‖. Queries are
-//! not normalized: the score is linear in y too.
+//! and stores ‖x‖ as an f32 next to the code. A v4 record
+//! ([`TurboProdRecord512`]) keeps it in the four bytes a v2/v3 record
+//! reserves. The score is linear in ‖x‖, so this costs one multiply per
+//! record and keeps the estimate unbiased for any input norm, up to the f32
+//! rounding of ‖x‖. Queries are not normalized: the score is linear in y too.
 //!
 //! ‖x‖ and `u` are computed in f64, then rounded to f32. A zero vector
 //! encodes with norm 0, so it scores 0 against every query whatever its
@@ -52,6 +52,7 @@
 //! whose norm overflows f32.
 //!
 //! [`NormalizeAndStore`]: super::NormPolicy::NormalizeAndStore
+//! [`TurboProdRecord512`]: super::TurboProdRecord512
 //!
 //! # Codec definition
 //!
@@ -59,10 +60,11 @@
 //! their seeds and `generator_version`. It doesn't name the codebook or
 //! the arithmetic above: `TurboQuantProdV1` means the committed d = 512,
 //! b = 2 codebook, f32 rotation and projection sums in index order, f64 norms,
-//! and the bit layout of [`EncodedTurboProd`]. Encoded bytes are release
-//! bytes (#166), so changing any of these for an unchanged config needs a new
-//! [`TurboCodecId`]. A golden digest of encoded bytes fails on such a change,
-//! and [`TurboQuantProdV1::from_assets`] rejects any other codebook.
+//! and the bit layout of [`EncodedTurboProd`]. Encoded bytes are the record
+//! bytes of a v4 release, so changing any of these for an unchanged config
+//! needs a new [`TurboCodecId`]. A golden digest of encoded bytes fails on
+//! such a change, and [`TurboQuantProdV1::from_assets`] rejects any other
+//! codebook.
 //!
 //! # Scoring
 //!
@@ -119,13 +121,13 @@ impl TurboQuantProdV1 {
         )
     }
 
-    /// Assembles the codec from stored assets: the loader path (#166). The
-    /// rotation and the QJL matrix must be the ones `config` names, by
-    /// shape, seed and `generator_version`, so a QJL matrix with m and d
-    /// swapped is rejected here. Any `generator_version` loads, not only
-    /// this build's: a release keeps the matrices it was built with. The
-    /// codebook must be the committed one (see "Codec definition" in the
-    /// module docs).
+    /// Assembles the codec from stored assets: the path `MmapIndex::load`
+    /// takes for a v4 release. The rotation and the QJL matrix must be the
+    /// ones `config` names, by shape, seed and `generator_version`, so a QJL
+    /// matrix with m and d swapped is rejected here. Any `generator_version`
+    /// loads, not only this build's: a release keeps the matrices it was
+    /// built with. The codebook must be the committed one (see "Codec
+    /// definition" in the module docs).
     pub fn from_assets(
         config: TurboQuantConfig,
         rotation: Rotation,
@@ -520,7 +522,7 @@ mod tests {
     use super::*;
     use crate::index::codec_config::NormPolicy;
     use crate::index::release_manifest::sha256_hex;
-    use crate::index::{fill_standard_normal, LloydMaxSolution, TurboRecord512};
+    use crate::index::{fill_standard_normal, LloydMaxSolution, TurboProdRecord512};
 
     /// sha256 over `idx ‖ signs ‖ gamma ‖ norm` (f32 little-endian) of
     /// `golden_vectors()` encoded with `codec()`, captured on x86_64.
@@ -587,15 +589,9 @@ mod tests {
     fn production_codes_fit_the_512_dim_record() {
         let encoded = codec().encode(&golden_vectors()[0]).unwrap();
         assert_eq!((codec().idx_len(), codec().signs_len()), (128, 64));
-        // With the norm in what are reserved bytes today (#166 decides).
-        let record = TurboRecord512 {
-            doc_id: 0,
-            idx: encoded.idx.as_slice().try_into().unwrap(),
-            qjl: encoded.signs.as_slice().try_into().unwrap(),
-            gamma: encoded.gamma,
-            _reserved: encoded.norm.to_le_bytes(),
-        };
-        assert_eq!(f32::from_le_bytes(record._reserved), encoded.norm);
+        assert!(TurboProdRecord512::holds_codes_of(codec()));
+        let record = TurboProdRecord512::new(0, &encoded).unwrap();
+        assert_eq!(record.code(), encoded.code());
     }
 
     #[test]

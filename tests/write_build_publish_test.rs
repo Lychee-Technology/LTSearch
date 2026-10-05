@@ -15,7 +15,9 @@ use ltsearch::adapters::s3_publish::AwsPublishStorage;
 use ltsearch::adapters::s3_wal::AwsS3WalStorage;
 use ltsearch::adapters::sqs_build_queue::AwsSqsBuildQueue;
 use ltsearch::embedding::{EmbeddingError, EmbeddingGenerator};
-use ltsearch::index::V3_RELEASE_OUTPUT_FILES;
+use ltsearch::index::{
+    MmapIndex, RELEASE_MANIFEST_FILE, V3_RELEASE_OUTPUT_FILES, V4_RELEASE_OUTPUT_FILES,
+};
 use ltsearch::indexing::PublishStorage;
 use ltsearch::indexing::{
     activate_static_pointer, verify_release_dir, BuildIndexRequest, BuildIndexResult,
@@ -27,7 +29,7 @@ use ltsearch::storage::{
 use ltsearch::write::{BuildQueue, WalStorage};
 
 mod support;
-use support::build_v3_release_fixture;
+use support::{build_v3_release_fixture, build_v4_release_fixture};
 
 struct MotoHarness {
     artifact_root: std::path::PathBuf,
@@ -700,6 +702,86 @@ async fn aws_static_activate_bin_resumes_partial_prior_upload() {
         .expect("static/_head must exist after activation");
     let head = StaticReleaseHead::from_json(&head_object.bytes).unwrap();
     assert_eq!(head.release_id, manifest.release_id);
+}
+
+/// The v4 file set through the same bin, and on to a reader: the bin installs
+/// a v4 release (`rotation.bin` / `codebook.bin` / `qjl.bin` where a v3 release
+/// has `centroids.bin` / `projection.bin`), and what `S3ArtifactSync` then
+/// pulls onto a query host loads as a v4 index.
+#[tokio::test]
+async fn aws_static_activate_bin_installs_a_v4_release_a_reader_pulls_and_loads() {
+    use ltsearch::adapters::s3_artifact_sync::S3ArtifactSync;
+    use ltsearch::contracts::ArtifactSync;
+
+    let harness = MotoHarness::new("static-activate-v4").await;
+    let storage = AwsPublishStorage::new(harness.bucket.clone(), harness.s3.clone());
+    let dir = build_v4_release_fixture();
+    let manifest = verify_release_dir(&dir, None, None).unwrap();
+    assert_eq!(manifest.turbo_version, 4);
+    let dir_key = static_release_dir_key(&manifest.release_id);
+
+    let out = run_static_activate_bin(&harness.bucket, &dir);
+    assert!(
+        out.status.success(),
+        "v4 install must succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The release prefix holds exactly the ten v4 files and the manifest...
+    let listed = harness
+        .s3
+        .list_objects_v2()
+        .bucket(&harness.bucket)
+        .prefix(format!("{dir_key}/"))
+        .send()
+        .await
+        .unwrap();
+    let mut uploaded: Vec<String> = listed
+        .contents()
+        .iter()
+        .map(|object| object.key().unwrap().to_string())
+        .collect();
+    uploaded.sort();
+    let mut expected: Vec<String> = V4_RELEASE_OUTPUT_FILES
+        .iter()
+        .chain([&RELEASE_MANIFEST_FILE])
+        .map(|name| format!("{dir_key}/{name}"))
+        .collect();
+    expected.sort();
+    assert_eq!(uploaded, expected);
+    // ...each byte for byte the file that was verified on disk.
+    for name in V4_RELEASE_OUTPUT_FILES
+        .iter()
+        .chain([&RELEASE_MANIFEST_FILE])
+    {
+        let object = storage
+            .read(&format!("{dir_key}/{name}"))
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("object {name} must be uploaded"));
+        assert!(
+            object.bytes == std::fs::read(dir.join(name)).unwrap(),
+            "object {name} differs from the file on disk"
+        );
+    }
+    let head_object = storage
+        .read(STATIC_HEAD_KEY)
+        .await
+        .unwrap()
+        .expect("static/_head must exist after activation");
+    let head = StaticReleaseHead::from_json(&head_object.bytes).unwrap();
+    assert_eq!(head.release_id, manifest.release_id);
+
+    // The query side: the pulled release is what `MmapIndex::load` reads.
+    let artifact_root = harness.new_artifact_root();
+    S3ArtifactSync::with_client(harness.bucket.clone(), harness.s3.clone())
+        .sync(&artifact_root)
+        .await
+        .unwrap();
+    let index =
+        MmapIndex::load(&artifact_root.join(&dir_key)).expect("the pulled v4 release must load");
+    assert_eq!(index.version(), 4);
+    assert_eq!(index.record_count(), 2);
 }
 
 /// Finding 1 guard: a pre-existing object under the release prefix carrying

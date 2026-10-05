@@ -1,6 +1,7 @@
 //! Shared test support for the static-release surface: a real v3 release
-//! `build_v3_release_fixture` (built by `StaticReleaseBuilder`) and an in-memory
-//! `RecordingPublishStorage` fake. Both were previously copy-pasted across
+//! `build_v3_release_fixture` (built by `StaticReleaseBuilder`), its v4 twin
+//! `build_v4_release_fixture`, and an in-memory `RecordingPublishStorage` fake.
+//! The v3 fixture and the fake were previously copy-pasted across
 //! `static_activation_test.rs`, `write_build_publish_test.rs`, and
 //! `publisher_test.rs`; converging them here keeps the fixture and fake from
 //! drifting apart.
@@ -22,7 +23,10 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use ltsearch::error::PublishError;
-use ltsearch::index::{EmbeddingProfile, ReleaseSource, StaticChunk, StaticReleaseBuilder};
+use ltsearch::index::{
+    EmbeddingProfile, ReleaseSource, StaticChunk, StaticReleaseBuilder, StaticReleaseFormat,
+    TurboQuantConfig,
+};
 use ltsearch::indexing::{PublishStorage, UploadMode, VersionedObject};
 use ltsearch::models::CorpusType;
 
@@ -70,6 +74,15 @@ pub fn citation_metadata(title: &str, resource_id: &str) -> HashMap<String, Valu
 /// returning the release directory. Each call gets a uniquely-named directory so
 /// multiple fixtures in one test never collide on disk.
 pub fn build_v3_release_fixture() -> PathBuf {
+    build_release_fixture(StaticReleaseFormat::V3)
+}
+
+/// The same release in the v4 format, encoded with `TurboQuantProdV1`.
+pub fn build_v4_release_fixture() -> PathBuf {
+    build_release_fixture(StaticReleaseFormat::V4(TurboQuantConfig::prod_v1()))
+}
+
+fn build_release_fixture(format: StaticReleaseFormat) -> PathBuf {
     let dir = temp_dir("fixture");
     let chunks = vec![
         StaticChunk {
@@ -98,7 +111,7 @@ pub fn build_v3_release_fixture() -> PathBuf {
         corpus_type: CorpusType::Legal,
     };
 
-    StaticReleaseBuilder
+    StaticReleaseBuilder::new(format)
         .build_release(&dir, &chunks, &embeddings, &profile, &source)
         .expect("build_release should succeed");
     dir

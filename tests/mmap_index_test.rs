@@ -77,7 +77,7 @@ fn write_test_index(
 
     fs::write(
         dir.join("centroids.bin"),
-        CentroidTable::generate(dim, 16, 7).to_bytes(),
+        CentroidTable::generate(dim, 4, 7).to_bytes(),
     )
     .unwrap();
     fs::write(
@@ -89,7 +89,7 @@ fn write_test_index(
 
 fn write_unknown_layout_index(dir: &std::path::Path, dim: u32, record_count: u64) {
     let header = TurboHeader::new(dim, record_count);
-    let stride = header.record_stride();
+    let stride = size_of::<TurboRecord512>();
     let mut bin_data = header.to_bytes();
     bin_data.resize(TurboHeader::SIZE + stride * record_count as usize, 0);
     fs::write(dir.join("turbo_static.bin"), &bin_data).unwrap();
@@ -102,7 +102,7 @@ fn write_unknown_layout_index(dir: &std::path::Path, dim: u32, record_count: u64
     fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
-        CentroidTable::generate(dim, 16, 7).to_bytes(),
+        CentroidTable::generate(dim, 4, 7).to_bytes(),
     )
     .unwrap();
     fs::write(
@@ -171,7 +171,7 @@ fn mmap_index_rejects_truncated_bin_file() {
     fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
-        CentroidTable::generate(512, 16, 7).to_bytes(),
+        CentroidTable::generate(512, 4, 7).to_bytes(),
     )
     .unwrap();
     fs::write(
@@ -182,6 +182,27 @@ fn mmap_index_rejects_truncated_bin_file() {
 
     let err = MmapIndex::load(&dir).unwrap_err();
     assert!(err.to_string().contains("size"));
+}
+
+#[test]
+fn mmap_index_rejects_a_record_count_that_overflows_the_file_size() {
+    // (2^60 + 1) * 208 wraps to 208, so with unchecked arithmetic a one-record
+    // body matched this forged count.
+    let dir = temp_dir("record-count-overflow");
+    write_test_index(&dir, 512, &[(1, 0.0)], &[0], &["a"]);
+    let bin_path = dir.join("turbo_static.bin");
+    let mut bin_data = fs::read(&bin_path).unwrap();
+    bin_data[..TurboHeader::SIZE].copy_from_slice(&TurboHeader::new(512, (1 << 60) + 1).to_bytes());
+    fs::write(&bin_path, &bin_data).unwrap();
+
+    let err = MmapIndex::load(&dir).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            MmapIndexError::Header(ltsearch::index::TurboHeaderError::RecordCountOverflow { .. })
+        ),
+        "{err}"
+    );
 }
 
 #[test]
@@ -305,7 +326,7 @@ fn write_v3_test_index(dir: &std::path::Path, entries: &[(&str, &str)]) {
     fs::write(dir.join("turbo_static_title.bin"), []).unwrap();
     fs::write(
         dir.join("centroids.bin"),
-        CentroidTable::generate(512, 16, 7).to_bytes(),
+        CentroidTable::generate(512, 4, 7).to_bytes(),
     )
     .unwrap();
     fs::write(
@@ -354,10 +375,11 @@ fn mmap_index_loads_v3_and_exposes_original_doc_id_and_metadata_json() {
     let index = MmapIndex::load(&dir).unwrap();
 
     assert_eq!(index.version(), 3);
-    assert_eq!(index.original_doc_id(0), Some(doc_id));
+    assert_eq!(index.original_doc_id(0).unwrap(), Some(doc_id));
 
     let json = index
         .metadata_json(0)
+        .unwrap()
         .expect("v3 index exposes metadata json");
     let parsed: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(json).expect("metadata json parses back to a map");
@@ -373,8 +395,8 @@ fn mmap_index_still_loads_v2_without_ext_files() {
     let index = MmapIndex::load(&dir).unwrap();
 
     assert_eq!(index.version(), 2);
-    assert_eq!(index.original_doc_id(0), None);
-    assert_eq!(index.metadata_json(0), None);
+    assert_eq!(index.original_doc_id(0).unwrap(), None);
+    assert_eq!(index.metadata_json(0).unwrap(), None);
 }
 
 #[test]
@@ -424,23 +446,29 @@ fn patch_meta_ext_record(dir: &Path, index: usize, mutate: impl FnOnce(&mut Meta
     fs::write(&path, &data).unwrap();
 }
 
-/// Overwrites record `index`'s meta_json blob bytes with invalid UTF-8, keeping
-/// the recorded length unchanged so only the byte content is corrupt.
-fn corrupt_meta_json_blob_to_invalid_utf8(dir: &Path, index: usize) {
+/// Overwrites record `index`'s bytes in the `blob` sidecar (`"docid"` or
+/// `"meta_json"`) with invalid UTF-8, keeping the recorded range unchanged so
+/// only the byte content is corrupt.
+fn corrupt_ext_blob_to_invalid_utf8(dir: &Path, index: usize, blob: &str) {
     let ext_data = fs::read(dir.join("turbo_static_meta_ext.bin")).unwrap();
     let offset = index * META_EXT_RECORD_SIZE;
     let record: MetaExtRecord =
         unsafe { std::ptr::read_unaligned(ext_data[offset..].as_ptr() as *const MetaExtRecord) };
+    let (start, len) = match blob {
+        "docid" => (record.docid_offset, record.docid_len),
+        "meta_json" => (record.meta_json_offset, record.meta_json_len),
+        other => panic!("no {other} sidecar"),
+    };
 
-    let json_path = dir.join("turbo_static_meta_json.bin");
-    let mut json_data = fs::read(&json_path).unwrap();
-    let start = record.meta_json_offset as usize;
-    let end = start + record.meta_json_len as usize;
-    assert!(end > start, "fixture must have a non-empty meta_json blob");
-    for b in &mut json_data[start..end] {
+    let path = dir.join(format!("turbo_static_{blob}.bin"));
+    let mut data = fs::read(&path).unwrap();
+    let start = start as usize;
+    let end = start + len as usize;
+    assert!(end > start, "fixture must have a non-empty {blob} blob");
+    for b in &mut data[start..end] {
         *b = 0xFF;
     }
-    fs::write(&json_path, &json_data).unwrap();
+    fs::write(&path, &data).unwrap();
 }
 
 #[test]
@@ -460,21 +488,27 @@ fn mmap_index_rejects_v3_with_docid_blob_out_of_bounds() {
     );
 }
 
+// `load` checks the sidecar ranges but leaves UTF-8 to the accessors, so it
+// doesn't read every doc_id and metadata byte. Bytes that aren't UTF-8 load,
+// and reading them returns an error instead of panicking.
 #[test]
-fn mmap_index_rejects_v3_with_meta_json_invalid_utf8() {
-    let dir = build_valid_v3_dir("json-utf8");
-    corrupt_meta_json_blob_to_invalid_utf8(&dir, 0); // len 不变，字节改为无效 UTF-8
-    let err = MmapIndex::load(&dir).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            MmapIndexError::MetaExtBlobInvalidUtf8 {
-                index: 0,
-                blob: "meta_json"
-            }
-        ),
-        "expected MetaExtBlobInvalidUtf8 {{ index: 0, blob: \"meta_json\" }}, got: {err:?}"
-    );
+fn mmap_index_v3_reports_invalid_utf8_when_a_sidecar_is_read() {
+    for blob in ["docid", "meta_json"] {
+        let dir = build_valid_v3_dir(&format!("{blob}-utf8"));
+        corrupt_ext_blob_to_invalid_utf8(&dir, 0, blob); // 范围不变，字节改为无效 UTF-8
+        let index = MmapIndex::load(&dir).unwrap();
+
+        let (corrupt, intact) = match blob {
+            "docid" => (index.original_doc_id(0), index.metadata_json(0)),
+            _ => (index.metadata_json(0), index.original_doc_id(0)),
+        };
+        let err = corrupt.unwrap_err();
+        assert!(
+            matches!(err, MmapIndexError::MetaExtBlobInvalidUtf8 { index: 0, blob: b } if b == blob),
+            "expected MetaExtBlobInvalidUtf8 {{ index: 0, blob: {blob:?} }}, got: {err:?}"
+        );
+        assert!(intact.unwrap().is_some(), "the other sidecar still reads");
+    }
 }
 
 #[test]
@@ -482,8 +516,8 @@ fn mmap_index_v3_accessors_never_panic_on_valid_release() {
     let dir = build_valid_v3_dir("valid");
     let index = MmapIndex::load(&dir).unwrap();
     for i in 0..index.record_count() as usize {
-        assert!(index.original_doc_id(i).is_some());
-        assert!(index.metadata_json(i).is_some());
+        assert!(index.original_doc_id(i).unwrap().is_some());
+        assert!(index.metadata_json(i).unwrap().is_some());
     }
 }
 
@@ -494,11 +528,10 @@ fn mmap_index_exposes_typed_record_slice() {
 
     let index = MmapIndex::load(&dir).unwrap();
 
-    match index.records() {
-        TurboRecordSlice::V2Dim512(records) => {
-            assert_eq!(records.len(), 2);
-            assert_eq!(records[0].doc_id, 11);
-            assert!((records[1].gamma - 0.75).abs() < f32::EPSILON);
-        }
-    }
+    let TurboRecordSlice::V2Dim512(records) = index.records() else {
+        panic!("a v2 index holds legacy records");
+    };
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].doc_id, 11);
+    assert!((records[1].gamma - 0.75).abs() < f32::EPSILON);
 }

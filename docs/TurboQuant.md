@@ -1,5 +1,13 @@
 # System Design Document: Zero-Copy Mmap Vector Search Engine with TurboQuant Compression
 
+> **Scope.** This document describes the legacy codec (`Legacy3BitV1`) behind v2 and v3 static
+> releases; v3 is still the default build format. A v4 release (opt-in through the static-build
+> config's `release_format`) is encoded with `TurboQuantProdV1`: a seeded rotation, a Lloyd-Max
+> codebook and a Gaussian QJL residual stage. Its record (`TurboProdRecord512`) has the size and
+> field offsets of the record in §3, with the vector's norm in the last four bytes instead of
+> reserved zeros. See the module docs of `src/index/turbo_prod.rs` and
+> `src/index/static_release.rs`. #169 rewrites this document for v4.
+
 ## 1. Introduction
 ### 1.1 Purpose
 This document details the architecture for a highly optimized, pure in-memory vector search engine designed for read-heavy, low-frequency update environments (e.g., enterprise policies, legal documents). The system leverages a 512-dimensional text embedding model and the state-of-the-art **TurboQuant** extreme compression algorithm, bypassing traditional Vector Databases in favor of a zero-copy memory-mapped (`mmap`) architecture in Rust.

@@ -171,9 +171,10 @@ fn benchmark_search_latency(doc_count: usize) {
 
     let index = Arc::new(MmapIndex::load(&dir).unwrap());
     assert_eq!(index.layout(), KnownRecordLayout::V2Dim512);
-    match index.records() {
-        TurboRecordSlice::V2Dim512(records) => assert_eq!(records.len(), docs.len()),
-    }
+    let TurboRecordSlice::V2Dim512(records) = index.records() else {
+        panic!("a v2 index holds legacy records");
+    };
+    assert_eq!(records.len(), docs.len());
     let searcher = TurboQuantSearcher::new(index);
 
     let mut latencies_us = Vec::with_capacity(MEASURED_QUERIES);

@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ltsearch::index::{
     sha256_hex, EmbeddingProfile, MmapIndex, ReleaseSource, StaticChunk, StaticReleaseBuilder,
+    StaticReleaseFormat, TurboQuantConfig, V3_RELEASE_OUTPUT_FILES,
 };
 use ltsearch::models::{Citation, CorpusType};
 use serde_json::{json, Value};
@@ -43,6 +44,15 @@ fn sample_profile() -> EmbeddingProfile {
     }
 }
 
+/// Both release formats: input validation is shared, so every rejection
+/// below must hold for each.
+fn formats() -> [StaticReleaseFormat; 2] {
+    [
+        StaticReleaseFormat::V3,
+        StaticReleaseFormat::V4(TurboQuantConfig::prod_v1()),
+    ]
+}
+
 fn sample_source() -> ReleaseSource {
     ReleaseSource {
         kind: "lance".to_string(),
@@ -72,7 +82,7 @@ fn release_builder_writes_v3_artifacts_loadable_by_mmap_index() {
     ];
     let embeddings = vec![finite_embedding(0.1), finite_embedding(0.2)];
 
-    let manifest = StaticReleaseBuilder
+    let manifest = StaticReleaseBuilder::new(StaticReleaseFormat::V3)
         .build_release(
             &dir,
             &chunks,
@@ -105,12 +115,15 @@ fn release_builder_writes_v3_artifacts_loadable_by_mmap_index() {
     assert_eq!(index.title(1), Some("合同法则"));
 
     // Original string doc_id round-trips per record.
-    assert_eq!(index.original_doc_id(0), Some("文档-1"));
-    assert_eq!(index.original_doc_id(1), Some("文档-2"));
+    assert_eq!(index.original_doc_id(0).unwrap(), Some("文档-1"));
+    assert_eq!(index.original_doc_id(1).unwrap(), Some("文档-2"));
 
     // metadata_json round-trips into a map that rebuilds a Citation.
     for (i, resource_id) in ["res-1", "res-2"].iter().enumerate() {
-        let json = index.metadata_json(i).expect("v3 image has metadata_json");
+        let json = index
+            .metadata_json(i)
+            .unwrap()
+            .expect("v3 image has metadata_json");
         let map: HashMap<String, Value> = serde_json::from_str(json).expect("valid metadata JSON");
         let citation = Citation::from_metadata(&map).expect("citation rebuildable");
         assert_eq!(citation.resource_id, *resource_id);
@@ -160,9 +173,19 @@ fn release_builder_rejects_non_512_dim() {
         model_id: "m".to_string(),
         dim: 511,
     };
-    let result =
-        StaticReleaseBuilder.build_release(&dir, &chunks, &embeddings, &profile, &sample_source());
-    assert!(result.is_err(), "511-dim embedding must be rejected");
+    for format in formats() {
+        let result = StaticReleaseBuilder::new(format).build_release(
+            &dir,
+            &chunks,
+            &embeddings,
+            &profile,
+            &sample_source(),
+        );
+        assert!(
+            result.is_err(),
+            "{format:?}: 511-dim embedding must be rejected"
+        );
+    }
 }
 
 #[test]
@@ -177,14 +200,19 @@ fn release_builder_rejects_non_finite_embedding() {
     let mut embedding = finite_embedding(0.1);
     embedding[7] = f32::NAN;
     let embeddings = vec![embedding];
-    let result = StaticReleaseBuilder.build_release(
-        &dir,
-        &chunks,
-        &embeddings,
-        &sample_profile(),
-        &sample_source(),
-    );
-    assert!(result.is_err(), "non-finite embedding must be rejected");
+    for format in formats() {
+        let result = StaticReleaseBuilder::new(format).build_release(
+            &dir,
+            &chunks,
+            &embeddings,
+            &sample_profile(),
+            &sample_source(),
+        );
+        assert!(
+            result.is_err(),
+            "{format:?}: non-finite embedding must be rejected"
+        );
+    }
 }
 
 #[test]
@@ -205,12 +233,115 @@ fn release_builder_rejects_duplicate_doc_id() {
         },
     ];
     let embeddings = vec![finite_embedding(0.1), finite_embedding(0.2)];
-    let result = StaticReleaseBuilder.build_release(
-        &dir,
-        &chunks,
-        &embeddings,
-        &sample_profile(),
-        &sample_source(),
+    for format in formats() {
+        let result = StaticReleaseBuilder::new(format).build_release(
+            &dir,
+            &chunks,
+            &embeddings,
+            &sample_profile(),
+            &sample_source(),
+        );
+        assert!(
+            result.is_err(),
+            "{format:?}: duplicate doc_id must be rejected"
+        );
+    }
+}
+
+#[test]
+fn default_release_builder_writes_the_v3_format() {
+    // #169 owns the switch to v4; until then a build that doesn't choose a
+    // format must produce exactly what it did before v4 existed.
+    assert_eq!(StaticReleaseFormat::default(), StaticReleaseFormat::V3);
+    assert_eq!(
+        StaticReleaseBuilder::default(),
+        StaticReleaseBuilder::new(StaticReleaseFormat::V3)
     );
-    assert!(result.is_err(), "duplicate doc_id must be rejected");
+
+    let dir = temp_dir("default-format");
+    let chunks = vec![StaticChunk {
+        doc_id: "d1".to_string(),
+        text: "t".to_string(),
+        metadata: HashMap::new(),
+        corpus_type: CorpusType::Legal,
+    }];
+    let manifest = StaticReleaseBuilder::default()
+        .build_release(
+            &dir,
+            &chunks,
+            &[finite_embedding(0.1)],
+            &sample_profile(),
+            &sample_source(),
+        )
+        .expect("build_release should succeed");
+
+    assert_eq!(manifest.turbo_version, 3);
+    let names: Vec<&str> = manifest.outputs.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(names, V3_RELEASE_OUTPUT_FILES);
+    assert_eq!(MmapIndex::load(&dir).unwrap().version(), 3);
+}
+
+#[test]
+fn release_builder_rejects_a_v4_codec_config_it_cannot_write() {
+    let prod = TurboQuantConfig::prod_v1();
+    // Each config with the reason the builder gives for refusing it.
+    let unwritable = [
+        // Not a v4 codec at all.
+        (
+            TurboQuantConfig::legacy_v1(),
+            "legacy_3bit_v1 is not turbo_quant_prod_v1",
+        ),
+        // The record's 128 index bytes hold 2-bit indices.
+        (
+            TurboQuantConfig {
+                mse_bits: 3,
+                ..prod
+            },
+            "got mse_bits 3",
+        ),
+        // 256 sign bits are not the record's 64 sign bytes.
+        (
+            TurboQuantConfig {
+                qjl_dim: 256,
+                ..prod
+            },
+            "the codec config produces 128 and 32",
+        ),
+        // Only the current generator can be run.
+        (
+            TurboQuantConfig {
+                generator_version: prod.generator_version + 1,
+                ..prod
+            },
+            "cannot generate generator_version 2 assets",
+        ),
+    ];
+
+    let chunks = vec![StaticChunk {
+        doc_id: "d1".to_string(),
+        text: "t".to_string(),
+        metadata: HashMap::new(),
+        corpus_type: CorpusType::Legal,
+    }];
+    for (config, reason) in unwritable {
+        // The builder stages next to the output directory, so whatever a
+        // failed build leaves behind is an entry of `parent`.
+        let parent = temp_dir("unwritable-v4-config");
+        let error = StaticReleaseBuilder::new(StaticReleaseFormat::V4(config))
+            .build_release(
+                &parent.join("release"),
+                &chunks,
+                &[finite_embedding(0.1)],
+                &sample_profile(),
+                &sample_source(),
+            )
+            .expect_err("a config the v4 format cannot write must be rejected")
+            .to_string();
+        assert!(error.contains(reason), "{config:?}: {error}");
+        assert_eq!(
+            fs::read_dir(&parent).unwrap().count(),
+            0,
+            "{config:?} must not leave files behind"
+        );
+    }
 }

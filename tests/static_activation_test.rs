@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use ltsearch::index::{derive_release_id, ReleaseManifest};
+use ltsearch::index::{derive_release_id, CodecMetadata, ManifestCodec, ReleaseManifest};
 use ltsearch::indexing::{
     activate_static_pointer, install_into_managed_store, verify_release_dir, PublishStorage,
     StaticActivateError,
@@ -107,6 +107,44 @@ fn verify_rejects_reordered_manifest_outputs() {
             "expected an order-violation message, got: {message}"
         ),
         other => panic!("expected Verify error, got {other:?}"),
+    }
+}
+
+#[test]
+fn verify_rejects_a_v3_codec_section_that_is_not_the_legacy_codec() {
+    // Every v3 release is written with the legacy codec. Each forged manifest
+    // changes one codec parameter and re-derives release_id, so steps 1-4 pass
+    // and only the codec section is wrong.
+    let verify_with = |edit: fn(&mut CodecMetadata)| {
+        let dir = build_v3_release_fixture();
+        let manifest_path = dir.join("release_manifest.json");
+        let mut manifest: ReleaseManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let ManifestCodec::V3(codec) = &mut manifest.codec else {
+            panic!("a v3 manifest has a v3 codec section");
+        };
+        edit(codec);
+        manifest.release_id = derive_release_id(
+            manifest.turbo_version,
+            &manifest.embedding_profile,
+            &manifest.codec,
+            &manifest.input_fingerprint.content_digest,
+            &manifest.outputs,
+        );
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        match verify_release_dir(&dir, None, None).unwrap_err() {
+            StaticActivateError::Verify { message } => message,
+            other => panic!("expected Verify error, got {other:?}"),
+        }
+    };
+
+    for message in [
+        verify_with(|codec| codec.dim = 256),
+        verify_with(|codec| codec.centroids_per_dim = 8),
+        verify_with(|codec| codec.centroids_seed += 1),
+        verify_with(|codec| codec.projection_seed += 1),
+    ] {
+        assert!(message.contains("is not the legacy codec"), "{message}");
     }
 }
 

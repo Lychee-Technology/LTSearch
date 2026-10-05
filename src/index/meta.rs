@@ -17,6 +17,12 @@ pub struct MetaRecord {
     pub _pad: [u8; 7],
 }
 
+// The loader casts the mmapped `turbo_static_meta.bin` to this type.
+const _: () = assert!(
+    std::mem::size_of::<MetaRecord>() == META_RECORD_SIZE
+        && std::mem::align_of::<MetaRecord>() == 8
+);
+
 impl MetaRecord {
     pub fn text_from_blob<'a>(&self, blob: &'a [u8]) -> &'a str {
         let start = self.text_offset as usize;

@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ltsearch::index::mmap_index::MmapIndexError;
 use ltsearch::index::{
-    CentroidTable, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader, TurboRecord512,
-    META_RECORD_SIZE,
+    CentroidTable, IndexCodec, MetaRecord, MmapIndex, ProjectionMatrix, TurboHeader,
+    TurboRecord512, META_RECORD_SIZE,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -84,14 +85,21 @@ fn mmap_index_loads_centroids_and_projection_assets() {
     let dir = temp_dir("load-assets");
     write_test_index(&dir, 512, &[(7, 1.25)], &[1], &["asset-backed"]);
 
-    let centroids = CentroidTable::generate(512, 16, 11);
+    let centroids = CentroidTable::generate(512, 4, 11);
     let projection = ProjectionMatrix::generate(512, 512, 19);
     write_test_assets(&dir, &centroids, &projection);
 
     let index = MmapIndex::load(&dir).unwrap();
 
-    assert_eq!(index.centroids(), &centroids);
-    assert_eq!(index.projection(), &projection);
+    let IndexCodec::Legacy {
+        centroids: loaded_centroids,
+        projection: loaded_projection,
+    } = index.codec()
+    else {
+        panic!("a v2 index loads the legacy codec");
+    };
+    assert_eq!(loaded_centroids, &centroids);
+    assert_eq!(loaded_projection, &projection);
 }
 
 #[test]
@@ -101,7 +109,7 @@ fn mmap_index_rejects_projection_input_dim_mismatch() {
 
     write_test_assets(
         &dir,
-        &CentroidTable::generate(512, 16, 11),
+        &CentroidTable::generate(512, 4, 11),
         &ProjectionMatrix::generate(511, 512, 19),
     );
 
@@ -119,7 +127,7 @@ fn mmap_index_rejects_projection_output_dim_mismatch() {
 
     write_test_assets(
         &dir,
-        &CentroidTable::generate(512, 16, 11),
+        &CentroidTable::generate(512, 4, 11),
         &ProjectionMatrix::generate(512, 511, 19),
     );
 
@@ -128,4 +136,34 @@ fn mmap_index_rejects_projection_output_dim_mismatch() {
     assert!(err.to_string().contains("projection"));
     assert!(err.to_string().contains("512"));
     assert!(err.to_string().contains("511"));
+}
+
+#[test]
+fn mmap_index_rejects_centroids_the_two_bit_record_cannot_index() {
+    // The record stores a 2-bit centroid index per dimension. A table with 16
+    // centroids per dimension is well-formed, but the scorer would read it
+    // with a stride of 4.
+    for centroids_per_dim in [2, 8, 16] {
+        let dir = temp_dir("centroids-per-dim");
+        write_test_index(&dir, 512, &[(7, 1.25)], &[1], &["asset-backed"]);
+        write_test_assets(
+            &dir,
+            &CentroidTable::generate(512, centroids_per_dim, 11),
+            &ProjectionMatrix::generate(512, 512, 19),
+        );
+
+        let err = MmapIndex::load(&dir).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MmapIndexError::UnsupportedLegacyAsset {
+                    file: "centroids.bin",
+                    field: "centroids_per_dim",
+                    expected: 4,
+                    actual,
+                } if actual == centroids_per_dim
+            ),
+            "{err}"
+        );
+    }
 }

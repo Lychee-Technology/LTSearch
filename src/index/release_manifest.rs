@@ -1,8 +1,12 @@
-//! TurboQuant v3 static release 的自描述 manifest 与内容导出 release_id。
+//! TurboQuant static release(v3 与 v4)的自描述 manifest 与内容导出 release_id。
 //!
 //! 决定性构建的核心：manifest 中不含时间戳 / UUID / HashMap 序列化，
 //! 因此 build-twice 逐字节相同。所有 digest / release_id 均为纯函数，可单测。
+//!
+//! v3 与 v4 共用同一个 manifest 结构，只有 `codec` 段不同([`ManifestCodec`])。
+//! v3 manifest 的字节与 release_id 自 v4 引入后保持不变。
 
+use super::header::{TURBO_VERSION_V3, TURBO_VERSION_V4};
 use crate::models::CorpusType;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 /// release manifest 在磁盘上的固定文件名。
 pub const RELEASE_MANIFEST_FILE: &str = "release_manifest.json";
 
-/// TurboQuant v3 static release 的自描述 manifest。
+/// TurboQuant static release 的自描述 manifest。
 ///
 /// `outputs` 在写入前须按 `name` 升序排序，以保证序列化字节稳定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -23,7 +27,7 @@ pub struct ReleaseManifest {
     pub source: ReleaseSource,
     pub embedding_profile: EmbeddingProfile,
     pub input_fingerprint: InputFingerprint,
-    pub codec: CodecMetadata,
+    pub codec: ManifestCodec,
     pub outputs: Vec<OutputFile>,
 }
 
@@ -52,13 +56,63 @@ pub struct InputFingerprint {
     pub content_digest: String,
 }
 
-/// TurboQuant codec 的决定性参数。
+/// manifest 的 `codec` 段。两个版本的字段集不同，JSON 中不带 tag，
+/// 靠字段集区分：v3 manifest 因此与引入 v4 之前逐字节相同。
+///
+/// 字段集本身不说明 release 是哪个版本；verify 层须核对它与
+/// `turbo_version` 一致([`turbo_version`](Self::turbo_version))。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, expecting = "a v3 or v4 codec section")]
+pub enum ManifestCodec {
+    V4(V4CodecMetadata),
+    V3(CodecMetadata),
+}
+
+impl ManifestCodec {
+    pub fn dim(&self) -> u32 {
+        match self {
+            Self::V3(codec) => codec.dim,
+            Self::V4(codec) => codec.dim,
+        }
+    }
+
+    /// 该字段集所属的 `turbo_version`。
+    pub fn turbo_version(&self) -> u32 {
+        match self {
+            Self::V3(_) => TURBO_VERSION_V3,
+            Self::V4(_) => TURBO_VERSION_V4,
+        }
+    }
+}
+
+/// v3(`Legacy3BitV1`)codec 的决定性参数。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodecMetadata {
     pub dim: u32,
     pub centroids_per_dim: u32,
     pub centroids_seed: u64,
     pub projection_seed: u64,
+}
+
+/// v4 codec 的决定性参数：完整的
+/// [`TurboQuantConfig`](super::TurboQuantConfig)，由
+/// `TurboQuantConfig::{to,from}_v4_codec_metadata` 互转。
+///
+/// `codec_id` 与 `norm_policy` 存稳定的字符串名
+/// (`TurboCodecId::name` / `NormPolicy::name`)，因此保持为 `String`：
+/// 本构建不认识的名字能解析出来，再由 verify 层给出明确的拒绝理由。
+/// 未知字段则直接拒绝：读不懂的 codec 参数意味着无法正确解码。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct V4CodecMetadata {
+    pub codec_id: String,
+    pub dim: u32,
+    pub mse_bits: u8,
+    pub qjl_dim: u32,
+    pub rotation_seed: u64,
+    pub qjl_seed: u64,
+    pub generator_version: u32,
+    pub norm_policy: String,
 }
 
 /// 单个产出文件的名称、内容 sha256(hex) 与字节大小。
@@ -116,16 +170,20 @@ pub fn content_digest(rows: &[CanonicalRow]) -> String {
 
 /// 从**内容分量**导出 release_id(hex)。
 ///
-/// 参与:`turbo_version` ∥ `profile`(model_id 长度前缀 + dim) ∥
-/// `codec`(dim/centroids_per_dim/centroids_seed/projection_seed) ∥
+/// 参与:`turbo_version` ∥ `profile`(model_id 长度前缀 + dim) ∥ `codec` ∥
 /// `content_digest`(hex 字符串字节) ∥ 按 name 升序的 `outputs`
 /// (name 长度前缀 + sha256 字节 + size_bytes)。
+///
+/// `codec` 分量按字段集而定:v3 为
+/// dim/centroids_per_dim/centroids_seed/projection_seed;v4 为
+/// codec_id(长度前缀)/dim/mse_bits/qjl_dim/rotation_seed/qjl_seed/
+/// generator_version/norm_policy(长度前缀)，即完整的 codec config。
 ///
 /// **排除整个 `source`**:同内容不同磁盘路径 → 同 release_id。
 pub fn derive_release_id(
     turbo_version: u32,
     profile: &EmbeddingProfile,
-    codec: &CodecMetadata,
+    codec: &ManifestCodec,
     content_digest: &str,
     outputs: &[OutputFile],
 ) -> String {
@@ -136,10 +194,24 @@ pub fn derive_release_id(
     update_len_prefixed(&mut hasher, profile.model_id.as_bytes());
     hasher.update(profile.dim.to_le_bytes());
 
-    hasher.update(codec.dim.to_le_bytes());
-    hasher.update(codec.centroids_per_dim.to_le_bytes());
-    hasher.update(codec.centroids_seed.to_le_bytes());
-    hasher.update(codec.projection_seed.to_le_bytes());
+    match codec {
+        ManifestCodec::V3(codec) => {
+            hasher.update(codec.dim.to_le_bytes());
+            hasher.update(codec.centroids_per_dim.to_le_bytes());
+            hasher.update(codec.centroids_seed.to_le_bytes());
+            hasher.update(codec.projection_seed.to_le_bytes());
+        }
+        ManifestCodec::V4(codec) => {
+            update_len_prefixed(&mut hasher, codec.codec_id.as_bytes());
+            hasher.update(codec.dim.to_le_bytes());
+            hasher.update(codec.mse_bits.to_le_bytes());
+            hasher.update(codec.qjl_dim.to_le_bytes());
+            hasher.update(codec.rotation_seed.to_le_bytes());
+            hasher.update(codec.qjl_seed.to_le_bytes());
+            hasher.update(codec.generator_version.to_le_bytes());
+            update_len_prefixed(&mut hasher, codec.norm_policy.as_bytes());
+        }
+    }
 
     update_len_prefixed(&mut hasher, content_digest.as_bytes());
 
@@ -173,13 +245,41 @@ mod tests {
         }
     }
 
-    fn sample_codec() -> CodecMetadata {
-        CodecMetadata {
+    fn sample_codec() -> ManifestCodec {
+        ManifestCodec::V3(CodecMetadata {
             dim: 512,
             centroids_per_dim: 256,
             centroids_seed: 42,
             projection_seed: 7,
+        })
+    }
+
+    fn sample_v4_codec() -> V4CodecMetadata {
+        V4CodecMetadata {
+            codec_id: "turbo_quant_prod_v1".to_string(),
+            dim: 512,
+            mse_bits: 2,
+            qjl_dim: 512,
+            rotation_seed: 163,
+            qjl_seed: 165,
+            generator_version: 1,
+            norm_policy: "normalize_and_store".to_string(),
         }
+    }
+
+    fn sample_v4_manifest() -> ReleaseManifest {
+        let codec = ManifestCodec::V4(sample_v4_codec());
+        let mut manifest = sample_manifest();
+        manifest.turbo_version = 4;
+        manifest.release_id = derive_release_id(
+            4,
+            &manifest.embedding_profile,
+            &codec,
+            &manifest.input_fingerprint.content_digest,
+            &manifest.outputs,
+        );
+        manifest.codec = codec;
+        manifest
     }
 
     fn sample_outputs() -> Vec<OutputFile> {
@@ -294,6 +394,134 @@ mod tests {
         let id_b = derive_release_id(3, &profile, &codec, &digest, &changed);
 
         assert_ne!(id_a, id_b, "changing an output hash must change release_id");
+    }
+
+    /// `sample_manifest()` 在引入 v4 之前序列化出的字节。
+    fn sample_v3_manifest_json() -> String {
+        format!(
+            concat!(
+                r#"{{"manifest_schema_version":1,"turbo_version":3,"#,
+                r#""release_id":"e72131f87d2d5635dff551d5679ee5d8697c69c64ef9c52ecb02c78bbefd2241","#,
+                r#""source":{{"kind":"lance","dataset_path":"/data/corpus.lance","#,
+                r#""table_version":9,"table_row_count":2,"corpus_type":"legal"}},"#,
+                r#""embedding_profile":{{"model_id":"jina-embeddings-v2","dim":512}},"#,
+                r#""input_fingerprint":{{"doc_count":2,"content_digest":"{digest}"}},"#,
+                r#""codec":{{"dim":512,"centroids_per_dim":256,"centroids_seed":42,"#,
+                r#""projection_seed":7}},"#,
+                r#""outputs":[{{"name":"centroids.bin","sha256":"{aa}","size_bytes":1024}},"#,
+                r#"{{"name":"records.turbo","sha256":"{bb}","size_bytes":4096}}]}}"#,
+            ),
+            digest = "cc".repeat(32),
+            aa = "aa".repeat(32),
+            bb = "bb".repeat(32),
+        )
+    }
+
+    #[test]
+    fn v3_manifest_bytes_and_release_id_are_unchanged() {
+        let json = sample_v3_manifest_json();
+
+        // release_id 按文档中的字节布局独立算出，不经过 `derive_release_id`。
+        let manifest = sample_manifest();
+        assert_eq!(
+            manifest.release_id,
+            "e72131f87d2d5635dff551d5679ee5d8697c69c64ef9c52ecb02c78bbefd2241"
+        );
+        assert_eq!(serde_json::to_string(&manifest).unwrap(), json);
+
+        let parsed: ReleaseManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, manifest);
+        assert!(matches!(parsed.codec, ManifestCodec::V3(_)));
+        assert_eq!(parsed.codec.turbo_version(), 3);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn v4_manifest_round_trips_with_the_full_codec_config() {
+        let manifest = sample_v4_manifest();
+        // 同样按文档布局独立算出。
+        assert_eq!(
+            manifest.release_id,
+            "9f3dbc5a0872912dff7ee9272a80bb3bdf79f6f0c468b4401bbec394d1209669"
+        );
+
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(
+            json.contains(concat!(
+                r#""codec":{"codec_id":"turbo_quant_prod_v1","dim":512,"mse_bits":2,"#,
+                r#""qjl_dim":512,"rotation_seed":163,"qjl_seed":165,"generator_version":1,"#,
+                r#""norm_policy":"normalize_and_store"}"#,
+            )),
+            "{json}"
+        );
+
+        let parsed: ReleaseManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, manifest);
+        assert_eq!(parsed.codec, ManifestCodec::V4(sample_v4_codec()));
+        assert_eq!(parsed.codec.turbo_version(), 4);
+        assert_eq!(parsed.codec.dim(), 512);
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    #[test]
+    fn v4_release_id_covers_every_codec_field() {
+        let manifest = sample_v4_manifest();
+        let release_id = |codec: V4CodecMetadata| {
+            derive_release_id(
+                4,
+                &manifest.embedding_profile,
+                &ManifestCodec::V4(codec),
+                &manifest.input_fingerprint.content_digest,
+                &manifest.outputs,
+            )
+        };
+        assert_eq!(release_id(sample_v4_codec()), manifest.release_id);
+
+        type Edit = fn(&mut V4CodecMetadata);
+        let edits: [(&str, Edit); 8] = [
+            ("codec_id", |codec| codec.codec_id.push('x')),
+            ("dim", |codec| codec.dim += 1),
+            ("mse_bits", |codec| codec.mse_bits += 1),
+            ("qjl_dim", |codec| codec.qjl_dim += 1),
+            ("rotation_seed", |codec| codec.rotation_seed += 1),
+            ("qjl_seed", |codec| codec.qjl_seed += 1),
+            ("generator_version", |codec| codec.generator_version += 1),
+            ("norm_policy", |codec| codec.norm_policy.push('x')),
+        ];
+        let mut seen = vec![manifest.release_id.clone()];
+        for (field, edit) in edits {
+            let mut codec = sample_v4_codec();
+            edit(&mut codec);
+            let id = release_id(codec);
+            assert!(!seen.contains(&id), "{field} must change the release_id");
+            seen.push(id);
+        }
+    }
+
+    #[test]
+    fn codec_section_that_is_neither_v3_nor_v4_is_rejected() {
+        let v4_json = serde_json::to_string(&sample_v4_manifest()).unwrap();
+
+        // 缺字段的 v4 段不会退化成 v3。
+        let missing_field = v4_json.replace(r#""qjl_seed":165,"#, "");
+        assert_ne!(missing_field, v4_json);
+        let error = serde_json::from_str::<ReleaseManifest>(&missing_field).unwrap_err();
+        assert!(
+            error.to_string().contains("a v3 or v4 codec section"),
+            "{error}"
+        );
+
+        // v4 段带未知字段：读不懂的 codec 参数不能被忽略。
+        let unknown_field = v4_json.replace(r#""qjl_seed":165,"#, r#""qjl_seed":165,"extra":1,"#);
+        assert!(serde_json::from_str::<ReleaseManifest>(&unknown_field).is_err());
+
+        // 不认识的 codec 名能解析出来，由 verify 层拒绝。
+        let unknown_codec = v4_json.replace("turbo_quant_prod_v1", "turbo_quant_prod_v9");
+        let parsed: ReleaseManifest = serde_json::from_str(&unknown_codec).unwrap();
+        let ManifestCodec::V4(codec) = parsed.codec else {
+            panic!("expected a v4 codec section");
+        };
+        assert_eq!(codec.codec_id, "turbo_quant_prod_v9");
     }
 
     #[test]
