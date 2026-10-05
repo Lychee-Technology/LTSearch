@@ -182,11 +182,15 @@ fn parse_metadata(json: &str, doc_id: &str) -> Option<HashMap<String, Value>> {
 // Only score + doc_id drive ranking/tie-breaks, so the parallel scan keeps
 // candidates cheap (no per-record String allocation); the winning records'
 // text/title are read from the mmap after top-K selection via `record_index`.
+/// One candidate of [`scan_top_k`]. Ordered best first: a higher score is
+/// `Less`, and equal scores rank the smaller doc_id first, so
+/// `BinaryHeap::into_sorted_vec` returns the ranking.
 #[derive(Debug, Clone)]
-struct RankedResult {
-    score: f32,
-    doc_id: u64,
-    record_index: u64,
+pub struct RankedResult {
+    pub score: f32,
+    pub doc_id: u64,
+    /// Position of the record in the scanned slice.
+    pub record_index: u64,
 }
 
 impl PartialEq for RankedResult {
@@ -215,7 +219,10 @@ impl Ord for RankedResult {
 /// `Result`. The doc_id comes from the record itself, which every builder
 /// writes with the same hashed id as its meta entry, so the scan never touches
 /// the meta mmap.
-fn scan_top_k<R, F>(records: &[R], top_k: usize, score_record: F) -> BinaryHeap<RankedResult>
+///
+/// Public so the benchmark harness (`examples/turbo_bench`) can time its
+/// exact-f32 baseline through the same skeleton as the codecs.
+pub fn scan_top_k<R, F>(records: &[R], top_k: usize, score_record: F) -> BinaryHeap<RankedResult>
 where
     R: Sync,
     F: Fn(&R) -> (u64, f32) + Sync,
