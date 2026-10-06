@@ -267,7 +267,7 @@ fn prepared_scores_match_legacy_scorer_on_searcher_test_fixture_assets() {
     assert_prepared_matches_reference(&queries, &records, &centroids, &projection);
 }
 
-/// `padded_embedding` from `turbo_searcher_benchmark_test.rs`.
+/// `padded_embedding` from `legacy_plumbing_turbo_searcher_benchmark_test.rs`.
 fn benchmark_embedding(seed: usize) -> Vec<f32> {
     (0..DIM)
         .map(|index| match index % 16 {
