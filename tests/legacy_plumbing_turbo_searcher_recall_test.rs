@@ -1,3 +1,16 @@
+//! A plumbing test for `TurboQuantSearcher` over a v2 image: its top 10
+//! matches the exact dot-product top 10 on a synthetic dataset whose topics
+//! occupy disjoint coordinate blocks. The data are built so that the toy
+//! assets below separate the topics; the recall it asserts checks the scan,
+//! record I/O and top-K selection, not the codec.
+//!
+//! Like every `legacy_plumbing_*` test, it uses hand-written centroid tables
+//! and identity projections wherever it needs assets with known values, so
+//! expected results can be worked out by hand. No release uses such assets,
+//! so nothing here is evidence about codec quality:
+//! `turbo_prod_statistics_test.rs` checks the production codec's bias and
+//! distortion, and `turbo_bench` (#168) its retrieval quality.
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
