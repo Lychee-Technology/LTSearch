@@ -212,14 +212,10 @@ fn the_codec_seeds_change_the_release_id() {
 
 /// Every v4 file, cut short the ways an interrupted write or upload leaves
 /// it. `verify_release_dir` rejects each one on its size. So does
-/// `MmapIndex::load`, with an error about the file that was cut, except for
-/// the text and title blobs, whose row offsets it does not check against the
-/// blob length (#175); for those two verify is the only gate.
+/// `MmapIndex::load`, with an error about the file that was cut, so a reader
+/// whose copy was damaged after verification fails at load, not on a query.
 #[test]
 fn a_truncated_v4_file_is_rejected() {
-    const NOT_BOUNDS_CHECKED_AT_LOAD: [&str; 2] =
-        ["turbo_static_text.bin", "turbo_static_title.bin"];
-
     let dir = TempDir::new().unwrap();
     let pristine = dir.path().join("pristine");
     build(v4(), &pristine);
@@ -252,13 +248,11 @@ fn a_truncated_v4_file_is_rejected() {
             message.contains(&format!("output {name} size mismatch")),
             "verify of {name} truncated to {len} bytes: {message}"
         );
-        if !NOT_BOUNDS_CHECKED_AT_LOAD.contains(&name) {
-            let error = MmapIndex::load(&damaged).unwrap_err();
-            assert!(
-                blames(&error, name),
-                "load of {name} truncated to {len} bytes: {error}"
-            );
-        }
+        let error = MmapIndex::load(&damaged).unwrap_err();
+        assert!(
+            blames(&error, name),
+            "load of {name} truncated to {len} bytes: {error}"
+        );
     }
 }
 
@@ -284,17 +278,17 @@ fn a_missing_v4_file_is_rejected_at_load_and_verify() {
     }
 }
 
-/// A doc_id or metadata sidecar whose bytes aren't UTF-8, in a release whose
-/// manifest hashes match them. `MmapIndex::load` accepts it, because it checks
-/// the sidecar ranges and leaves UTF-8 to each read; `verify_release_dir`
-/// checks every entry and rejects it before activation.
+/// A text, title, doc_id or metadata blob whose bytes aren't UTF-8, in a
+/// release whose manifest hashes match them. `MmapIndex::load` accepts it,
+/// because it checks the ranges and leaves UTF-8 to each read;
+/// `verify_release_dir` checks every entry and rejects it before activation.
 #[test]
-fn a_sidecar_that_is_not_utf8_loads_but_is_rejected_at_verify() {
+fn a_string_blob_that_is_not_utf8_loads_but_is_rejected_at_verify() {
     let dir = TempDir::new().unwrap();
     for (version, format) in [("v3", StaticReleaseFormat::V3), ("v4", v4())] {
         let release = dir.path().join(version);
         build(format, &release);
-        for blob in ["docid", "meta_json"] {
+        for blob in ["text", "title", "docid", "meta_json"] {
             let damaged = dir.path().join(format!("{version}-{blob}"));
             copy_release(&release, &damaged);
             let path = damaged.join(format!("turbo_static_{blob}.bin"));
@@ -303,14 +297,19 @@ fn a_sidecar_that_is_not_utf8_loads_but_is_rejected_at_verify() {
             forge_manifest(&damaged, |_| {});
 
             let index = MmapIndex::load(&damaged).unwrap();
-            let err = index.check_sidecar_utf8().unwrap_err();
+            let err = index.check_utf8().unwrap_err();
             assert!(
-                matches!(err, MmapIndexError::MetaExtBlobInvalidUtf8 { index: 0, blob: b } if b == blob),
+                matches!(
+                    err,
+                    MmapIndexError::MetaBlobInvalidUtf8 { index: 0, blob: b }
+                        | MmapIndexError::MetaExtBlobInvalidUtf8 { index: 0, blob: b }
+                        if b == blob
+                ),
                 "{version} {blob}: {err:?}"
             );
             let message = verify_error(&damaged);
             assert!(
-                message.contains(&format!("meta ext {blob} blob contains invalid UTF-8")),
+                message.contains(&err.to_string()),
                 "{version} {blob}: {message}"
             );
         }
@@ -776,7 +775,8 @@ fn blames(error: &MmapIndexError, name: &str) -> bool {
         }
         MmapIndexError::MetaCountMismatch { .. } => name == "turbo_static_meta.bin",
         MmapIndexError::MetaExtCountMismatch { .. } => name == "turbo_static_meta_ext.bin",
-        MmapIndexError::MetaExtBlobOutOfBounds { blob, .. } => {
+        MmapIndexError::MetaBlobOutOfBounds { blob, .. }
+        | MmapIndexError::MetaExtBlobOutOfBounds { blob, .. } => {
             name == format!("turbo_static_{blob}.bin")
         }
         _ => false,

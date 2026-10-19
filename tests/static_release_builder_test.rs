@@ -109,10 +109,10 @@ fn release_builder_writes_v3_artifacts_loadable_by_mmap_index() {
     }
 
     // text / title / corpus_type match v2 semantics.
-    assert_eq!(index.text(0), "第一条文本");
-    assert_eq!(index.text(1), "第二条文本");
-    assert_eq!(index.title(0), Some("宪法总纲"));
-    assert_eq!(index.title(1), Some("合同法则"));
+    assert_eq!(index.text(0).unwrap(), "第一条文本");
+    assert_eq!(index.text(1).unwrap(), "第二条文本");
+    assert_eq!(index.title(0).unwrap(), Some("宪法总纲"));
+    assert_eq!(index.title(1).unwrap(), Some("合同法则"));
 
     // Original string doc_id round-trips per record.
     assert_eq!(index.original_doc_id(0).unwrap(), Some("文档-1"));

@@ -131,11 +131,11 @@ fn static_index_builder_generates_missing_embeddings_and_writes_loadable_artifac
     assert_eq!(index.record(1).doc_id(), index.meta(1).doc_id);
     assert_eq!(index.meta(0).corpus_type, 0);
     assert_eq!(index.meta(1).corpus_type, 2);
-    assert_eq!(index.text(0), "alpha body");
-    assert_eq!(index.text(1), "beta body");
+    assert_eq!(index.text(0).unwrap(), "alpha body");
+    assert_eq!(index.text(1).unwrap(), "beta body");
     // Chunk 1001 carried metadata["title"]; chunk 1002 had none.
-    assert_eq!(index.title(0), Some("民法典"));
-    assert_eq!(index.title(1), None);
+    assert_eq!(index.title(0).unwrap(), Some("民法典"));
+    assert_eq!(index.title(1).unwrap(), None);
     assert_eq!(index.meta(0).title_len as usize, "民法典".len());
     assert_eq!(index.meta(1).title_len, 0);
 }

@@ -89,8 +89,7 @@ fn meta_record_text_range_returns_correct_slice() {
         title_len: 0,
     };
     let blob = b"__________hello__extra";
-    let text = record.text_from_blob(blob);
-    assert_eq!(text, "hello");
+    assert_eq!(record.text_from_blob(blob), Ok("hello"));
 }
 
 #[test]
@@ -105,7 +104,7 @@ fn meta_record_title_range_returns_correct_slice() {
         title_len: 9,
     };
     let blob = "___民法典___".as_bytes();
-    assert_eq!(record.title_from_blob(blob), Some("民法典"));
+    assert_eq!(record.title_from_blob(blob), Ok(Some("民法典")));
 }
 
 #[test]
@@ -119,5 +118,20 @@ fn meta_record_title_is_none_when_len_zero() {
         title_offset: 0,
         title_len: 0,
     };
-    assert_eq!(record.title_from_blob(b"whatever"), None);
+    assert_eq!(record.title_from_blob(b"whatever"), Ok(None));
+}
+
+#[test]
+fn meta_record_reports_invalid_utf8_instead_of_panicking() {
+    let record = MetaRecord {
+        doc_id: 5,
+        corpus_type: 0,
+        _pad: [0; 7],
+        text_offset: 0,
+        text_len: 2,
+        title_offset: 1,
+        title_len: 1,
+    };
+    assert!(record.text_from_blob(&[b'a', 0xFF]).is_err());
+    assert!(record.title_from_blob(&[b'a', 0xC3]).is_err());
 }

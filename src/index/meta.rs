@@ -1,3 +1,5 @@
+use std::str::Utf8Error;
+
 pub const META_RECORD_SIZE: usize = 40;
 
 pub type CorpusTypeId = u8;
@@ -23,19 +25,22 @@ const _: () = assert!(
         && std::mem::align_of::<MetaRecord>() == 8
 );
 
+// As for `MetaExtRecord`, the accessors index the blob directly because
+// `MmapIndex::load` has checked that every record's ranges lie inside it, and
+// UTF-8 is checked on read so that a load doesn't read the whole text blob.
 impl MetaRecord {
-    pub fn text_from_blob<'a>(&self, blob: &'a [u8]) -> &'a str {
+    pub fn text_from_blob<'a>(&self, blob: &'a [u8]) -> Result<&'a str, Utf8Error> {
         let start = self.text_offset as usize;
         let end = start + self.text_len as usize;
-        std::str::from_utf8(&blob[start..end]).expect("text blob contains invalid UTF-8")
+        std::str::from_utf8(&blob[start..end])
     }
 
-    pub fn title_from_blob<'a>(&self, blob: &'a [u8]) -> Option<&'a str> {
+    pub fn title_from_blob<'a>(&self, blob: &'a [u8]) -> Result<Option<&'a str>, Utf8Error> {
         if self.title_len == 0 {
-            return None;
+            return Ok(None);
         }
         let start = self.title_offset as usize;
         let end = start + self.title_len as usize;
-        Some(std::str::from_utf8(&blob[start..end]).expect("title blob contains invalid UTF-8"))
+        std::str::from_utf8(&blob[start..end]).map(Some)
     }
 }
