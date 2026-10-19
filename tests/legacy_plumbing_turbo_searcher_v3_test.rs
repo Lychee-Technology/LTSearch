@@ -3,6 +3,13 @@
 //! metadata-derived `citation` for v3 images, and those results must survive a
 //! metadata `apply_filters` pass. v2 images keep their legacy behavior (hashed
 //! u64 doc_id, `metadata: None`, title-only citation) — the last test guards it.
+//!
+//! Like every `legacy_plumbing_*` test, it uses hand-written centroid tables
+//! and identity projections wherever it needs assets with known values, so
+//! expected results can be worked out by hand. No release uses such assets,
+//! so nothing here is evidence about codec quality:
+//! `turbo_prod_statistics_test.rs` checks the production codec's bias and
+//! distortion, and `turbo_bench` (#168) its retrieval quality.
 
 use std::fs;
 use std::path::{Path, PathBuf};

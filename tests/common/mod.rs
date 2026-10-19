@@ -209,6 +209,11 @@ fn identity_projection(dim: usize) -> ProjectionMatrix {
 /// 写出一个内容寻址的静态 release fixture 到 `<root>/static/releases/<release_id>/`
 /// （与 [`static_release_dir_key`] 布局一致），供查询侧按指针装载 TurboQuant 静态
 /// 索引。调用方另需种 `static/_head` 指针指向同一 `release_id`。
+///
+/// 资产是手写的旧编码（legacy plumbing）资产：每维质心 `[-1, 0, 1, 2]` 与
+/// [`identity_projection`]，只为让 http、query_lambda、query_service 测试能手算
+/// 预期结果。没有任何 release 使用这类资产，所以这些测试不构成编码正确性的
+/// 证据；生产编码的偏差与失真见 `turbo_prod_statistics_test.rs`。
 pub fn write_static_release_fixture(root: &Path, release_id: &str, docs: &[StaticFixtureDoc<'_>]) {
     let static_dir = root.join(static_release_dir_key(release_id));
     fs::create_dir_all(&static_dir).unwrap();
