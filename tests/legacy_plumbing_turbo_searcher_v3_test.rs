@@ -376,9 +376,9 @@ fn v3_searcher_falls_back_to_none_on_unparseable_metadata() {
     assert_eq!(citation.url, None);
 }
 
-/// Overwrites the whole `turbo_static_{blob}.bin` sidecar with bytes that
-/// aren't UTF-8, keeping its length, so `MmapIndex::load` still accepts it.
-fn corrupt_sidecar_to_invalid_utf8(dir: &Path, blob: &str) {
+/// Overwrites the whole `turbo_static_{blob}.bin` blob with bytes that aren't
+/// UTF-8, keeping its length, so `MmapIndex::load` still accepts it.
+fn corrupt_blob_to_invalid_utf8(dir: &Path, blob: &str) {
     let path = dir.join(format!("turbo_static_{blob}.bin"));
     let len = fs::metadata(&path).unwrap().len() as usize;
     fs::write(&path, vec![0xFF; len]).unwrap();
@@ -400,7 +400,7 @@ fn gamma_doc() -> Doc {
 fn v3_searcher_fails_the_request_on_a_doc_id_that_is_not_utf8() {
     let dir = temp_dir("docid-utf8");
     write_index(&dir, &[gamma_doc()]);
-    corrupt_sidecar_to_invalid_utf8(&dir, "docid");
+    corrupt_blob_to_invalid_utf8(&dir, "docid");
 
     let searcher = load_searcher(&dir);
     let err = searcher
@@ -421,7 +421,7 @@ fn v3_searcher_fails_the_request_on_a_doc_id_that_is_not_utf8() {
 fn v3_searcher_drops_metadata_that_is_not_utf8() {
     let dir = temp_dir("meta-json-utf8");
     write_index(&dir, &[gamma_doc()]);
-    corrupt_sidecar_to_invalid_utf8(&dir, "meta_json");
+    corrupt_blob_to_invalid_utf8(&dir, "meta_json");
 
     let searcher = load_searcher(&dir);
     let results = searcher
@@ -444,6 +444,61 @@ fn v3_searcher_drops_metadata_that_is_not_utf8() {
         .as_ref()
         .expect("title-only citation must survive the metadata fallback");
     assert_eq!(citation.title.as_deref(), Some("损坏条目"));
+}
+
+#[test]
+fn v3_searcher_fails_the_request_on_text_that_is_not_utf8() {
+    let dir = temp_dir("text-utf8");
+    write_index(&dir, &[gamma_doc()]);
+    corrupt_blob_to_invalid_utf8(&dir, "text");
+
+    let searcher = load_searcher(&dir);
+    let err = searcher
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            10,
+        )
+        .expect_err("a hit whose text can't be read must fail the request, not panic");
+
+    let SearchError::Execution { message } = err else {
+        panic!("expected an execution error, got {err:?}");
+    };
+    assert!(message.contains("text"), "{message}");
+}
+
+/// A v2 hit's only citation is the title-only one, so an unreadable title
+/// leaves it without a citation. The hit itself is still returned.
+#[test]
+fn v2_searcher_drops_a_title_that_is_not_utf8() {
+    let dir = temp_dir("title-utf8");
+    write_index(
+        &dir,
+        &[Doc {
+            doc_id: 42,
+            doc_id_str: "unused-in-v2",
+            corpus_type: 0,
+            text: "民法典正文",
+            title: Some("民法典"),
+            metadata_json: None,
+            embedding: padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+        }],
+    );
+    corrupt_blob_to_invalid_utf8(&dir, "title");
+
+    let searcher = load_searcher(&dir);
+    let results = searcher
+        .search(
+            &stub_manifest(),
+            &padded_embedding(&[1.2, -1.4, 0.3, 0.9]),
+            10,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].doc_id, "42");
+    assert_eq!(results[0].text, "民法典正文");
+    assert_eq!(results[0].citation, None);
 }
 
 #[test]

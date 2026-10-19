@@ -147,11 +147,11 @@ fn mmap_index_reads_metadata_and_text() {
 
     assert_eq!(index.meta(0).doc_id, 10);
     assert_eq!(index.meta(0).corpus_type, 0);
-    assert_eq!(index.text(0), "legal doc");
+    assert_eq!(index.text(0).unwrap(), "legal doc");
 
     assert_eq!(index.meta(1).doc_id, 20);
     assert_eq!(index.meta(1).corpus_type, 2);
-    assert_eq!(index.text(1), "rfc spec");
+    assert_eq!(index.text(1).unwrap(), "rfc spec");
 }
 
 #[test]
@@ -215,6 +215,126 @@ fn mmap_index_rejects_mismatched_meta_count() {
 
     let err = MmapIndex::load(&dir).unwrap_err();
     assert!(err.to_string().contains("record count mismatch"));
+}
+
+/// Reads meta record `index` off disk, applies `mutate`, and writes it back.
+fn patch_meta_record(dir: &Path, index: usize, mutate: impl FnOnce(&mut MetaRecord)) {
+    let path = dir.join("turbo_static_meta.bin");
+    let mut data = fs::read(&path).unwrap();
+    let offset = index * META_RECORD_SIZE;
+    let mut record: MetaRecord =
+        unsafe { std::ptr::read_unaligned(data[offset..].as_ptr() as *const MetaRecord) };
+    mutate(&mut record);
+    let record_bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(&record as *const MetaRecord as *const u8, META_RECORD_SIZE)
+    };
+    data[offset..offset + META_RECORD_SIZE].copy_from_slice(record_bytes);
+    fs::write(&path, &data).unwrap();
+}
+
+/// A two-record v2 image whose texts are "hello" and "world" and whose first
+/// record has the title "民法典"; the second has none.
+fn write_titled_test_index(dir: &Path) {
+    write_test_index(
+        dir,
+        512,
+        &[(1, 0.0), (2, 0.0)],
+        &[0, 0],
+        &["hello", "world"],
+    );
+    fs::write(dir.join("turbo_static_title.bin"), "民法典").unwrap();
+    patch_meta_record(dir, 0, |meta| meta.title_len = "民法典".len() as u32);
+    patch_meta_record(dir, 1, |meta| meta.title_offset = "民法典".len() as u64);
+}
+
+fn assert_out_of_bounds(dir: &Path, index: u64, blob: &str) {
+    let err = MmapIndex::load(dir).unwrap_err();
+    assert!(
+        matches!(err, MmapIndexError::MetaBlobOutOfBounds { index: i, blob: b } if i == index && b == blob),
+        "expected MetaBlobOutOfBounds {{ index: {index}, blob: {blob:?} }}, got: {err:?}"
+    );
+}
+
+#[test]
+fn mmap_index_reads_titles() {
+    let dir = temp_dir("titles");
+    write_titled_test_index(&dir);
+
+    let index = MmapIndex::load(&dir).unwrap();
+    assert_eq!(index.title(0).unwrap(), Some("民法典"));
+    assert_eq!(index.title(1).unwrap(), None);
+}
+
+// The text and title ranges are checked at load, so a blob cut short is
+// refused there rather than panicking on the query whose hit reads it (#175).
+#[test]
+fn mmap_index_rejects_a_text_or_title_blob_cut_short() {
+    for (blob, expected_record) in [("text", 1), ("title", 0)] {
+        let dir = temp_dir(&format!("{blob}-cut-short"));
+        write_titled_test_index(&dir);
+        let path = dir.join(format!("turbo_static_{blob}.bin"));
+        let len = fs::metadata(&path).unwrap().len();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(len - 1)
+            .unwrap();
+
+        assert_out_of_bounds(&dir, expected_record, blob);
+    }
+}
+
+#[test]
+fn mmap_index_rejects_a_text_or_title_range_past_its_blob() {
+    fn assert_rejected(case: &str, blob: &str, mutate: impl FnOnce(&mut MetaRecord)) {
+        let dir = temp_dir(&format!("range-{case}"));
+        write_titled_test_index(&dir);
+        patch_meta_record(&dir, 0, mutate);
+
+        assert_out_of_bounds(&dir, 0, blob);
+    }
+
+    // The text blob is "helloworld" (10 bytes), the title blob "民法典" (9).
+    assert_rejected("text-len", "text", |meta| meta.text_len = 11);
+    assert_rejected("text-huge-offset", "text", |meta| {
+        meta.text_offset = u64::MAX - 3
+    });
+    assert_rejected("title-offset", "title", |meta| meta.title_offset += 1);
+    // A record without a title still has its offset checked.
+    assert_rejected("untitled-offset", "title", |meta| {
+        meta.title_len = 0;
+        meta.title_offset = 10;
+    });
+}
+
+// As for the sidecars, `load` leaves UTF-8 to each read: bytes that aren't
+// UTF-8 load, and reading them returns an error instead of panicking.
+#[test]
+fn mmap_index_reports_invalid_utf8_when_a_text_or_title_is_read() {
+    for blob in ["text", "title"] {
+        let dir = temp_dir(&format!("{blob}-utf8"));
+        write_titled_test_index(&dir);
+        // Record 0's text is "hello", at the start of the text blob; its
+        // title is the whole title blob.
+        let path = dir.join(format!("turbo_static_{blob}.bin"));
+        let mut data = fs::read(&path).unwrap();
+        data[0] = 0xFF;
+        fs::write(&path, &data).unwrap();
+        let index = MmapIndex::load(&dir).unwrap();
+
+        let err = match blob {
+            "text" => index.text(0).map(|_| ()),
+            _ => index.title(0).map(|_| ()),
+        }
+        .unwrap_err();
+        assert!(
+            matches!(err, MmapIndexError::MetaBlobInvalidUtf8 { index: 0, blob: b } if b == blob),
+            "expected MetaBlobInvalidUtf8 {{ index: 0, blob: {blob:?} }}, got: {err:?}"
+        );
+        assert_eq!(index.text(1).unwrap(), "world", "record 1 still reads");
+        assert_eq!(index.check_utf8().unwrap_err().to_string(), err.to_string());
+    }
 }
 
 #[test]

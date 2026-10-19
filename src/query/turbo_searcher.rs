@@ -93,7 +93,15 @@ impl StaticRetriever for TurboQuantSearcher {
             .map(|candidate| {
                 let corpus_type =
                     CorpusType::from_id(self.index.meta(candidate.record_index).corpus_type);
-                let text = self.index.text(candidate.record_index).to_string();
+                // The text is what the hit returns, so bytes that aren't
+                // UTF-8 fail the request rather than return a wrong chunk.
+                let text = self
+                    .index
+                    .text(candidate.record_index)
+                    .map_err(|source| SearchError::Execution {
+                        message: format!("failed to read static index text: {source}"),
+                    })?
+                    .to_string();
 
                 // v3 and v4 images carry a doc_id/metadata sidecar; v2 images
                 // do not, so v2 keeps its legacy behavior verbatim (hashed u64
@@ -132,20 +140,29 @@ impl StaticRetriever for TurboQuantSearcher {
                 // back to the title-only citation shared with v2. A title makes
                 // the chunk citable: ContextBuilder reads `citation.title` to
                 // render `[法规 #1] <title>`. Without either, `citation` stays
-                // None and the bare label is rendered.
+                // None and the bare label is rendered. The title is optional,
+                // like metadata, so bytes that aren't UTF-8 are dropped.
                 let citation = metadata
                     .as_ref()
                     .and_then(Citation::from_metadata)
                     .or_else(|| {
-                        self.index
-                            .title(candidate.record_index)
-                            .map(|title| Citation {
-                                resource_id: doc_id.clone(),
-                                source_type: corpus_type_label(Some(&corpus_type)).to_string(),
-                                source_ref: doc_id.clone(),
-                                title: Some(title.to_string()),
-                                url: None,
-                            })
+                        let title = match self.index.title(candidate.record_index) {
+                            Ok(title) => title?,
+                            Err(error) => {
+                                eprintln!(
+                                    "warning: turbo static doc {doc_id} has an unreadable \
+                                     title, falling back to citation: None ({error})"
+                                );
+                                return None;
+                            }
+                        };
+                        Some(Citation {
+                            resource_id: doc_id.clone(),
+                            source_type: corpus_type_label(Some(&corpus_type)).to_string(),
+                            source_ref: doc_id.clone(),
+                            title: Some(title.to_string()),
+                            url: None,
+                        })
                     });
 
                 Ok(SearchResult {
