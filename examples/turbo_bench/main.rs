@@ -17,6 +17,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
+use dataset::Dataset;
 use gate::{Baseline, Tolerances, BASELINE_SCHEMA_VERSION};
 use report::{Environment, Report, REPORT_SCHEMA_VERSION};
 use run::{Degrade, RunOptions};
@@ -27,7 +28,10 @@ usage:
                   [--baseline PATH] [--degrade drop-qjl] [--quality-only]
   turbo_bench gate --report PATH --baseline PATH
   turbo_bench baseline --report PATH --out PATH
-                       [--performance-fixtures synthetic-agm-v1-n10000]";
+                       [--performance-fixtures synthetic-agm-v1-n10000]
+
+`run` measures a synthetic fixture of each size in --sizes, with --queries
+queries, and then every committed real-embedding fixture as it is.";
 
 const DEFAULT_OUT: &str = "target/turbo-bench/report.json";
 const DEFAULT_PERFORMANCE_FIXTURES: &str = "synthetic-agm-v1-n10000";
@@ -96,15 +100,24 @@ fn run_command(args: &[String]) -> Result<bool, String> {
         eprintln!("turbo_bench: warning: a dev build; performance numbers are meaningless");
     }
     let work_dir = tempfile::tempdir().map_err(|error| format!("creating a work dir: {error}"))?;
-    let mut fixtures = Vec::with_capacity(sizes.len());
-    for &size in &sizes {
-        let dataset = dataset::synthetic(size, queries);
-        eprintln!("turbo_bench: {} ({queries} queries)", dataset.name);
+    let mut fixtures = Vec::with_capacity(sizes.len() + dataset::COMMITTED.len());
+    let mut run = |dataset: Dataset| -> Result<(), String> {
+        eprintln!(
+            "turbo_bench: {} ({} queries)",
+            dataset.name,
+            dataset.queries.len()
+        );
         let dir = work_dir.path().join(&dataset.name);
         fs::create_dir(&dir).map_err(|error| format!("creating {}: {error}", dir.display()))?;
         fixtures.push(run::run_fixture(&dataset, &options, &dir)?);
         // The releases of a large fixture take disk; drop them before the next.
-        fs::remove_dir_all(&dir).map_err(|error| format!("removing {}: {error}", dir.display()))?;
+        fs::remove_dir_all(&dir).map_err(|error| format!("removing {}: {error}", dir.display()))
+    };
+    for &size in &sizes {
+        run(dataset::synthetic(size, queries))?;
+    }
+    for name in dataset::COMMITTED {
+        run(dataset::committed(name)?)?;
     }
     let report = Report {
         schema_version: REPORT_SCHEMA_VERSION,

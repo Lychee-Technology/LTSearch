@@ -24,7 +24,7 @@ use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
 use ltsearch::storage::{ActiveManifest, ManifestHead};
 use rayon::prelude::*;
 
-use crate::dataset::{Dataset, Vector, DIM, GENERATOR};
+use crate::dataset::{Dataset, Vector, DIM};
 use crate::metrics::{mean, ndcg_at, percentile, recall_at, ScoreError};
 use crate::report::{
     Build, DatasetInfo, Disk, FixtureReport, Latency, Performance, Quality, SystemReport, EXACT,
@@ -77,6 +77,7 @@ pub fn run_fixture(
     work_dir: &Path,
 ) -> Result<FixtureReport, String> {
     let names: Vec<String> = (0..dataset.docs.len()).map(doc_name).collect();
+    // Fixtures hold vectors only, so every release gets placeholder text.
     let chunks: Vec<StaticChunk> = names
         .iter()
         .enumerate()
@@ -201,7 +202,7 @@ pub fn run_fixture(
     Ok(FixtureReport {
         name: dataset.name.clone(),
         dataset: DatasetInfo {
-            generator: GENERATOR.into(),
+            generator: dataset.generator.clone(),
             docs: dataset.docs.len(),
             queries: dataset.queries.len(),
             dim: DIM,
@@ -233,7 +234,7 @@ impl Release {
         names: &[String],
     ) -> Result<Self, String> {
         let profile = EmbeddingProfile {
-            model_id: format!("synthetic/{GENERATOR}"),
+            model_id: dataset.model_id.clone(),
             dim: DIM as u32,
         };
         let source = ReleaseSource {

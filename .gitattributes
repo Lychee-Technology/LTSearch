@@ -1,0 +1,4 @@
+# turbo_bench's committed real-embedding fixtures (#177): raw f32 vectors, and
+# passages written by fixture_gen/uscode_passages.py, which PR diffs collapse.
+examples/turbo_bench/fixtures/*/*.f32 binary
+examples/turbo_bench/fixtures/*/docs.jsonl linguist-generated

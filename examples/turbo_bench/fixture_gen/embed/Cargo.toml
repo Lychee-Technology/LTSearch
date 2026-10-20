@@ -1,0 +1,19 @@
+[package]
+name = "turbo-bench-embed"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: LTSearch never builds this crate. It links LTEmbed, which
+# builds only on aarch64 Linux with STATIC_LLAMA_DIR set, and it needs nothing
+# else, so building it in an arm64 container doesn't compile Lance.
+[workspace]
+
+[dependencies]
+# The same rev as LTSearch's own `ltembed` dependency; generate.sh refuses to
+# run if the two differ.
+ltembed = { git = "https://github.com/Lychee-Technology/LTEmbed", rev = "0390d9c0c27f9c025fe9df52b50d516d7a4ec063" }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = 3

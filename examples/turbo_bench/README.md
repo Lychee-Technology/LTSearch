@@ -17,12 +17,13 @@ ranks differently from what the harness measured.
 ## Running it
 
 ```sh
-# What CI's turbo-bench job runs: N = 1k and 10k, gated against the baseline.
-# On another machine type its performance gate can fail (see Gates).
+# What CI's turbo-bench job runs: synthetic N = 1k and 10k and the committed
+# real-embedding fixture, gated against the baseline. On another machine type
+# its performance gate can fail (see Gates).
 cargo run --release --example turbo_bench -- run --sizes 1000,10000 --queries 200 \
   --baseline examples/turbo_bench/baseline.json
 
-# N = 100k as well. CI doesn't run it (#178).
+# Synthetic N = 100k as well. CI doesn't run it (#178).
 cargo run --release --example turbo_bench -- run --sizes 1000,10000,100000 --queries 200
 
 # The quality gate alone. Quality doesn't depend on the build or machine, so a
@@ -35,6 +36,9 @@ cargo run --example turbo_bench -- run --quality-only \
 CARGO_PROFILE_RELEASE_OPT_LEVEL=3 CARGO_TARGET_DIR=target/opt3 \
   cargo run --release --example turbo_bench -- run --sizes 1000,10000,100000
 ```
+
+`--sizes` and `--queries` shape the synthetic fixtures. Every run also
+measures each committed fixture (see Dataset) as it is.
 
 The report goes to `target/turbo-bench/report.json` (`--out` to change it),
 and a Markdown table of it to stdout. The exit status is 1 if the gate fails and
@@ -60,8 +64,9 @@ existing report again.
   `StaticReleaseBuilder` run, which encodes on one thread. The other two are
   encode only, on up to 10k docs, single-threaded and on the rayon pool.
 - Record bytes per vector include the record file's header. Sidecars, which
-  hold the doc ids, text and metadata, are listed per file. Their sizes reflect
-  the fixture's short synthetic text, not a real corpus.
+  hold the doc ids, text and metadata, are listed per file. Fixtures hold
+  vectors only, so every release gets short placeholder text, and sidecar
+  sizes don't reflect a real corpus.
 - The environment block records the git SHA, build profile and opt-level,
   rayon thread count, CPU, architecture and OS. `--degrade` runs are marked as
   such.
@@ -84,8 +89,9 @@ existing report again.
   alone with `--quality-only`. The gate stays on deliberately: if CI's runner
   hardware changes, a failure asking for a new baseline is better than a gate
   that quietly stops checking.
-- Each fixture is pinned by its dataset digest. A changed generator fails the
-  gate instead of quietly moving the numbers.
+- Each fixture is pinned by its dataset digest. A changed generator or a
+  regenerated committed fixture fails the gate instead of quietly moving the
+  numbers.
 
 To change the baseline, take the report from the `turbo-bench-report` artifact
 of the PR's CI run, so the ratios come from the CI machine type, and then run:
@@ -100,19 +106,29 @@ degraded report. The PR that changes the baseline has to say why the numbers
 moved.
 
 `--degrade drop-qjl` scores v4 with its MSE term alone (`norm · mse_term`), to
-show that the gate catches a broken estimator. On the synthetic fixtures this
-doesn't hurt ranking; it ranks slightly better. It does bias the scores
-downward, so only the RMSE gate catches it.
+show that the gate catches a broken estimator. On the synthetic fixtures and
+on `ltembed-uscode-v1` this doesn't hurt ranking; it ranks slightly better
+(#180). It does bias the scores downward, so only the RMSE gate catches it.
 
 ## Dataset
 
-The fixtures are synthetic (#168, decision point 1, option b). They are unit
-vectors from an anisotropic Gaussian mixture, generated from a fixed seed at
-any N; `dataset.rs` documents the generator. The generation is bit-for-bit
-reproducible across x86_64 and aarch64, so the committed digests hold on both.
-Smaller fixtures are a prefix of larger ones.
+Every fixture is pinned by its digest in the baseline. There are two kinds:
 
-The synthetic data is the performance workload and a secondary quality signal.
-It can't show how the codecs rank real embeddings. A committed real-embedding
-fixture, which is what #169's v4-against-v3 decision needs, waits on a corpus
-and license decision (#177).
+- **Synthetic** (#168, decision point 1, option b): unit vectors from an
+  anisotropic Gaussian mixture, generated from a fixed seed at any N;
+  `dataset.rs` documents the generator. The generation is bit-for-bit
+  reproducible across x86_64 and aarch64, so the committed digests hold on
+  both. Smaller fixtures are a prefix of larger ones. They are the
+  performance workload and a secondary quality signal.
+- **Committed real embeddings** (#177), under `fixtures/`: LTEmbed
+  embeddings of a real corpus and of queries written for it, generated once.
+  How a codec ranks depends on the vectors' neighbourhood structure, which
+  the synthetic generator only imitates, so these are what shows how the
+  codecs rank production-like embeddings. `fixtures/ltembed-uscode-v1` is
+  1,879 US Code statute passages and 200 questions. Its README gives the
+  source, licence, model, LTEmbed revision and the commands that regenerate
+  it.
+
+A regenerated committed fixture, for example from a new LTEmbed revision, is
+a new fixture: it gets a new directory name, an entry in `COMMITTED` in
+`dataset.rs`, and baseline numbers in the same PR.
