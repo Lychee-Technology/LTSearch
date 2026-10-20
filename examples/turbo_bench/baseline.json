@@ -16,6 +16,22 @@
     "os": "linux"
   },
   "fixtures": {
+    "ltembed-uscode-v1": {
+      "dataset_digest": "9b4dc72073e42b78022391fbddf06079c73c73574ecc8f2bf4d6956df2354d7b",
+      "quality": {
+        "legacy_v3": {
+          "recall_at_10": 0.008000000000000002,
+          "ndcg_at_10": 0.3924132520337686,
+          "score_rmse": 87.03480036114452
+        },
+        "prod_v4": {
+          "recall_at_10": 0.8355000000000011,
+          "ndcg_at_10": 0.9944140385962156,
+          "score_rmse": 0.019016009028332816
+        }
+      },
+      "scan_ratio_to_exact": {}
+    },
     "synthetic-agm-v1-n1000": {
       "dataset_digest": "07b0e3b2dfcc8a38ebad6267020924691fcec36865022ce6c5842fb05e3b64a3",
       "quality": {

@@ -1,0 +1,27 @@
+{
+  "docs": 1879,
+  "queries": 200,
+  "dim": 512,
+  "digest": "9b4dc72073e42b78022391fbddf06079c73c73574ecc8f2bf4d6956df2354d7b",
+  "model_id": "jinaai/jina-embeddings-v5-text-nano-retrieval",
+  "generated_with": {
+    "ltembed_rev": "0390d9c0c27f9c025fe9df52b50d516d7a4ec063",
+    "engine": "EngineConfig::default() (Matryoshka truncation to 512 dims, then L2 normalization), one llama.cpp thread per engine; docs.jsonl embedded as Document, queries.jsonl as Query",
+    "gguf": {
+      "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval/resolve/ac5d898c8d382b17167c33e5c8af644a3519b47d/v5-nano-retrieval-Q5_K_M.gguf",
+      "sha256": "46fbc0423862cb6a5d4ff776d885f349d2a87c36d821dd5630f9fa184c9b4b92"
+    },
+    "tokenizer": {
+      "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-nano-retrieval/resolve/ac5d898c8d382b17167c33e5c8af644a3519b47d/tokenizer.json",
+      "sha256": "98d4a1d32152d6cedf85b5e88f3b205106dca1fe72aaab34e0ac13c238421069"
+    },
+    "static_llama_cpp": {
+      "url": "https://github.com/Lychee-Technology/static-llama-cpp-rs-builder/releases/download/v0.1.151-1/static-llama-cpp-v0.1.151-1-aarch64-graviton2.tar.gz",
+      "sha256": "48f3aa293824086d667d3938b40be37390d31275af20fd20a88c3880bfee2b90"
+    },
+    "base_image": "public.ecr.aws/amazonlinux/amazonlinux:2023@sha256:590b8c9fdab65c7f5b8a2392739104ed6bc5055433ba8ff2bf0d2fa500db2ea3",
+    "rust_toolchain": "1.94.1",
+    "platform": "linux/arm64 container on an x86_64 host",
+    "date": "2026-10-20"
+  }
+}

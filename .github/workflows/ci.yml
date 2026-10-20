@@ -196,9 +196,10 @@ jobs:
       - run: bash scripts/e2e/run-static-release-flow.sh
 
   # TurboQuant quality and performance gates (#168). Exact f32, legacy v3 and v4
-  # at N = 1k/10k against the committed examples/turbo_bench/baseline.json, in
-  # the shipping release profile. Standalone, like local-e2e. The quality gate
-  # is tight because the fixture and codecs are deterministic; the performance
+  # on synthetic N = 1k/10k and the committed real-embedding fixture (#177)
+  # against the committed examples/turbo_bench/baseline.json, in the shipping
+  # release profile. Standalone, like local-e2e. The quality gate is tight
+  # because the fixtures and codecs are deterministic; the performance
   # gate compares each codec's scan time to the exact-f32 scan in the same run,
   # so the baseline's ratios must come from this runner type. The report is
   # uploaded even when the gate fails, which is how the baseline is refreshed.

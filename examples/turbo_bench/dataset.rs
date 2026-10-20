@@ -1,8 +1,9 @@
-//! The synthetic fixture: unit vectors drawn from an anisotropic Gaussian
-//! mixture, generated from a fixed seed at any size.
+//! The fixtures: synthetic ones generated from a seed at any size, and
+//! committed real embeddings.
 //!
-//! Each vector is `normalize(a·μ + b·c_k + Σ_r s_r·g_r·u_r + e·z/√d)`: a
-//! direction μ shared by every vector (real embeddings are not centered, so
+//! The synthetic fixture is unit vectors drawn from an anisotropic Gaussian
+//! mixture. Each vector is `normalize(a·μ + b·c_k + Σ_r s_r·g_r·u_r + e·z/√d)`:
+//! a direction μ shared by every vector (real embeddings are not centered, so
 //! unrelated texts still have a positive cosine), the center `c_k` of its
 //! cluster, a rank-32 component along fixed directions `u_r` with power-law
 //! weights `s_r` (the anisotropy), and isotropic noise `z`. Queries are drawn
@@ -10,17 +11,23 @@
 //! the same cluster have a cosine of about 0.6, and of different clusters
 //! about 0.15.
 //!
-//! This is a secondary quality signal and the performance workload, not a
-//! stand-in for a real corpus: whether v4 beats v3 on real embeddings is
-//! for a real-data fixture to show (#177).
+//! The synthetic fixture is the performance workload and a secondary quality
+//! signal, not a stand-in for a real corpus: how the codecs rank depends on
+//! the neighbourhood structure of the vectors. The committed fixtures under
+//! `fixtures/` are real LTEmbed embeddings (#177), loaded by [`committed`];
+//! each one's README says where its vectors came from.
 //!
-//! Every draw comes from [`StandardNormalStream`], which is bit-for-bit
-//! reproducible across x86_64 and aarch64, and every vector has its own
-//! stream, so the documents of a smaller fixture are a prefix of a larger
-//! one and generation parallelizes.
+//! Every synthetic draw comes from [`StandardNormalStream`], which is
+//! bit-for-bit reproducible across x86_64 and aarch64, and every vector has
+//! its own stream, so the documents of a smaller fixture are a prefix of a
+//! larger one and generation parallelizes.
+
+use std::fs;
+use std::path::Path;
 
 use ltsearch::index::StandardNormalStream;
 use rayon::prelude::*;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 pub const DIM: usize = 512;
@@ -28,7 +35,7 @@ pub const DIM: usize = 512;
 /// Names the generator's output. Bump it on any change to the vectors below;
 /// the committed baseline pins each fixture's digest, so a change that isn't
 /// bumped fails the gate rather than quietly moving the numbers.
-pub const GENERATOR: &str = "agm-v1";
+const GENERATOR: &str = "agm-v1";
 
 const SEED: u64 = 168;
 const CLUSTERS: usize = 64;
@@ -52,6 +59,12 @@ pub type Vector = [f32; DIM];
 
 pub struct Dataset {
     pub name: String,
+    /// What made the vectors, for the report: the synthetic generator's
+    /// version, or the committed fixture's name.
+    pub generator: String,
+    /// The embedding model behind the vectors, for the report and the
+    /// fixture's releases.
+    pub model_id: String,
     pub docs: Vec<Vector>,
     pub queries: Vec<Vector>,
     /// SHA-256 of the counts and every value, see [`digest`].
@@ -73,10 +86,107 @@ pub fn synthetic(docs: usize, queries: usize) -> Dataset {
     let digest = digest(&docs, &queries);
     Dataset {
         name: format!("synthetic-{GENERATOR}-n{}", docs.len()),
+        generator: GENERATOR.into(),
+        model_id: format!("synthetic/{GENERATOR}"),
         docs,
         queries,
         digest,
     }
+}
+
+/// The committed real-embedding fixtures, by directory under `fixtures/`.
+/// Every run includes them.
+pub const COMMITTED: [&str; 1] = ["ltembed-uscode-v1"];
+
+const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/turbo_bench/fixtures");
+/// The embedder writes unit vectors; a norm off by more than this means the
+/// file isn't what the manifest says.
+const NORM_TOLERANCE: f64 = 1e-3;
+
+/// What the harness reads from a committed fixture's `manifest.json`. The
+/// provenance the manifest also records is for readers.
+#[derive(Deserialize)]
+struct Manifest {
+    docs: usize,
+    queries: usize,
+    dim: usize,
+    model_id: String,
+    digest: String,
+}
+
+/// The committed fixture `fixtures/<name>`.
+pub fn committed(name: &str) -> Result<Dataset, String> {
+    load_committed(name, &Path::new(FIXTURES_DIR).join(name))
+}
+
+/// A fixture directory: `manifest.json`, and `docs.f32` and `queries.f32`,
+/// which hold 512-d vectors as little-endian f32, one after another. The
+/// vectors must be unit length and match the manifest's counts and digest.
+fn load_committed(name: &str, dir: &Path) -> Result<Dataset, String> {
+    let read = |file: &str| {
+        let path = dir.join(file);
+        fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))
+    };
+    let manifest: Manifest = serde_json::from_slice(&read("manifest.json")?)
+        .map_err(|error| format!("{}/manifest.json: {error}", dir.display()))?;
+    if manifest.dim != DIM {
+        return Err(format!(
+            "{}: {}-d vectors, the codecs take {DIM}",
+            dir.display(),
+            manifest.dim
+        ));
+    }
+    let vectors = |file: &str, count: usize| {
+        unit_vectors(&read(file)?, count)
+            .map_err(|error| format!("{}/{file}: {error}", dir.display()))
+    };
+    let docs = vectors("docs.f32", manifest.docs)?;
+    let queries = vectors("queries.f32", manifest.queries)?;
+    let digest = digest(&docs, &queries);
+    if digest != manifest.digest {
+        return Err(format!(
+            "{}: the vectors' digest {digest} isn't the manifest's {}",
+            dir.display(),
+            manifest.digest
+        ));
+    }
+    Ok(Dataset {
+        name: name.into(),
+        generator: name.into(),
+        model_id: manifest.model_id,
+        docs,
+        queries,
+        digest,
+    })
+}
+
+/// `count` unit vectors from little-endian f32 `bytes`.
+fn unit_vectors(bytes: &[u8], count: usize) -> Result<Vec<Vector>, String> {
+    if count.checked_mul(DIM * 4) != Some(bytes.len()) {
+        return Err(format!(
+            "{} bytes, expected {count} vectors of {DIM} f32",
+            bytes.len()
+        ));
+    }
+    bytes
+        .chunks_exact(DIM * 4)
+        .enumerate()
+        .map(|(i, chunk)| {
+            let mut vector = [0.0; DIM];
+            for (value, bytes) in vector.iter_mut().zip(chunk.chunks_exact(4)) {
+                *value = f32::from_le_bytes(bytes.try_into().expect("4 bytes"));
+            }
+            let norm = vector
+                .iter()
+                .map(|&v| f64::from(v) * f64::from(v))
+                .sum::<f64>()
+                .sqrt();
+            if norm.is_nan() || (norm - 1.0).abs() > NORM_TOLERANCE {
+                return Err(format!("vector {i} has norm {norm}, expected 1"));
+            }
+            Ok(vector)
+        })
+        .collect()
 }
 
 /// SHA-256 over the document and query counts (`u64` little-endian) and then
@@ -214,5 +324,89 @@ mod tests {
         let mut queries = dataset.queries.clone();
         queries[1][0] = -queries[1][0];
         assert_ne!(digest(&dataset.docs, &queries), dataset.digest);
+    }
+
+    #[test]
+    fn committed_fixtures_match_their_manifests() {
+        for name in COMMITTED {
+            let dataset = committed(name).unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(
+                (dataset.name.as_str(), dataset.generator.as_str()),
+                (name, name)
+            );
+            assert!(!dataset.docs.is_empty() && !dataset.queries.is_empty());
+        }
+    }
+
+    fn write_fixture(dir: &Path, docs: &[Vector], queries: &[Vector], digest: &str) {
+        let bytes = |vectors: &[Vector]| -> Vec<u8> {
+            vectors
+                .iter()
+                .flatten()
+                .flat_map(|value| value.to_le_bytes())
+                .collect()
+        };
+        fs::write(dir.join("docs.f32"), bytes(docs)).unwrap();
+        fs::write(dir.join("queries.f32"), bytes(queries)).unwrap();
+        let manifest = serde_json::json!({
+            "docs": docs.len(),
+            "queries": queries.len(),
+            "dim": DIM,
+            "model_id": "test/model",
+            "digest": digest,
+            "generated_with": {"anything": "the harness doesn't read"},
+        });
+        fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+    }
+
+    #[test]
+    fn a_committed_fixture_loads_as_written() {
+        let source = synthetic(5, 3);
+        let dir = tempfile::tempdir().unwrap();
+        write_fixture(dir.path(), &source.docs, &source.queries, &source.digest);
+        let loaded = load_committed("test", dir.path()).unwrap();
+        assert_eq!((loaded.docs, loaded.queries), (source.docs, source.queries));
+        assert_eq!(loaded.digest, source.digest);
+        assert_eq!(loaded.model_id, "test/model");
+    }
+
+    #[test]
+    fn a_committed_fixture_that_differs_from_its_manifest_is_refused() {
+        let source = synthetic(5, 3);
+        let dir = tempfile::tempdir().unwrap();
+        let load_error = |docs: &[Vector], digest: &str| {
+            write_fixture(dir.path(), docs, &source.queries, digest);
+            refusal(dir.path())
+        };
+
+        // A changed value.
+        let mut changed = source.docs.clone();
+        changed[2].swap(0, 1);
+        let error = load_error(&changed, &source.digest);
+        assert!(error.contains("digest"), "{error}");
+
+        // Not unit length, even with a digest that matches.
+        let scaled: Vec<Vector> = source.docs.iter().map(|v| v.map(|x| 2.0 * x)).collect();
+        let error = load_error(&scaled, &digest(&scaled, &source.queries));
+        assert!(error.contains("norm"), "{error}");
+
+        // A file that doesn't hold the manifest's count.
+        write_fixture(dir.path(), &source.docs, &source.queries, &source.digest);
+        let path = dir.path().join("queries.f32");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.truncate(bytes.len() - 4);
+        fs::write(&path, bytes).unwrap();
+        let error = refusal(dir.path());
+        assert!(
+            error.contains("queries.f32") && error.contains("bytes"),
+            "{error}"
+        );
+    }
+
+    fn refusal(dir: &Path) -> String {
+        match load_committed("test", dir) {
+            Ok(_) => panic!("loaded a fixture that differs from its manifest"),
+            Err(error) => error,
+        }
     }
 }

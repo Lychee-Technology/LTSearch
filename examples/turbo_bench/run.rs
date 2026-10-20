@@ -24,7 +24,7 @@ use ltsearch::query::{StaticRetriever, TurboQuantSearcher};
 use ltsearch::storage::{ActiveManifest, ManifestHead};
 use rayon::prelude::*;
 
-use crate::dataset::{Dataset, Vector, DIM, GENERATOR};
+use crate::dataset::{Dataset, Vector, DIM};
 use crate::metrics::{mean, ndcg_at, percentile, recall_at, ScoreError};
 use crate::report::{
     Build, DatasetInfo, Disk, FixtureReport, Latency, Performance, Quality, SystemReport, EXACT,
@@ -77,6 +77,7 @@ pub fn run_fixture(
     work_dir: &Path,
 ) -> Result<FixtureReport, String> {
     let names: Vec<String> = (0..dataset.docs.len()).map(doc_name).collect();
+    // Fixtures hold vectors only, so every release gets placeholder text.
     let chunks: Vec<StaticChunk> = names
         .iter()
         .enumerate()
@@ -201,7 +202,8 @@ pub fn run_fixture(
     Ok(FixtureReport {
         name: dataset.name.clone(),
         dataset: DatasetInfo {
-            generator: GENERATOR.into(),
+            generator: dataset.generator.clone(),
+            model_id: dataset.model_id.clone(),
             docs: dataset.docs.len(),
             queries: dataset.queries.len(),
             dim: DIM,
@@ -233,7 +235,7 @@ impl Release {
         names: &[String],
     ) -> Result<Self, String> {
         let profile = EmbeddingProfile {
-            model_id: format!("synthetic/{GENERATOR}"),
+            model_id: dataset.model_id.clone(),
             dim: DIM as u32,
         };
         let source = ReleaseSource {
@@ -647,7 +649,7 @@ mod tests {
     use super::*;
     use crate::dataset::synthetic;
     use crate::gate::{check, from_report, Tolerances};
-    use crate::report::{Environment, Report, REPORT_SCHEMA_VERSION};
+    use crate::report::{markdown, Environment, Report, REPORT_SCHEMA_VERSION};
 
     fn quality_only(degrade: Option<Degrade>) -> RunOptions {
         RunOptions {
@@ -684,6 +686,18 @@ mod tests {
         let prod = &fixture.systems[PROD].quality;
         assert!(prod.score_bias.abs() < 0.01, "{prod:?}");
         assert!(prod.recall_at_10 > 0.5, "{prod:?}");
+    }
+
+    #[test]
+    fn the_report_names_the_fixtures_embedding_model() {
+        let mut dataset = synthetic(100, 4);
+        dataset.model_id = "test/model".into();
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = run_fixture(&dataset, &quality_only(None), dir.path()).unwrap();
+        let report = report(fixture, None);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["fixtures"][0]["dataset"]["model_id"], "test/model");
+        assert!(markdown(&report).contains("`test/model`"));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-pub const REPORT_SCHEMA_VERSION: u32 = 1;
+pub const REPORT_SCHEMA_VERSION: u32 = 2;
 
 pub const EXACT: &str = "exact_f32";
 pub const LEGACY: &str = "legacy_v3";
@@ -51,6 +51,9 @@ pub struct FixtureReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetInfo {
     pub generator: String,
+    /// The embedding model behind the vectors; `synthetic/<generator>` for a
+    /// synthetic fixture.
+    pub model_id: String,
     pub docs: usize,
     pub queries: usize,
     pub dim: usize,
@@ -260,5 +263,11 @@ pub fn markdown(report: &Report) -> String {
             }
         }
     }
+    let models: Vec<String> = report
+        .fixtures
+        .iter()
+        .map(|fixture| format!("{} `{}`", fixture.name, fixture.dataset.model_id))
+        .collect();
+    out.push_str(&format!("\nEmbedding models: {}.\n", models.join("; ")));
     out
 }
