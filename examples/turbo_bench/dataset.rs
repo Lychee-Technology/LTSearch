@@ -62,7 +62,8 @@ pub struct Dataset {
     /// What made the vectors, for the report: the synthetic generator's
     /// version, or the committed fixture's name.
     pub generator: String,
-    /// The embedding model the fixture's releases record.
+    /// The embedding model behind the vectors, for the report and the
+    /// fixture's releases.
     pub model_id: String,
     pub docs: Vec<Vector>,
     pub queries: Vec<Vector>,

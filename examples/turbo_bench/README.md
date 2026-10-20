@@ -70,6 +70,9 @@ existing report again.
 - The environment block records the git SHA, build profile and opt-level,
   rayon thread count, CPU, architecture and OS. `--degrade` runs are marked as
   such.
+- Each fixture's `dataset` block records its generator, the embedding model
+  (`model_id`), its counts and dimension, and its digest. The Markdown
+  summary lists each fixture's model below the table.
 
 ## Gates
 

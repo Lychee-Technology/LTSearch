@@ -279,6 +279,7 @@ mod tests {
                 name: FIXTURE.into(),
                 dataset: DatasetInfo {
                     generator: "test".into(),
+                    model_id: "test/model".into(),
                     docs: 10,
                     queries: 2,
                     dim: 512,
