@@ -101,7 +101,7 @@ fn run_command(args: &[String]) -> Result<bool, String> {
     }
     let work_dir = tempfile::tempdir().map_err(|error| format!("creating a work dir: {error}"))?;
     let mut fixtures = Vec::with_capacity(sizes.len() + dataset::COMMITTED.len());
-    let mut run = |dataset: Dataset| -> Result<(), String> {
+    let mut measure = |dataset: Dataset| -> Result<(), String> {
         eprintln!(
             "turbo_bench: {} ({} queries)",
             dataset.name,
@@ -114,10 +114,10 @@ fn run_command(args: &[String]) -> Result<bool, String> {
         fs::remove_dir_all(&dir).map_err(|error| format!("removing {}: {error}", dir.display()))
     };
     for &size in &sizes {
-        run(dataset::synthetic(size, queries))?;
+        measure(dataset::synthetic(size, queries))?;
     }
     for name in dataset::COMMITTED {
-        run(dataset::committed(name)?)?;
+        measure(dataset::committed(name)?)?;
     }
     let report = Report {
         schema_version: REPORT_SCHEMA_VERSION,
